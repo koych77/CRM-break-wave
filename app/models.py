@@ -82,9 +82,18 @@ class Student(Base):
         """Get lesson time for specific day of week."""
         try:
             import json
-            times = json.loads(self.lesson_times or '{}')
-            return times.get(str(day_of_week), times.get('default', '18:00'))
-        except:
+            if not self.lesson_times:
+                return '18:00'
+            times = json.loads(self.lesson_times)
+            # Try to get time for specific day
+            day_str = str(day_of_week)
+            if day_str in times:
+                return times[day_str]
+            # Fallback to any available time
+            if times:
+                return list(times.values())[0]
+            return '18:00'
+        except Exception:
             return '18:00'
 
 
