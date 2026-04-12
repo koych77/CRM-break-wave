@@ -436,6 +436,32 @@ body {
     color: var(--text-secondary);
 }
 
+.list-item-coach {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-top: 4px;
+}
+
+.coach-info {
+    display: block;
+    padding: 12px;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text-secondary);
+    font-size: 14px;
+}
+
+.coach-name {
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.coach-username {
+    color: var(--text-muted);
+    font-size: 12px;
+}
+
 .list-item-meta {
     display: flex;
     gap: 12px;

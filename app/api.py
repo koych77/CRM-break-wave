@@ -324,24 +324,86 @@ async def api_sync(request: Request):
     }
 
 
+# === Coaches ===
+
+@app.post("/api/coaches")
+async def api_coaches(request: Request):
+    """Get all coaches (for admin) or current coach."""
+    body = await request.json()
+    user = verify_telegram_init_data(body.get("initData", ""))
+    if not user:
+        return JSONResponse({"error": "unauthorized"}, 403)
+    
+    user_id = user.get("id")
+    
+    async with async_session() as s:
+        # Check if admin
+        is_admin_user = False
+        if ADMIN_IDS and user_id in ADMIN_IDS:
+            is_admin_user = True
+        else:
+            admin_result = await s.execute(select(AdminUser).where(AdminUser.telegram_id == user_id))
+            if admin_result.scalar_one_or_none():
+                is_admin_user = True
+        
+        if is_admin_user:
+            # Admin sees all coaches
+            result = await s.execute(select(Coach).where(Coach.is_active == True).order_by(Coach.first_name))
+            coaches = result.scalars().all()
+        else:
+            # Regular user sees only themselves
+            result = await s.execute(select(Coach).where(Coach.telegram_id == user_id))
+            coach = result.scalar_one_or_none()
+            coaches = [coach] if coach else []
+        
+        return [{
+            "id": c.id,
+            "telegram_id": c.telegram_id,
+            "first_name": c.first_name,
+            "username": c.username,
+            "phone": c.phone,
+            "is_current": c.telegram_id == user_id
+        } for c in coaches]
+
+
 # === Students ===
 
 @app.post("/api/students")
 async def api_students(request: Request):
-    """Get all students for coach."""
+    """Get all students for coach (or all for admin)."""
     body = await request.json()
     coach = await get_current_coach(body.get("initData", ""))
     if not coach:
         return JSONResponse({"error": "unauthorized"}, 403)
     
+    # Check if admin
+    user = verify_telegram_init_data(body.get("initData", ""))
+    user_id = user.get("id") if user else None
+    is_admin_user = False
+    if ADMIN_IDS and user_id in ADMIN_IDS:
+        is_admin_user = True
+    else:
+        async with async_session() as s:
+            admin_result = await s.execute(select(AdminUser).where(AdminUser.telegram_id == user_id))
+            if admin_result.scalar_one_or_none():
+                is_admin_user = True
+    
     async with async_session() as s:
-        result = await s.execute(
-            select(Student).where(Student.coach_id == coach.id).order_by(Student.name)
-        )
+        if is_admin_user:
+            # Admin sees all students
+            result = await s.execute(
+                select(Student).order_by(Student.name)
+            )
+        else:
+            # Regular coach sees only their students
+            result = await s.execute(
+                select(Student).where(Student.coach_id == coach.id).order_by(Student.name)
+            )
         students = result.scalars().all()
     
     return [{
         "id": st.id,
+        "coach_id": st.coach_id,
         "name": st.name,
         "nickname": st.nickname,
         "phone": st.phone,
@@ -369,9 +431,17 @@ async def api_create_student(request: Request):
     
     data = body.get("student", {})
     
+    # Determine coach_id (admin can assign to any coach)
+    coach_id = data.get("coach_id", coach.id)
+    
+    # Verify coach exists
     async with async_session() as s:
+        target_coach = await s.get(Coach, coach_id)
+        if not target_coach:
+            return JSONResponse({"error": "coach_not_found"}, 400)
+        
         student = Student(
-            coach_id=coach.id,
+            coach_id=coach_id,
             name=data.get("name"),
             nickname=data.get("nickname") or None,
             phone=data.get("phone") or None,

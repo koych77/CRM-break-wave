@@ -65,6 +65,7 @@ let currentScreen = 'loading';
 let screenHistory = [];
 let initData = '';
 let currentCoach = null;
+let coaches = [];
 let students = [];
 let payments = [];
 let calendarData = {};
@@ -207,6 +208,63 @@ function showScreen(screen) {
     }
 }
 
+// === Coaches ===
+
+async function loadCoaches() {
+    try {
+        const res = await fetch(`${API}/api/coaches`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({initData})
+        });
+        coaches = await res.json();
+        return coaches;
+    } catch (e) {
+        console.error('Coaches load error:', e);
+        return [];
+    }
+}
+
+function renderCoachSelect() {
+    const select = document.getElementById('st-coach');
+    const display = document.getElementById('coach-display');
+    const container = document.getElementById('coach-select-container');
+    
+    if (!select || !display) return;
+    
+    if (coaches.length === 0) {
+        select.innerHTML = '<option value="">Нет тренеров</option>';
+        return;
+    }
+    
+    if (coaches.length === 1) {
+        // Only one coach - show as read-only info
+        const coach = coaches[0];
+        select.style.display = 'none';
+        display.style.display = 'block';
+        display.innerHTML = `
+            <span class="coach-name">${escapeHtml(coach.first_name || 'Без имени')}</span>
+            ${coach.username ? `<span class="coach-username">@${escapeHtml(coach.username)}</span>` : ''}
+        `;
+        select.value = coach.id;
+    } else {
+        // Multiple coaches - show select
+        select.style.display = 'block';
+        display.style.display = 'none';
+        select.innerHTML = coaches.map(c => {
+            const isCurrent = c.is_current ? ' (вы)' : '';
+            const username = c.username ? ` @${c.username}` : '';
+            return `<option value="${c.id}">${escapeHtml(c.first_name || 'Без имени')}${username}${isCurrent}</option>`;
+        }).join('');
+        
+        // Select current coach by default
+        const currentCoachId = coaches.find(c => c.is_current)?.id;
+        if (currentCoachId) {
+            select.value = currentCoachId;
+        }
+    }
+}
+
 // === Dashboard ===
 
 async function loadDashboard() {
@@ -292,6 +350,9 @@ function renderDashboard(data) {
 // === Students ===
 
 async function loadStudents() {
+    // Load coaches first (for displaying coach info)
+    await loadCoaches();
+    
     // Show cached data first
     const cached = DataCache.load(DataCache.STUDENTS_KEY);
     if (cached) {
@@ -354,6 +415,17 @@ function renderStudentsList(list) {
             }
         }
         
+        // Get coach info if available
+        let coachInfo = '';
+        if (s.coach_id && coaches.length > 1) {
+            const coach = coaches.find(c => c.id === s.coach_id);
+            if (coach) {
+                const coachName = escapeHtml(coach.first_name || 'Без имени');
+                const coachUsername = coach.username ? `@${escapeHtml(coach.username)}` : '';
+                coachInfo = `<div class="list-item-coach">👤 ${coachName} ${coachUsername}</div>`;
+            }
+        }
+        
         return `
             <div class="list-item" onclick="openStudentDetail(${s.id})">
                 <div class="list-item-header">
@@ -361,6 +433,7 @@ function renderStudentsList(list) {
                     ${statusBadge}
                 </div>
                 <div class="list-item-subtitle">${escapeHtml(s.nickname || '')}</div>
+                ${coachInfo}
                 <div class="list-item-meta">
                     <span>📍 ${escapeHtml(s.location || 'Зал Break Wave')}</span>
                     <span>🕐 ${days} ${s.lesson_time || ''}</span>
@@ -378,7 +451,7 @@ function filterStudents(query) {
     renderStudentsList(filtered);
 }
 
-function openAddStudent() {
+async function openAddStudent() {
     editingStudentId = null;
     document.getElementById('student-form-title').textContent = 'Новый ученик';
     document.getElementById('student-form').reset();
@@ -398,6 +471,10 @@ function openAddStudent() {
     
     const today = new Date().toISOString().split('T')[0];
     document.getElementById('st-sub-start').value = today;
+    
+    // Load coaches list
+    await loadCoaches();
+    renderCoachSelect();
     
     navigate('student-form');
 }
@@ -560,6 +637,10 @@ async function editStudent(id) {
 }
 
 async function saveStudent() {
+    // Get coach_id from select or use current coach
+    const coachSelect = document.getElementById('st-coach');
+    const coachId = coachSelect && coachSelect.value ? parseInt(coachSelect.value) : null;
+    
     const data = {
         name: document.getElementById('st-name').value,
         nickname: document.getElementById('st-nickname').value,
@@ -574,6 +655,7 @@ async function saveStudent() {
         subscription_start: document.getElementById('st-sub-start').value,
         subscription_end: document.getElementById('st-sub-end').value,
         notes: document.getElementById('st-notes').value,
+        coach_id: coachId,
     };
     
     try {
