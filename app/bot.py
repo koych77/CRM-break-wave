@@ -79,6 +79,7 @@ class PaymentForm(StatesGroup):
 @router.message(CommandStart())
 async def cmd_start(message: Message):
     user_id = message.from_user.id
+    logger.info(f"Start command from user: {user_id} ({message.from_user.first_name})")
     
     # Check if admin first
     if await is_admin(user_id):
@@ -95,7 +96,10 @@ async def cmd_start(message: Message):
     
     # Check if coach
     coach = await get_coach(user_id)
-    if not coach:
+    if coach:
+        logger.info(f"Coach found: {coach.first_name} (ID: {user_id})")
+    else:
+        logger.info(f"Coach not found for user: {user_id}")
         await message.answer(
             "👋 <b>Добро пожаловать в CRM Break Wave!</b>\n\n"
             "Эта система для тренеров школы.\n"
@@ -127,6 +131,19 @@ async def cmd_start(message: Message):
 
 @router.message(Command("coach"))
 async def cmd_coach_register(message: Message):
+    user_id = message.from_user.id
+    
+    # Check if already registered
+    existing = await get_coach(user_id)
+    if existing:
+        await message.answer(
+            "👋 <b>Вы уже зарегистрированы как тренер!</b>\n\n"
+            f"Тренер: {existing.first_name or 'Без имени'}\n"
+            f"ID: {existing.telegram_id}\n\n"
+            "Нажмите /start чтобы открыть CRM"
+        )
+        return
+    
     parts = message.text.split(maxsplit=1)
     if len(parts) < 2:
         await message.answer("Используй: /coach <секретный код>")
@@ -137,12 +154,13 @@ async def cmd_coach_register(message: Message):
         return
     
     registered = await register_coach(
-        message.from_user.id,
+        user_id,
         message.from_user.first_name,
         message.from_user.username
     )
     
     if registered:
+        logger.info(f"New coach registered: {user_id} ({message.from_user.first_name})")
         await message.answer(
             "✅ <b>Вы зарегистрированы как тренер!</b>\n\n"
             "Теперь вы можете использовать CRM систему.\n"
@@ -150,6 +168,39 @@ async def cmd_coach_register(message: Message):
         )
     else:
         await message.answer("👋 Вы уже зарегистрированы! Нажмите /start")
+
+
+@router.message(Command("me"))
+async def cmd_me(message: Message):
+    """Show user registration status."""
+    user_id = message.from_user.id
+    
+    # Check admin
+    if await is_admin(user_id):
+        await message.answer(
+            "👑 <b>Вы администратор</b>\n\n"
+            f"ID: {user_id}\n"
+            f"Имя: {message.from_user.first_name}\n"
+            f"Username: @{message.from_user.username or 'нет'}"
+        )
+        return
+    
+    # Check coach
+    coach = await get_coach(user_id)
+    if coach:
+        await message.answer(
+            "✅ <b>Вы зарегистрированы как тренер</b>\n\n"
+            f"ID: {coach.telegram_id}\n"
+            f"Имя: {coach.first_name or 'Не указано'}\n"
+            f"Username: @{coach.username or 'нет'}\n"
+            f"Дата регистрации: {coach.created_at.strftime('%d.%m.%Y') if coach.created_at else '—'}\n\n"
+            "Нажмите /start чтобы открыть CRM"
+        )
+    else:
+        await message.answer(
+            "❌ <b>Вы не зарегистрированы</b>\n\n"
+            "Для доступа используйте: /coach <код>"
+        )
 
 
 @router.message(Command("help"))
@@ -164,6 +215,7 @@ async def cmd_help(message: Message):
 
 <b>Команды:</b>
 /start — Главное меню
+/me — Мой статус
 /help — Эта справка
 
 Откройте Mini App для полного функционала."""
@@ -262,6 +314,7 @@ async def cb_check_payments(callback: CallbackQuery):
 @router.message(Command("coaches"))
 async def cmd_coaches(message: Message):
     if not await is_admin(message.from_user.id):
+        await message.answer("⛔ Только для администраторов")
         return
     
     async with async_session() as s:
@@ -272,9 +325,13 @@ async def cmd_coaches(message: Message):
         await message.answer("Нет зарегистрированных тренеров.")
         return
     
-    text = "<b>👥 Тренеры:</b>\n\n"
+    text = f"<b>👥 Зарегистрированные тренеры ({len(coaches)}):</b>\n\n"
     for c in coaches:
-        text += f"• {c.first_name or 'Без имени'} (@{c.username or 'нет'}) — ID: {c.telegram_id}\n"
+        reg_date = c.created_at.strftime('%d.%m.%Y') if c.created_at else '—'
+        text += f"• <b>{c.first_name or 'Без имени'}</b>\n"
+        text += f"  ID: <code>{c.telegram_id}</code>\n"
+        text += f"  @{c.username or 'нет username'}\n"
+        text += f"  Дата: {reg_date}\n\n"
     
     await message.answer(text, parse_mode="HTML")
 
