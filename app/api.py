@@ -229,6 +229,101 @@ async def api_dashboard(request: Request):
     }
 
 
+@app.post("/api/sync")
+async def api_sync(request: Request):
+    """Full sync - get all data for offline mode."""
+    body = await request.json()
+    coach = await get_current_coach(body.get("initData", ""))
+    if not coach:
+        return JSONResponse({"error": "unauthorized"}, 403)
+    
+    today = date.today()
+    month_start = today.replace(day=1)
+    
+    async with async_session() as s:
+        # Get all students
+        result = await s.execute(
+            select(Student).where(Student.coach_id == coach.id).order_by(Student.name)
+        )
+        students = [{
+            "id": st.id,
+            "name": st.name,
+            "nickname": st.nickname,
+            "phone": st.phone,
+            "parent_phone": st.parent_phone,
+            "age": st.age,
+            "location": st.location,
+            "lesson_days": st.lesson_days,
+            "lesson_time": st.lesson_time,
+            "lesson_price": st.lesson_price,
+            "lessons_count": st.lessons_count,
+            "subscription_start": st.subscription_start.isoformat() if st.subscription_start else None,
+            "subscription_end": st.subscription_end.isoformat() if st.subscription_end else None,
+            "notes": st.notes,
+            "is_active": st.is_active,
+        } for st in result.scalars().all()]
+        
+        # Get all payments
+        payments_result = await s.execute(
+            select(Payment, Student).join(Student).where(Payment.coach_id == coach.id).order_by(desc(Payment.created_at))
+        )
+        payments = [{
+            "id": p.id,
+            "student_id": p.student_id,
+            "student_name": st.name,
+            "amount": p.amount,
+            "lessons_count": p.lessons_count,
+            "status": p.status,
+            "period_start": p.period_start.isoformat() if p.period_start else None,
+            "period_end": p.period_end.isoformat() if p.period_end else None,
+            "paid_at": p.paid_at.isoformat() if p.paid_at else None,
+            "notes": p.notes,
+        } for p, st in payments_result.all()]
+        
+        # Get dashboard stats
+        students_count = len([s for s in students if s["is_active"]])
+        
+        # Overdue count
+        overdue_count = sum(1 for s in students if s["is_active"] and s["subscription_end"] and date.fromisoformat(s["subscription_end"]) < today)
+        
+        # Ending soon
+        ending_soon_count = sum(1 for s in students if s["is_active"] and s["subscription_end"] and 
+                               date.fromisoformat(s["subscription_end"]) >= today and 
+                               date.fromisoformat(s["subscription_end"]) <= today + timedelta(days=3))
+        
+        # Monthly revenue
+        revenue_result = await s.execute(
+            select(func.sum(Payment.amount)).where(
+                Payment.coach_id == coach.id,
+                Payment.status == "paid",
+                Payment.paid_at >= month_start
+            )
+        )
+        monthly_revenue = revenue_result.scalar() or 0
+        
+        # Lessons this month
+        lessons_result = await s.execute(
+            select(func.count(Lesson.id)).where(
+                Lesson.coach_id == coach.id,
+                Lesson.date >= month_start
+            )
+        )
+        lessons_count = lessons_result.scalar()
+    
+    return {
+        "timestamp": datetime.utcnow().isoformat(),
+        "students": students,
+        "payments": payments,
+        "stats": {
+            "students_count": students_count,
+            "lessons_this_month": lessons_count,
+            "overdue_count": overdue_count,
+            "ending_soon_count": ending_soon_count,
+            "monthly_revenue": monthly_revenue,
+        }
+    }
+
+
 # === Students ===
 
 @app.post("/api/students")
