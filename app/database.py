@@ -224,13 +224,6 @@ async def run_migrations():
             logger.info("Migrating: Adding location_id to attendance")
             await conn.execute(text("ALTER TABLE attendance ADD COLUMN location_id INTEGER"))
         
-        # 5b. Check and add is_extra to attendance
-        try:
-            await conn.execute(text("SELECT is_extra FROM attendance LIMIT 1"))
-        except:
-            logger.info("Migrating: Adding is_extra to attendance")
-            await conn.execute(text("ALTER TABLE attendance ADD COLUMN is_extra BOOLEAN DEFAULT 0"))
-        
         # 5c. Check and add attendance_date to attendance
         try:
             await conn.execute(text("SELECT attendance_date FROM attendance LIMIT 1"))
