@@ -10,12 +10,56 @@ const CURRENT_VERSION = '2'; // Change this when deploying major updates
 // Check version on load
 const savedVersion = localStorage.getItem(APP_VERSION_KEY);
 if (savedVersion && savedVersion !== CURRENT_VERSION) {
-    // Version changed - force reload from server
+    // Version changed - clear cache and reload
+    localStorage.removeItem('crm_cached_students');
+    localStorage.removeItem('crm_cached_payments');
+    localStorage.removeItem('crm_cached_dashboard');
     localStorage.setItem(APP_VERSION_KEY, CURRENT_VERSION);
     window.location.reload(true);
 } else {
     localStorage.setItem(APP_VERSION_KEY, CURRENT_VERSION);
 }
+
+// Data cache helpers
+const DataCache = {
+    STUDENTS_KEY: 'crm_cached_students',
+    PAYMENTS_KEY: 'crm_cached_payments',
+    DASHBOARD_KEY: 'crm_cached_dashboard',
+    LAST_SYNC_KEY: 'crm_last_sync',
+    
+    save(key, data) {
+        try {
+            localStorage.setItem(key, JSON.stringify({
+                data,
+                timestamp: Date.now()
+            }));
+        } catch (e) {
+            console.warn('Cache save failed:', e);
+        }
+    },
+    
+    load(key) {
+        try {
+            const item = localStorage.getItem(key);
+            if (!item) return null;
+            const parsed = JSON.parse(item);
+            // Cache valid for 1 hour
+            if (Date.now() - parsed.timestamp > 3600000) {
+                localStorage.removeItem(key);
+                return null;
+            }
+            return parsed.data;
+        } catch (e) {
+            return null;
+        }
+    },
+    
+    clear() {
+        localStorage.removeItem(this.STUDENTS_KEY);
+        localStorage.removeItem(this.PAYMENTS_KEY);
+        localStorage.removeItem(this.DASHBOARD_KEY);
+    }
+};
 
 let currentScreen = 'loading';
 let screenHistory = [];
@@ -174,6 +218,12 @@ function showScreen(screen) {
 // === Dashboard ===
 
 async function loadDashboard() {
+    // First, show cached data if available
+    const cached = DataCache.load(DataCache.DASHBOARD_KEY);
+    if (cached) {
+        renderDashboard(cached);
+    }
+    
     try {
         const res = await fetch(`${API}/api/dashboard`, {
             method: 'POST',
@@ -183,62 +233,80 @@ async function loadDashboard() {
         
         const data = await res.json();
         
-        // Update stats
-        document.getElementById('stat-students').textContent = data.students_count;
-        document.getElementById('stat-lessons').textContent = data.lessons_this_month;
-        document.getElementById('stat-attendance').textContent = data.attendance_rate + '%';
-        document.getElementById('stat-revenue').textContent = data.monthly_revenue.toLocaleString() + '₽';
+        // Save to cache
+        DataCache.save(DataCache.DASHBOARD_KEY, data);
         
-        // Current date
-        const dateOptions = { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' };
-        document.getElementById('current-date').textContent = new Date().toLocaleDateString('ru-RU', dateOptions);
-        
-        // Alerts
-        const alertsContainer = document.getElementById('alerts-list');
-        const alertsSection = document.getElementById('alerts-section');
-        
-        let alerts = [];
-        
-        if (data.overdue_count > 0) {
-            alerts.push({
-                icon: '❌',
-                title: `Просроченных абонементов: ${data.overdue_count}`,
-                subtitle: 'Требуется продление',
-                type: 'danger'
-            });
-        }
-        
-        if (data.ending_soon_count > 0) {
-            alerts.push({
-                icon: '⏳',
-                title: `Заканчивается скоро: ${data.ending_soon_count}`,
-                subtitle: 'Осталось менее 3 дней',
-                type: 'warning'
-            });
-        }
-        
-        if (alerts.length === 0) {
-            alertsSection.style.display = 'none';
-        } else {
-            alertsSection.style.display = 'block';
-            alertsContainer.innerHTML = alerts.map(a => `
-                <div class="alert-item" onclick="navigate('students')">
-                    <div class="alert-icon">${a.icon}</div>
-                    <div class="alert-content">
-                        <div class="alert-title">${a.title}</div>
-                        <div class="alert-subtitle">${a.subtitle}</div>
-                    </div>
-                </div>
-            `).join('');
-        }
+        // Render fresh data
+        renderDashboard(data);
     } catch (e) {
         console.error('Dashboard load error:', e);
+        if (!cached) {
+            showNotification('Ошибка загрузки данных', 'error');
+        }
+    }
+}
+
+function renderDashboard(data) {
+    // Update stats
+    document.getElementById('stat-students').textContent = data.students_count;
+    document.getElementById('stat-lessons').textContent = data.lessons_this_month;
+    document.getElementById('stat-attendance').textContent = data.attendance_rate + '%';
+    document.getElementById('stat-revenue').textContent = data.monthly_revenue.toLocaleString() + '₽';
+    
+    // Current date
+    const dateOptions = { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' };
+    document.getElementById('current-date').textContent = new Date().toLocaleDateString('ru-RU', dateOptions);
+    
+    // Alerts
+    const alertsContainer = document.getElementById('alerts-list');
+    const alertsSection = document.getElementById('alerts-section');
+    
+    let alerts = [];
+    
+    if (data.overdue_count > 0) {
+        alerts.push({
+            icon: '❌',
+            title: `Просроченных абонементов: ${data.overdue_count}`,
+            subtitle: 'Требуется продление',
+            type: 'danger'
+        });
+    }
+    
+    if (data.ending_soon_count > 0) {
+        alerts.push({
+            icon: '⏳',
+            title: `Заканчивается скоро: ${data.ending_soon_count}`,
+            subtitle: 'Осталось менее 3 дней',
+            type: 'warning'
+        });
+    }
+    
+    if (alerts.length === 0) {
+        alertsSection.style.display = 'none';
+    } else {
+        alertsSection.style.display = 'block';
+        alertsContainer.innerHTML = alerts.map(a => `
+            <div class="alert-item" onclick="navigate('students')">
+                <div class="alert-icon">${a.icon}</div>
+                <div class="alert-content">
+                    <div class="alert-title">${a.title}</div>
+                    <div class="alert-subtitle">${a.subtitle}</div>
+                </div>
+            </div>
+        `).join('');
     }
 }
 
 // === Students ===
 
 async function loadStudents() {
+    // Show cached data first
+    const cached = DataCache.load(DataCache.STUDENTS_KEY);
+    if (cached) {
+        students = cached;
+        renderStudentsList(students);
+    }
+    
     try {
         const res = await fetch(`${API}/api/students`, {
             method: 'POST',
@@ -247,9 +315,17 @@ async function loadStudents() {
         });
         
         students = await res.json();
+        
+        // Save to cache
+        DataCache.save(DataCache.STUDENTS_KEY, students);
+        
+        // Render fresh data
         renderStudentsList(students);
     } catch (e) {
         console.error('Students load error:', e);
+        if (!cached) {
+            showNotification('Ошибка загрузки учеников', 'error');
+        }
     }
 }
 
@@ -523,6 +599,8 @@ async function saveStudent() {
         
         if (result.success) {
             showNotification(editingStudentId ? 'Ученик обновлен' : 'Ученик добавлен', 'success');
+            // Clear cache to force refresh
+            DataCache.clear();
             goBack();
             if (currentScreen === 'students') {
                 loadStudents();
@@ -756,6 +834,8 @@ async function savePayment() {
         
         if (result.success) {
             showNotification('Оплата добавлена', 'success');
+            // Clear cache to force refresh
+            DataCache.clear();
             goBack();
         } else {
             showNotification('Ошибка сохранения', 'error');
@@ -778,6 +858,8 @@ async function markPaymentPaid(id) {
         
         if (result.success) {
             showNotification('Оплачено!', 'success');
+            // Clear cache to force refresh
+            DataCache.clear();
             loadPayments();
             loadDashboard();
         }
@@ -864,6 +946,8 @@ async function saveQuickLesson() {
         }
         
         showNotification('Занятия сохранены!', 'success');
+        // Clear cache to force refresh
+        DataCache.clear();
         goBack();
         loadDashboard();
     } catch (e) {
