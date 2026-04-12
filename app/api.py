@@ -129,10 +129,24 @@ async def api_auth(request: Request):
     if not coach:
         return JSONResponse({"error": "not_registered"}, 403)
     
+    # Check if admin
+    user = verify_telegram_init_data(init_data)
+    user_id = user.get("id") if user else None
+    is_admin_user = False
+    if ADMIN_IDS and user_id in ADMIN_IDS:
+        is_admin_user = True
+    else:
+        async with async_session() as s:
+            admin_result = await s.execute(select(AdminUser).where(AdminUser.telegram_id == user_id))
+            if admin_result.scalar_one_or_none():
+                is_admin_user = True
+    
     return {
         "coach_id": coach.id,
         "first_name": coach.first_name,
         "telegram_id": coach.telegram_id,
+        "username": coach.username,
+        "is_admin": is_admin_user,
     }
 
 

@@ -83,6 +83,17 @@ document.addEventListener('DOMContentLoaded', async () => {
         tg.setBackgroundColor?.('#0A1628');
         tg.setHeaderColor?.('#0F2035');
         initData = tg.initData || '';
+        
+        // Store current user info from Telegram
+        if (tg.initDataUnsafe?.user) {
+            const user = tg.initDataUnsafe.user;
+            localStorage.setItem('crm_current_user', JSON.stringify({
+                id: user.id,
+                first_name: user.first_name,
+                last_name: user.last_name,
+                username: user.username
+            }));
+        }
     }
     
     // Initialize date inputs with today
@@ -153,6 +164,15 @@ async function authenticate() {
         }
         
         currentCoach = data;
+        
+        // Store coach info for auto-fill forms
+        localStorage.setItem('crm_coach_info', JSON.stringify({
+            id: data.coach_id,
+            first_name: data.first_name,
+            username: data.username,
+            is_admin: data.is_admin
+        }));
+        
         await loadDashboard();
         showScreen('dashboard');
     } catch (e) {
@@ -228,27 +248,38 @@ async function loadCoaches() {
 function renderCoachSelect() {
     const select = document.getElementById('st-coach');
     const display = document.getElementById('coach-display');
-    const container = document.getElementById('coach-select-container');
     
     if (!select || !display) return;
     
-    if (coaches.length === 0) {
+    // Get coach info from auth data
+    const coachInfoData = localStorage.getItem('crm_coach_info');
+    const coachInfo = coachInfoData ? JSON.parse(coachInfoData) : null;
+    
+    // Get current coach from server data
+    const currentCoach = coaches.find(c => c.is_current);
+    
+    if (!coachInfo && !currentCoach) {
         select.innerHTML = '<option value="">Нет тренеров</option>';
         return;
     }
     
-    if (coaches.length === 1) {
-        // Only one coach - show as read-only info
-        const coach = coaches[0];
-        select.style.display = 'none';
-        display.style.display = 'block';
-        display.innerHTML = `
-            <span class="coach-name">${escapeHtml(coach.first_name || 'Без имени')}</span>
-            ${coach.username ? `<span class="coach-username">@${escapeHtml(coach.username)}</span>` : ''}
-        `;
-        select.value = coach.id;
-    } else {
-        // Multiple coaches - show select
+    // Use coach info from auth (most reliable)
+    const coachName = coachInfo?.first_name || currentCoach?.first_name || 'Тренер';
+    const coachUsername = coachInfo?.username || currentCoach?.username;
+    const coachId = coachInfo?.id || currentCoach?.id || coaches[0]?.id;
+    const isAdmin = coachInfo?.is_admin || currentCoach?.is_admin;
+    
+    // Show current coach info (auto-filled from Telegram)
+    select.style.display = 'none';
+    display.style.display = 'block';
+    display.innerHTML = `
+        <span class="coach-name">${escapeHtml(coachName)}</span>
+        ${coachUsername ? `<span class="coach-username">@${escapeHtml(coachUsername)}</span>` : ''}
+    `;
+    select.value = coachId;
+    
+    // For admin with multiple coaches - show dropdown instead
+    if (coaches.length > 1 && isAdmin) {
         select.style.display = 'block';
         display.style.display = 'none';
         select.innerHTML = coaches.map(c => {
@@ -257,10 +288,8 @@ function renderCoachSelect() {
             return `<option value="${c.id}">${escapeHtml(c.first_name || 'Без имени')}${username}${isCurrent}</option>`;
         }).join('');
         
-        // Select current coach by default
-        const currentCoachId = coaches.find(c => c.is_current)?.id;
-        if (currentCoachId) {
-            select.value = currentCoachId;
+        if (coachId) {
+            select.value = coachId;
         }
     }
 }
