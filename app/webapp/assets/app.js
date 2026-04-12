@@ -5,7 +5,7 @@ const tg = window.Telegram?.WebApp;
 
 // Cache busting - force reload if version changed
 const APP_VERSION_KEY = 'crm_bw_version';
-const CURRENT_VERSION = '5'; // Version 5: Multiple locations per student, shared students list, finance reports
+const CURRENT_VERSION = '6'; // Version 6: Unlimited subscriptions, coach names in filters
 
 // Check version on load
 const savedVersion = localStorage.getItem(APP_VERSION_KEY);
@@ -238,10 +238,35 @@ async function loadCoaches() {
             body: JSON.stringify({initData})
         });
         coaches = await res.json();
+        
+        // Update filter button labels with coach names
+        updateCoachFilterLabels();
+        
         return coaches;
     } catch (e) {
         console.error('Coaches load error:', e);
         return [];
+    }
+}
+
+function updateCoachFilterLabels() {
+    if (coaches.length < 2) return;
+    
+    const myBtn = document.getElementById('filter-my');
+    const otherBtn = document.getElementById('filter-other');
+    
+    if (!myBtn || !otherBtn) return;
+    
+    // Find current coach and other coach
+    const myCoach = coaches.find(c => c.is_current);
+    const otherCoach = coaches.find(c => !c.is_current);
+    
+    if (myCoach) {
+        myBtn.textContent = myCoach.first_name || 'Мои';
+    }
+    
+    if (otherCoach) {
+        otherBtn.textContent = otherCoach.first_name || 'Брат';
     }
 }
 

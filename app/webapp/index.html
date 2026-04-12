@@ -110,10 +110,10 @@
                     <button class="btn-primary" onclick="openAddStudent()">+ Добавить</button>
                 </div>
                 <div class="students-filters">
-                    <div class="filter-tabs">
+                    <div class="filter-tabs" id="coach-filter-tabs">
                         <button class="filter-tab active" onclick="setStudentsFilter('all')" data-filter="all">Все</button>
-                        <button class="filter-tab" onclick="setStudentsFilter('my')" data-filter="my">Мои</button>
-                        <button class="filter-tab" onclick="setStudentsFilter('other')" data-filter="other">Брат</button>
+                        <button class="filter-tab" onclick="setStudentsFilter('my')" data-filter="my" id="filter-my">Мои</button>
+                        <button class="filter-tab" onclick="setStudentsFilter('other')" data-filter="other" id="filter-other">Брат</button>
                     </div>
                     <div class="search-box">
                         <input type="text" id="students-search" placeholder="Поиск по имени..." oninput="filterStudents(this.value)">
