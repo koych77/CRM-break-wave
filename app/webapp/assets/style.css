@@ -61,8 +61,8 @@ body {
 /* Back Button - positioned under system close button */
 .back-btn {
     position: fixed;
-    top: 12px; /* Right under Telegram system close button */
-    left: 8px;
+    top: 100px; /* Below Telegram system close button */
+    left: 16px;
     width: 44px;
     height: 44px;
     background: var(--bg-secondary);
