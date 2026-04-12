@@ -3,6 +3,20 @@
 const API = window.location.origin;
 const tg = window.Telegram?.WebApp;
 
+// Cache busting - force reload if version changed
+const APP_VERSION_KEY = 'crm_bw_version';
+const CURRENT_VERSION = '2'; // Change this when deploying major updates
+
+// Check version on load
+const savedVersion = localStorage.getItem(APP_VERSION_KEY);
+if (savedVersion && savedVersion !== CURRENT_VERSION) {
+    // Version changed - force reload from server
+    localStorage.setItem(APP_VERSION_KEY, CURRENT_VERSION);
+    window.location.reload(true);
+} else {
+    localStorage.setItem(APP_VERSION_KEY, CURRENT_VERSION);
+}
+
 let currentScreen = 'loading';
 let screenHistory = [];
 let initData = '';

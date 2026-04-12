@@ -1,7 +1,8 @@
 from fastapi import FastAPI, UploadFile, File, Query, Request, Form, Depends
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse, HTMLResponse
+from fastapi.responses import FileResponse, JSONResponse, HTMLResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
 from sqlalchemy import select, func, and_, or_, desc
 from contextlib import asynccontextmanager
 from datetime import datetime, date, timedelta
@@ -17,6 +18,21 @@ from app.database import async_session, init_db
 from app.models import Coach, Student, Lesson, Attendance, Payment, Notification
 from app.config import WEBAPP_DIR, BOT_TOKEN, WEEKDAYS
 
+# Version for cache busting - auto-generated on server start (timestamp)
+import time
+APP_VERSION = str(int(time.time()))
+
+
+class NoCacheMiddleware(BaseHTTPMiddleware):
+    """Add cache-busting headers to all responses."""
+    async def dispatch(self, request, call_next):
+        response = await call_next(request)
+        # Disable caching for all responses
+        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+        return response
+
 logger = logging.getLogger(__name__)
 
 
@@ -27,6 +43,9 @@ async def lifespan(application: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
+# Disable caching middleware
+app.add_middleware(NoCacheMiddleware)
+
 # CORS for Telegram WebApp
 app.add_middleware(
     CORSMiddleware,
@@ -36,8 +55,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Static files
-app.mount("/assets", StaticFiles(directory=str(WEBAPP_DIR / "assets")), name="assets")
+# Static files with cache disabled
+class NoCacheStaticFiles(StaticFiles):
+    def file_response(self, *args, **kwargs):
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+        return response
+
+app.mount("/assets", NoCacheStaticFiles(directory=str(WEBAPP_DIR / "assets")), name="assets")
 
 
 # === Telegram Auth Helpers ===
@@ -75,10 +102,18 @@ async def get_current_coach(init_data: str):
 
 @app.get("/", response_class=HTMLResponse)
 async def root():
-    """Serve main HTML file."""
+    """Serve main HTML file with cache busting."""
     html_file = WEBAPP_DIR / "index.html"
     if html_file.exists():
-        return FileResponse(str(html_file))
+        content = html_file.read_text()
+        # Replace version placeholder or add version to assets
+        content = content.replace('href="/assets/style.css?v=2"', f'href="/assets/style.css?v={APP_VERSION}"')
+        content = content.replace('src="/assets/app.js?v=2"', f'src="/assets/app.js?v={APP_VERSION}"')
+        return Response(content=content, media_type="text/html", headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0"
+        })
     return HTMLResponse(content="<h1>CRM Break Wave</h1><p>Mini App is loading...</p>")
 
 
