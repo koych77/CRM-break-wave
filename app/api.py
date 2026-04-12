@@ -1556,104 +1556,108 @@ async def api_get_groups(request: Request):
 @app.post("/api/coach/daily-summary")
 async def api_daily_summary(request: Request):
     """Get daily summary for coach: payments due, low lessons, etc."""
-    body = await request.json()
-    coach = await get_current_coach(body.get("initData", ""))
-    if not coach:
-        return JSONResponse({"error": "unauthorized"}, 403)
-    
-    today = date.today()
-    
-    async with async_session() as s:
-        # Get all active students
-        result = await s.execute(
-            select(Student).where(
-                Student.coach_id == coach.id,
-                Student.is_active == True
+    try:
+        body = await request.json()
+        coach = await get_current_coach(body.get("initData", ""))
+        if not coach:
+            return JSONResponse({"error": "unauthorized"}, 403)
+        
+        today = date.today()
+        
+        async with async_session() as s:
+            # Get all active students
+            result = await s.execute(
+                select(Student).where(
+                    Student.coach_id == coach.id,
+                    Student.is_active == True
+                )
             )
-        )
-        students = result.scalars().all()
-        
-        # Categorize students
-        payments_due = []  # Subscription ended or ending within 3 days
-        low_lessons = []   # 2 or fewer lessons remaining
-        depleted = []      # No lessons remaining
-        
-        for student in students:
-            # Fix for old records without lessons_remaining
-            lessons_remaining = student.lessons_remaining if student.lessons_remaining is not None else student.lessons_count
+            students = result.scalars().all()
             
-            # Check subscription expiry
-            if student.subscription_end:
-                days_left = (student.subscription_end - today).days
-                if days_left < 0:
-                    payments_due.append({
-                        "id": student.id,
-                        "name": student.name,
-                        "reason": "subscription_expired",
-                        "days_overdue": abs(days_left)
-                    })
-                elif days_left <= 3:
-                    payments_due.append({
-                        "id": student.id,
-                        "name": student.name,
-                        "reason": "subscription_ending",
-                        "days_left": days_left
-                    })
+            # Categorize students
+            payments_due = []  # Subscription ended or ending within 3 days
+            low_lessons = []   # 2 or fewer lessons remaining
+            depleted = []      # No lessons remaining
             
-            # Check lessons remaining
-            if lessons_remaining <= 0:
-                depleted.append({
-                    "id": student.id,
-                    "name": student.name,
-                    "lessons_remaining": 0
-                })
-            elif lessons_remaining <= 2:
-                low_lessons.append({
-                    "id": student.id,
-                    "name": student.name,
-                    "lessons_remaining": lessons_remaining
-                })
-        
-        # Get today's lessons
-        weekday = today.weekday()
-        today_lessons = []
-        for student in students:
-            days = student.lesson_days.split(",") if student.lesson_days else []
-            if str(weekday) in days:
-                # Get time for this day
-                lesson_time = student.get_lesson_time_for_day(weekday)
+            for student in students:
+                # Fix for old records without lessons_remaining
                 lessons_remaining = student.lessons_remaining if student.lessons_remaining is not None else student.lessons_count
-                today_lessons.append({
-                    "id": student.id,
-                    "name": student.name,
-                    "time": lesson_time,
-                    "lessons_remaining": lessons_remaining
-                })
-        
-        # Group today's lessons by time
-        lessons_by_time = {}
-        for lesson in today_lessons:
-            time_key = lesson["time"]
-            if time_key not in lessons_by_time:
-                lessons_by_time[time_key] = []
-            lessons_by_time[time_key].append(lesson)
-        
-        return {
-            "date": today.isoformat(),
-            "summary": {
-                "total_students": len(students),
-                "payments_due_count": len(payments_due),
-                "low_lessons_count": len(low_lessons),
-                "depleted_count": len(depleted),
-                "today_lessons_count": len(today_lessons)
-            },
-            "alerts": {
-                "payments_due": payments_due,
-                "low_lessons": low_lessons,
-                "depleted": depleted
-            },
-            "today_schedule": lessons_by_time
-        }
+                
+                # Check subscription expiry
+                if student.subscription_end:
+                    days_left = (student.subscription_end - today).days
+                    if days_left < 0:
+                        payments_due.append({
+                            "id": student.id,
+                            "name": student.name,
+                            "reason": "subscription_expired",
+                            "days_overdue": abs(days_left)
+                        })
+                    elif days_left <= 3:
+                        payments_due.append({
+                            "id": student.id,
+                            "name": student.name,
+                            "reason": "subscription_ending",
+                            "days_left": days_left
+                        })
+                
+                # Check lessons remaining
+                if lessons_remaining <= 0:
+                    depleted.append({
+                        "id": student.id,
+                        "name": student.name,
+                        "lessons_remaining": 0
+                    })
+                elif lessons_remaining <= 2:
+                    low_lessons.append({
+                        "id": student.id,
+                        "name": student.name,
+                        "lessons_remaining": lessons_remaining
+                    })
+            
+            # Get today's lessons
+            weekday = today.weekday()
+            today_lessons = []
+            for student in students:
+                days = student.lesson_days.split(",") if student.lesson_days else []
+                if str(weekday) in days:
+                    # Get time for this day
+                    lesson_time = student.get_lesson_time_for_day(weekday)
+                    lessons_remaining = student.lessons_remaining if student.lessons_remaining is not None else student.lessons_count
+                    today_lessons.append({
+                        "id": student.id,
+                        "name": student.name,
+                        "time": lesson_time,
+                        "lessons_remaining": lessons_remaining
+                    })
+            
+            # Group today's lessons by time
+            lessons_by_time = {}
+            for lesson in today_lessons:
+                time_key = lesson["time"]
+                if time_key not in lessons_by_time:
+                    lessons_by_time[time_key] = []
+                lessons_by_time[time_key].append(lesson)
+            
+            return {
+                "date": today.isoformat(),
+                "summary": {
+                    "total_students": len(students),
+                    "payments_due_count": len(payments_due),
+                    "low_lessons_count": len(low_lessons),
+                    "depleted_count": len(depleted),
+                    "today_lessons_count": len(today_lessons)
+                },
+                "alerts": {
+                    "payments_due": payments_due,
+                    "low_lessons": low_lessons,
+                    "depleted": depleted
+                },
+                "today_schedule": lessons_by_time
+            }
+    except Exception as e:
+        logger.error(f"Daily summary error: {e}", exc_info=True)
+        return JSONResponse({"error": "internal_error", "message": str(e)}, 500)
 
 
 # === Locations ===
