@@ -2205,7 +2205,6 @@ async function loadLocationsForSelect() {
 }
 
 // Override openAddStudent to init locations
-const originalOpenAddStudent = openAddStudent;
 openAddStudent = async function() {
     editingStudentId = null;
     document.getElementById('student-form-title').textContent = 'Новый ученик';
@@ -2225,7 +2224,6 @@ openAddStudent = async function() {
 };
 
 // Override openEditStudent
-const originalOpenEditStudent = openEditStudent;
 openEditStudent = async function(studentId) {
     editingStudentId = studentId;
     document.getElementById('student-form-title').textContent = 'Редактирование';
@@ -2288,7 +2286,6 @@ openEditStudent = async function(studentId) {
 };
 
 // Override saveStudent to include schedules
-const originalSaveStudent = saveStudent;
 saveStudent = async function() {
     const studentData = {
         name: document.getElementById('st-name').value,
