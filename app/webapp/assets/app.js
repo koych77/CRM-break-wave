@@ -330,7 +330,7 @@ function renderDashboard(data) {
     document.getElementById('stat-students').textContent = data.students_count;
     document.getElementById('stat-lessons').textContent = data.lessons_this_month;
     document.getElementById('stat-attendance').textContent = data.attendance_rate + '%';
-    document.getElementById('stat-revenue').textContent = data.monthly_revenue.toLocaleString() + '₽';
+    document.getElementById('stat-revenue').textContent = data.monthly_revenue.toLocaleString() + ' Br';
     
     // Current date
     const dateOptions = { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' };
@@ -583,7 +583,7 @@ async function openStudentDetail(id) {
                 </div>
                 <div class="info-row">
                     <span class="info-label">Стоимость</span>
-                    <span class="info-value">${student.lesson_price?.toLocaleString() || 0}₽ / ${student.lessons_count || 8} занятий</span>
+                    <span class="info-value">${student.lesson_price?.toLocaleString() || 0} Br / ${student.lessons_count || 8} занятий</span>
                 </div>
             </div>
             
@@ -860,7 +860,7 @@ function renderPayments(list) {
                     <span class="list-item-title">${escapeHtml(p.student_name)}</span>
                     <span class="payment-status ${statusClass}">${statusText}</span>
                 </div>
-                <div class="list-item-subtitle">${p.amount.toLocaleString()}₽ • ${p.lessons_count} занятий</div>
+                <div class="list-item-subtitle">${p.amount.toLocaleString()} Br • ${p.lessons_count} занятий</div>
                 <div class="list-item-meta">
                     ${p.period_start && p.period_end ? 
                         `<span>📅 ${formatDate(p.period_start)} — ${formatDate(p.period_end)}</span>` : ''}

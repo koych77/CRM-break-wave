@@ -27,6 +27,10 @@ PAYMENT_STATUS = {
     "overdue": "⚠️ Просрочено",
 }
 
+# Belarus locale settings
+CURRENCY = "Br"  # Belarusian ruble
+PHONE_PREFIX = "+375"
+
 WEEKDAYS = {
     0: "Пн",
     1: "Вт",
