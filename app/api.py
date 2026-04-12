@@ -268,10 +268,10 @@ async def api_sync(request: Request):
             "age": st.age,
             "location": st.location,
             "lesson_days": st.lesson_days,
-            "lesson_time": st.lesson_time,
+            "lesson_times": st.lesson_times,
             "lesson_price": st.lesson_price,
             "lessons_count": st.lessons_count,
-            "lessons_remaining": st.lessons_remaining,
+            "lessons_remaining": st.lessons_remaining if st.lessons_remaining is not None else st.lessons_count,
             "subscription_start": st.subscription_start.isoformat() if st.subscription_start else None,
             "subscription_end": st.subscription_end.isoformat() if st.subscription_end else None,
             "notes": st.notes,
@@ -430,7 +430,7 @@ async def api_students(request: Request):
         "lesson_times": st.lesson_times,
         "lesson_price": st.lesson_price,
         "lessons_count": st.lessons_count,
-        "lessons_remaining": st.lessons_remaining,
+        "lessons_remaining": st.lessons_remaining if st.lessons_remaining is not None else st.lessons_count,
         "subscription_start": st.subscription_start.isoformat() if st.subscription_start else None,
         "subscription_end": st.subscription_end.isoformat() if st.subscription_end else None,
         "notes": st.notes,
@@ -553,7 +553,7 @@ async def api_get_student(student_id: int, request: Request):
             "lesson_times": st.lesson_times,
             "lesson_price": st.lesson_price,
             "lessons_count": st.lessons_count,
-            "lessons_remaining": st.lessons_remaining,
+            "lessons_remaining": st.lessons_remaining if st.lessons_remaining is not None else st.lessons_count,
             "subscription_start": st.subscription_start.isoformat() if st.subscription_start else None,
             "subscription_end": st.subscription_end.isoformat() if st.subscription_end else None,
             "notes": st.notes,
@@ -1052,21 +1052,26 @@ async def api_bulk_attendance(request: Request):
                     old_status = att.status
                     att.status = status
                 else:
+                    # Get time for this day
+                    weekday = date.fromisoformat(lesson_date).weekday()
+                    lesson_time = student.get_lesson_time_for_day(weekday)
                     att = Attendance(
                         lesson_id=lesson.id,
                         student_id=student_id,
                         status=status,
                         attendance_date=date.fromisoformat(lesson_date),
-                        attendance_time=student.lesson_time
+                        attendance_time=lesson_time
                     )
                     s.add(att)
             else:
                 # Create new lesson
+                weekday = date.fromisoformat(lesson_date).weekday()
+                lesson_time = student.get_lesson_time_for_day(weekday)
                 lesson = Lesson(
                     coach_id=coach.id,
                     student_id=student_id,
                     date=date.fromisoformat(lesson_date),
-                    time=student.lesson_time,
+                    time=lesson_time,
                     location=student.location,
                 )
                 s.add(lesson)
@@ -1142,11 +1147,13 @@ async def api_skip_lesson(request: Request):
                 continue  # Already marked
             
             # Create skipped lesson
+            weekday = date.fromisoformat(lesson_date).weekday()
+            lesson_time = student.get_lesson_time_for_day(weekday)
             lesson = Lesson(
                 coach_id=coach.id,
                 student_id=student.id,
                 date=date.fromisoformat(lesson_date),
-                time=student.lesson_time,
+                time=lesson_time,
                 location=student.location,
                 notes=f"Тренировка отменена: {reason}"
             )
@@ -1572,6 +1579,9 @@ async def api_daily_summary(request: Request):
         depleted = []      # No lessons remaining
         
         for student in students:
+            # Fix for old records without lessons_remaining
+            lessons_remaining = student.lessons_remaining if student.lessons_remaining is not None else student.lessons_count
+            
             # Check subscription expiry
             if student.subscription_end:
                 days_left = (student.subscription_end - today).days
@@ -1591,17 +1601,17 @@ async def api_daily_summary(request: Request):
                     })
             
             # Check lessons remaining
-            if student.lessons_remaining <= 0:
+            if lessons_remaining <= 0:
                 depleted.append({
                     "id": student.id,
                     "name": student.name,
                     "lessons_remaining": 0
                 })
-            elif student.lessons_remaining <= 2:
+            elif lessons_remaining <= 2:
                 low_lessons.append({
                     "id": student.id,
                     "name": student.name,
-                    "lessons_remaining": student.lessons_remaining
+                    "lessons_remaining": lessons_remaining
                 })
         
         # Get today's lessons
@@ -1610,11 +1620,14 @@ async def api_daily_summary(request: Request):
         for student in students:
             days = student.lesson_days.split(",") if student.lesson_days else []
             if str(weekday) in days:
+                # Get time for this day
+                lesson_time = student.get_lesson_time_for_day(weekday)
+                lessons_remaining = student.lessons_remaining if student.lessons_remaining is not None else student.lessons_count
                 today_lessons.append({
                     "id": student.id,
                     "name": student.name,
-                    "time": student.lesson_time,
-                    "lessons_remaining": student.lessons_remaining
+                    "time": lesson_time,
+                    "lessons_remaining": lessons_remaining
                 })
         
         # Group today's lessons by time
