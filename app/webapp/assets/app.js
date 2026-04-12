@@ -2294,6 +2294,10 @@ openAddStudent = async function() {
     document.getElementById('student-form-title').textContent = 'Новый ученик';
     document.getElementById('student-form').reset();
     
+    // Reset unlimited checkbox
+    document.getElementById('st-unlimited').checked = false;
+    toggleUnlimited(false);
+    
     // Load locations first
     await loadLocationsForSelect();
     
@@ -2306,6 +2310,18 @@ openAddStudent = async function() {
     
     showScreen('student-form');
 };
+
+// Toggle unlimited lessons
+function toggleUnlimited(checked) {
+    const lessonsGroup = document.getElementById('lessons-count-group');
+    if (checked) {
+        lessonsGroup.classList.add('lessons-count-hidden');
+        document.getElementById('st-count').value = 999; // Set high number for unlimited
+    } else {
+        lessonsGroup.classList.remove('lessons-count-hidden');
+        document.getElementById('st-count').value = 8; // Default value
+    }
+}
 
 // Override openEditStudent
 openEditStudent = async function(studentId) {
@@ -2331,10 +2347,19 @@ openEditStudent = async function(studentId) {
         document.getElementById('st-parent-phone').value = student.parent_phone || '';
         document.getElementById('st-age').value = student.age || '';
         document.getElementById('st-price').value = student.lesson_price || 150;
-        document.getElementById('st-count').value = student.lessons_count || 8;
         document.getElementById('st-notes').value = student.notes || '';
         document.getElementById('st-sub-start').value = student.subscription_start || '';
         document.getElementById('st-sub-end').value = student.subscription_end || '';
+        
+        // Handle unlimited subscription
+        const isUnlimited = student.is_unlimited || false;
+        document.getElementById('st-unlimited').checked = isUnlimited;
+        toggleUnlimited(isUnlimited);
+        
+        // Set lessons count (only if not unlimited)
+        if (!isUnlimited) {
+            document.getElementById('st-count').value = student.lessons_count || 8;
+        }
         
         // Load coaches for admin
         await loadCoaches();
@@ -2371,6 +2396,8 @@ openEditStudent = async function(studentId) {
 
 // Override saveStudent to include schedules
 saveStudent = async function() {
+    const isUnlimited = document.getElementById('st-unlimited').checked;
+    
     const studentData = {
         name: document.getElementById('st-name').value,
         nickname: document.getElementById('st-nickname').value || null,
@@ -2378,7 +2405,8 @@ saveStudent = async function() {
         parent_phone: document.getElementById('st-parent-phone').value || null,
         age: document.getElementById('st-age').value ? parseInt(document.getElementById('st-age').value) : null,
         lesson_price: parseInt(document.getElementById('st-price').value) || 150,
-        lessons_count: parseInt(document.getElementById('st-count').value) || 8,
+        lessons_count: isUnlimited ? 999 : (parseInt(document.getElementById('st-count').value) || 8),
+        is_unlimited: isUnlimited,
         notes: document.getElementById('st-notes').value || null,
         subscription_start: document.getElementById('st-sub-start').value || null,
         subscription_end: document.getElementById('st-sub-end').value || null,

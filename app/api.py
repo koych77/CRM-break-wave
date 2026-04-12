@@ -272,6 +272,7 @@ async def api_sync(request: Request):
             "lesson_price": st.lesson_price,
             "lessons_count": st.lessons_count,
             "lessons_remaining": st.lessons_remaining if st.lessons_remaining is not None else st.lessons_count,
+            "is_unlimited": st.is_unlimited,
             "subscription_start": st.subscription_start.isoformat() if st.subscription_start else None,
             "subscription_end": st.subscription_end.isoformat() if st.subscription_end else None,
             "notes": st.notes,
@@ -491,6 +492,7 @@ async def api_create_student(request: Request):
             lesson_price=int(data.get("lesson_price", 150)),
             lessons_count=lessons_count,
             lessons_remaining=lessons_count,
+            is_unlimited=data.get("is_unlimited", False),
             notes=data.get("notes") or None,
         )
         s.add(student)
@@ -695,6 +697,8 @@ async def api_update_student(student_id: int, request: Request):
             student.lesson_price = int(data["lesson_price"])
         if "lessons_count" in data:
             student.lessons_count = int(data["lessons_count"])
+        if "is_unlimited" in data:
+            student.is_unlimited = bool(data["is_unlimited"])
         if "subscription_start" in data:
             student.subscription_start = date.fromisoformat(data["subscription_start"]) if data["subscription_start"] else None
         if "subscription_end" in data:

@@ -184,18 +184,26 @@
                         + Добавить зал
                     </button>
                     
-                    <div class="form-row" style="margin-top: 20px;">
+                    <h3 class="form-section-title">📅 Абонемент</h3>
+                    
+                    <div class="form-group checkbox-group">
+                        <label class="checkbox-label">
+                            <input type="checkbox" id="st-unlimited" onchange="toggleUnlimited(this.checked)">
+                            <span class="checkmark"></span>
+                            <span class="checkbox-text">Безлимитное количество занятий (по месяцам)</span>
+                        </label>
+                    </div>
+                    
+                    <div class="form-row">
                         <div class="form-group">
                             <label>Стоимость (Br)</label>
                             <input type="number" id="st-price" value="150" min="0" placeholder="150">
                         </div>
-                        <div class="form-group">
+                        <div class="form-group" id="lessons-count-group">
                             <label>Кол-во занятий</label>
                             <input type="number" id="st-count" value="8" min="1">
                         </div>
                     </div>
-                    
-                    <h3 class="form-section-title">📅 Абонемент</h3>
                     
                     <div class="form-row">
                         <div class="form-group">

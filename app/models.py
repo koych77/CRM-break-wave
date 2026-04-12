@@ -99,6 +99,7 @@ class Student(Base):
     lesson_price = Column(Integer, default=150)
     lessons_count = Column(Integer, default=8)
     lessons_remaining = Column(Integer, default=8)
+    is_unlimited = Column(Boolean, default=False)  # Unlimited subscription (month-based)
     subscription_start = Column(Date, nullable=True)
     subscription_end = Column(Date, nullable=True)
     
