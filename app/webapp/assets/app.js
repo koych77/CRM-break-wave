@@ -2153,10 +2153,23 @@ function renderLocationSchedules() {
                     </div>
                 </div>
                 
-                <select onchange="updateLocationField(${index}, 'location_id', this.value ? parseInt(this.value) : null)">
-                    <option value="">-- Выберите зал --</option>
-                    ${locationOptions}
-                </select>
+                <div class="location-select-wrapper">
+                    <select id="loc-select-${index}" onchange="handleLocationSelect(${index}, this.value)">
+                        <option value="">-- Выберите зал --</option>
+                        ${locationOptions}
+                        <option value="__new__" style="color: var(--accent); font-weight: 600;">+ Создать новый зал</option>
+                    </select>
+                    
+                    <!-- New location input (hidden by default) -->
+                    <div id="new-loc-${index}" class="new-location-input" style="display: none; margin-top: 8px;">
+                        <input type="text" id="new-loc-name-${index}" placeholder="Название зала (например: Зал на Ленина)" 
+                               style="width: 100%; padding: 10px; background: var(--bg-secondary); border: 1px solid var(--accent); border-radius: 8px; color: var(--text-primary);">
+                        <div style="display: flex; gap: 8px; margin-top: 8px;">
+                            <button type="button" class="btn-primary" onclick="createNewLocation(${index})" style="flex: 1; padding: 8px;">Создать</button>
+                            <button type="button" class="btn-secondary" onclick="cancelNewLocation(${index})" style="padding: 8px 12px;">Отмена</button>
+                        </div>
+                    </div>
+                </div>
                 
                 <div class="form-group">
                     <label>Дни недели</label>
@@ -2176,6 +2189,16 @@ function renderLocationSchedules() {
             </div>
         `;
     }).join('');
+    
+    // Set select values after render
+    setTimeout(() => {
+        currentLocationSchedules.forEach((schedule, index) => {
+            const select = document.getElementById(`loc-select-${index}`);
+            if (select && schedule.location_id) {
+                select.value = schedule.location_id;
+            }
+        });
+    }, 10);
 }
 
 function collectLocationSchedules() {
@@ -2187,6 +2210,67 @@ function collectLocationSchedules() {
         duration: s.duration,
         is_primary: s.is_primary
     }));
+}
+
+// Handle location select change
+function handleLocationSelect(index, value) {
+    if (value === '__new__') {
+        // Show new location input
+        document.getElementById(`new-loc-${index}`).style.display = 'block';
+        document.getElementById(`loc-select-${index}`).value = '';
+        setTimeout(() => document.getElementById(`new-loc-name-${index}`).focus(), 100);
+    } else {
+        updateLocationField(index, 'location_id', value ? parseInt(value) : null);
+    }
+}
+
+// Create new location
+async function createNewLocation(index) {
+    const nameInput = document.getElementById(`new-loc-name-${index}`);
+    const name = nameInput.value.trim();
+    
+    if (!name) {
+        showNotification('Введите название зала', 'error');
+        return;
+    }
+    
+    try {
+        const res = await fetch(`${API}/api/locations/create`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                initData,
+                location: {name: name}
+            })
+        });
+        
+        const result = await res.json();
+        
+        if (result.success) {
+            // Add to available locations
+            availableLocations.push({id: result.id, name: name});
+            
+            // Update schedule with new location
+            currentLocationSchedules[index].location_id = result.id;
+            
+            // Re-render
+            renderLocationSchedules();
+            
+            showNotification('Зал создан!', 'success');
+        } else {
+            showNotification('Ошибка создания зала', 'error');
+        }
+    } catch (e) {
+        console.error('Create location error:', e);
+        showNotification('Ошибка сети', 'error');
+    }
+}
+
+// Cancel new location creation
+function cancelNewLocation(index) {
+    document.getElementById(`new-loc-${index}`).style.display = 'none';
+    document.getElementById(`new-loc-name-${index}`).value = '';
+    document.getElementById(`loc-select-${index}`).value = '';
 }
 
 // Load locations for select

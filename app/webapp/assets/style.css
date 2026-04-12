@@ -2264,3 +2264,40 @@ body {
 .lessons-dot.none {
     background: var(--danger);
 }
+
+
+/* === New Location Input === */
+
+.location-select-wrapper {
+    position: relative;
+}
+
+.new-location-input {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px;
+    margin-top: 8px;
+    animation: slideDown 0.2s ease;
+}
+
+@keyframes slideDown {
+    from {
+        opacity: 0;
+        transform: translateY(-10px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+.new-location-input input:focus {
+    outline: none;
+    box-shadow: 0 0 0 2px rgba(0, 212, 255, 0.3);
+}
+
+select option[value="__new__"] {
+    color: var(--accent);
+    font-weight: 600;
+}
