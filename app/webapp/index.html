@@ -14,14 +14,15 @@
     <div id="app">
         <!-- Header -->
         <header id="header">
-            <button id="btn-back" class="header-btn hidden" onclick="goBack()">
-                <svg width="24" height="24" viewBox="0 0 24 24" fill="none"><path d="M15 18L9 12L15 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-            </button>
             <div class="header-title">
                 <span id="header-text">CRM BREAK WAVE</span>
             </div>
-            <div class="header-spacer"></div>
         </header>
+        
+        <!-- Back Button (positioned under system close button) -->
+        <button id="btn-back" class="back-btn hidden" onclick="goBack()">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none"><path d="M15 18L9 12L15 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
 
         <!-- Main Content -->
         <main id="content">

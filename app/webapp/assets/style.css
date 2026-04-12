@@ -42,28 +42,13 @@ body {
 #header {
     display: flex;
     align-items: center;
-    justify-content: space-between;
+    justify-content: center;
     padding: 12px 16px;
     background: var(--bg-secondary);
     border-bottom: 1px solid var(--border);
     position: sticky;
     top: 0;
     z-index: 100;
-}
-
-.header-btn {
-    background: none;
-    border: none;
-    color: var(--accent);
-    cursor: pointer;
-    padding: 8px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-}
-
-.header-btn.hidden {
-    visibility: hidden;
 }
 
 .header-title {
@@ -73,8 +58,38 @@ body {
     color: var(--accent);
 }
 
-.header-spacer {
-    width: 40px;
+/* Back Button - positioned under system close button */
+.back-btn {
+    position: fixed;
+    top: 56px; /* Under Telegram system close button (~48px + margin) */
+    left: 8px;
+    width: 44px;
+    height: 44px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: 50%;
+    color: var(--accent);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 101;
+    transition: all 0.2s;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+}
+
+.back-btn:hover {
+    background: var(--bg-card);
+    transform: scale(1.05);
+}
+
+.back-btn.hidden {
+    display: none;
+}
+
+.back-btn svg {
+    width: 24px;
+    height: 24px;
 }
 
 /* Main Content */
