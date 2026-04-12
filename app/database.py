@@ -163,6 +163,97 @@ async def init_db():
                 date DATE NOT NULL
             )
         """))
+    
+    # Run migrations for existing databases
+    await run_migrations()
+
+
+async def run_migrations():
+    """Run migrations for schema updates on existing databases."""
+    import json
+    
+    async with engine.begin() as conn:
+        # Migration: Add missing columns to existing tables
+        
+        # 1. Check and add location_id to students
+        try:
+            await conn.execute(text("SELECT location_id FROM students LIMIT 1"))
+        except:
+            logger.info("Migrating: Adding location_id to students")
+            await conn.execute(text("ALTER TABLE students ADD COLUMN location_id INTEGER"))
+        
+        # 2. Check and add lesson_times to students
+        try:
+            await conn.execute(text("SELECT lesson_times FROM students LIMIT 1"))
+        except:
+            logger.info("Migrating: Adding lesson_times to students")
+            await conn.execute(text('ALTER TABLE students ADD COLUMN lesson_times VARCHAR(500)'))
+            # Populate with default values
+            result = await conn.execute(text("SELECT id, lesson_days, lesson_time FROM students"))
+            rows = result.fetchall()
+            for row in rows:
+                student_id, days, time = row
+                if days:
+                    days_list = [d.strip() for d in days.split(',')]
+                    times_dict = {d: (time or '18:00') for d in days_list}
+                    times_json = json.dumps(times_dict)
+                    await conn.execute(
+                        text("UPDATE students SET lesson_times = :times WHERE id = :id"),
+                        {"times": times_json, "id": student_id}
+                    )
+        
+        # 3. Check and add lessons_remaining to students
+        try:
+            await conn.execute(text("SELECT lessons_remaining FROM students LIMIT 1"))
+        except:
+            logger.info("Migrating: Adding lessons_remaining to students")
+            await conn.execute(text("ALTER TABLE students ADD COLUMN lessons_remaining INTEGER"))
+            await conn.execute(text("UPDATE students SET lessons_remaining = lessons_count"))
+        
+        # 4. Check and add location_id to lessons
+        try:
+            await conn.execute(text("SELECT location_id FROM lessons LIMIT 1"))
+        except:
+            logger.info("Migrating: Adding location_id to lessons")
+            await conn.execute(text("ALTER TABLE lessons ADD COLUMN location_id INTEGER"))
+        
+        # 5. Check and add location_id to attendance
+        try:
+            await conn.execute(text("SELECT location_id FROM attendance LIMIT 1"))
+        except:
+            logger.info("Migrating: Adding location_id to attendance")
+            await conn.execute(text("ALTER TABLE attendance ADD COLUMN location_id INTEGER"))
+        
+        # 5b. Check and add attendance_date to attendance
+        try:
+            await conn.execute(text("SELECT attendance_date FROM attendance LIMIT 1"))
+        except:
+            logger.info("Migrating: Adding attendance_date to attendance")
+            await conn.execute(text("ALTER TABLE attendance ADD COLUMN attendance_date DATE"))
+            # Populate from lesson dates
+            await conn.execute(text("""
+                UPDATE attendance 
+                SET attendance_date = (SELECT date FROM lessons WHERE lessons.id = attendance.lesson_id)
+                WHERE attendance_date IS NULL
+            """))
+        
+        # 6. Create locations table if not exists
+        try:
+            await conn.execute(text("SELECT id FROM locations LIMIT 1"))
+        except:
+            logger.info("Migrating: Creating locations table")
+            await conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS locations (
+                    id INTEGER PRIMARY KEY,
+                    coach_id INTEGER NOT NULL REFERENCES coaches(id),
+                    name VARCHAR(200) NOT NULL,
+                    address VARCHAR(500),
+                    is_active BOOLEAN DEFAULT 1,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            """))
+        
+        logger.info("Migrations completed")
 
 
 async def get_session() -> AsyncSession:
