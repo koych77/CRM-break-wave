@@ -2,6 +2,11 @@ from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, Asyn
 from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy import text
 from app.config import DATABASE_URL
+import logging
+
+logger = logging.getLogger(__name__)
+
+logger.info(f"Database URL: {DATABASE_URL}")
 
 engine = create_async_engine(DATABASE_URL, echo=False)
 async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
@@ -13,6 +18,15 @@ class Base(DeclarativeBase):
 
 async def init_db():
     """Initialize database tables."""
+    logger.info("Initializing database...")
+    
+    # Ensure data directory exists (for Railway volume)
+    import os
+    data_dir = os.path.dirname(DATABASE_URL.replace('sqlite+aiosqlite:///', ''))
+    if data_dir and not os.path.exists(data_dir):
+        os.makedirs(data_dir, exist_ok=True)
+        logger.info(f"Created data directory: {data_dir}")
+    
     async with engine.begin() as conn:
         # Coaches table
         await conn.execute(text("""
