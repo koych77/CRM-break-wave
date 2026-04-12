@@ -1,4 +1,5 @@
 import logging
+import json
 from aiogram import Bot, Dispatcher, Router, types, F
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (
@@ -12,6 +13,16 @@ from datetime import datetime, date, timedelta
 from app.database import async_session
 from app.models import Coach, Student, Lesson, Attendance, Payment, AdminUser
 from app.config import BOT_TOKEN, ADMIN_IDS, ADMIN_SECRET, WEBAPP_URL
+
+
+# Helper function to get lesson time for a specific day
+def get_lesson_time_for_day(student: Student, day_of_week: int) -> str:
+    """Get lesson time for specific day from lesson_times JSON."""
+    try:
+        times = json.loads(student.lesson_times or '{}')
+        return times.get(str(day_of_week), times.get('default', '18:00'))
+    except:
+        return '18:00'
 
 logger = logging.getLogger(__name__)
 
@@ -291,7 +302,7 @@ async def cmd_now(message: Message):
         for st in students:
             days = st.lesson_days.split(",") if st.lesson_days else []
             if str(current_weekday) in days:
-                time_key = st.lesson_time or "18:00"
+                time_key = get_lesson_time_for_day(st, current_weekday)
                 if time_key not in groups:
                     groups[time_key] = []
                 
@@ -380,7 +391,16 @@ async def cb_my_students(callback: CallbackQuery):
     for st in students:
         days = st.lesson_days or "1,3"
         days_str = ",".join([{"0":"Пн","1":"Вт","2":"Ср","3":"Чт","4":"Пт","5":"Сб","6":"Вс"}[d] for d in days.split(",")])
-        text += f"• <b>{st.name}</b>\n  📍 {st.location} | 🕐 {days_str} {st.lesson_time}\n  💰 {st.lesson_price} Br/{st.lessons_count} занятий\n\n"
+        # Show first time or indicate different times
+        try:
+            times = json.loads(st.lesson_times or '{}')
+            if len(times) <= 1:
+                time_str = times.get('default', '18:00')
+            else:
+                time_str = "разное"
+        except:
+            time_str = "18:00"
+        text += f"• <b>{st.name}</b>\n  📍 {st.location} | 🕐 {days_str} {time_str}\n  💰 {st.lesson_price} Br/{st.lessons_count} занятий\n\n"
     
     await callback.message.edit_text(text, parse_mode="HTML")
 
@@ -468,7 +488,7 @@ async def cb_quick_attendance(callback: CallbackQuery):
         for st in students:
             days = st.lesson_days.split(",") if st.lesson_days else []
             if str(current_weekday) in days:
-                lesson_time = st.lesson_time or "18:00"
+                lesson_time = get_lesson_time_for_day(st, current_weekday)
                 lesson_hour, lesson_min = map(int, lesson_time.split(":"))
                 lesson_start = lesson_hour * 60 + lesson_min
                 now_total = now.hour * 60 + now.minute
@@ -589,11 +609,12 @@ async def cb_skip_reason(callback: CallbackQuery):
                 continue
             
             # Create skipped lesson
+            lesson_time = get_lesson_time_for_day(student, today.weekday())
             lesson = Lesson(
                 coach_id=coach.id,
                 student_id=student.id,
                 date=today,
-                time=student.lesson_time,
+                time=lesson_time,
                 location=student.location,
                 notes=f"Отмена: {reason_text}"
             )
@@ -669,7 +690,7 @@ async def cmd_stats(message: Message):
 👥 Тренеров: {coaches_count.scalar()}
 🎓 Учеников: {students_count.scalar()}
 📚 Проведено занятий: {lessons_count.scalar()}
-💰 Всего оплачено: {payments_total.scalar() or 0}₽"""
+💰 Всего оплачено: {payments_total.scalar() or 0}Br"""
     
     await message.answer(text, parse_mode="HTML")
 
@@ -692,3 +713,374 @@ async def notify_coach_payment_due(coach_id: int, student_name: str, days_left: 
             await bot.send_message(coach.telegram_id, text, parse_mode="HTML")
         except Exception as e:
             logger.error(f"Failed to notify coach {coach_id}: {e}")
+
+
+# === Daily Notifications ===
+
+async def should_send_daily_notification(coach_id: int, notification_type: str) -> bool:
+    """Check if daily notification was already sent today."""
+    from app.models import DailyNotificationLog
+    
+    today = date.today()
+    
+    async with async_session() as s:
+        result = await s.execute(
+            select(DailyNotificationLog).where(
+                DailyNotificationLog.coach_id == coach_id,
+                DailyNotificationLog.notification_type == notification_type,
+                DailyNotificationLog.date == today
+            )
+        )
+        return result.scalar_one_or_none() is None
+
+
+async def mark_notification_sent(coach_id: int, notification_type: str):
+    """Mark notification as sent for today."""
+    from app.models import DailyNotificationLog
+    
+    log = DailyNotificationLog(
+        coach_id=coach_id,
+        notification_type=notification_type,
+        date=date.today()
+    )
+    async with async_session() as s:
+        s.add(log)
+        await s.commit()
+
+
+async def send_daily_summary(coach_id: int = None):
+    """Send daily summary to coach(es). If coach_id is None, send to all coaches."""
+    from app.models import DailyNotificationLog
+    
+    today = date.today()
+    
+    async with async_session() as s:
+        if coach_id:
+            coaches_result = await s.execute(
+                select(Coach).where(Coach.id == coach_id)
+            )
+        else:
+            coaches_result = await s.execute(
+                select(Coach).where(Coach.is_active == True)
+            )
+        
+        coaches = coaches_result.scalars().all()
+        
+        for coach in coaches:
+            # Check if already sent today
+            already_sent = await s.execute(
+                select(DailyNotificationLog).where(
+                    DailyNotificationLog.coach_id == coach.id,
+                    DailyNotificationLog.notification_type == "daily_summary",
+                    DailyNotificationLog.date == today
+                )
+            )
+            if already_sent.scalar_one_or_none():
+                continue
+            
+            # Get all active students
+            students_result = await s.execute(
+                select(Student).where(
+                    Student.coach_id == coach.id,
+                    Student.is_active == True
+                )
+            )
+            students = students_result.scalars().all()
+            
+            # Categorize students
+            expired = []       # Subscription ended
+            ending_soon = []   # 1-3 days left
+            low_lessons = []   # 1-2 lessons remaining
+            depleted = []      # 0 lessons remaining
+            
+            for student in students:
+                # Check subscription expiry
+                if student.subscription_end:
+                    days_left = (student.subscription_end - today).days
+                    if days_left < 0:
+                        expired.append({
+                            "name": student.name,
+                            "days": abs(days_left)
+                        })
+                    elif days_left <= 3:
+                        ending_soon.append({
+                            "name": student.name,
+                            "days": days_left
+                        })
+                
+                # Check lessons remaining
+                if student.lessons_remaining <= 0:
+                    depleted.append({
+                        "name": student.name,
+                        "remaining": 0
+                    })
+                elif student.lessons_remaining <= 2:
+                    low_lessons.append({
+                        "name": student.name,
+                        "remaining": student.lessons_remaining
+                    })
+            
+            # Only send if there are alerts
+            total_alerts = len(expired) + len(ending_soon) + len(low_lessons) + len(depleted)
+            
+            if total_alerts > 0 or True:  # Send even if no alerts (for testing)
+                text = f"📊 <b>Ежедневная сводка ({today.strftime('%d.%m.%Y')})</b>\n\n"
+                
+                # Urgent: expired subscriptions
+                if expired:
+                    text += f"🚨 <b>Просрочена оплата ({len(expired)}):</b>\n"
+                    for item in expired:
+                        text += f"  • {item['name']} — {item['days']} дн. назад\n"
+                    text += "\n"
+                
+                # Ending soon
+                if ending_soon:
+                    text += f"⏰ <b>Заканчивается абонемент ({len(ending_soon)}):</b>\n"
+                    for item in ending_soon:
+                        day_word = "день" if item['days'] == 1 else "дня" if item['days'] < 5 else "дней"
+                        text += f"  • {item['name']} — {item['days']} {day_word}\n"
+                    text += "\n"
+                
+                # Depleted lessons
+                if depleted:
+                    text += f"❌ <b>Закончились занятия ({len(depleted)}):</b>\n"
+                    for item in depleted:
+                        text += f"  • {item['name']}\n"
+                    text += "\n"
+                
+                # Low lessons
+                if low_lessons:
+                    text += f"⚠️ <b>Мало занятий осталось ({len(low_lessons)}):</b>\n"
+                    for item in low_lessons:
+                        lesson_word = "занятие" if item['remaining'] == 1 else "занятия"
+                        text += f"  • {item['name']} — {item['remaining']} {lesson_word}\n"
+                    text += "\n"
+                
+                if total_alerts == 0:
+                    text += "✅ Все абонементы в порядке!\n\n"
+                
+                # Add today's schedule
+                weekday = today.weekday()
+                today_lessons = []
+                for student in students:
+                    days = student.lesson_days.split(",") if student.lesson_days else []
+                    if str(weekday) in days:
+                        today_lessons.append({
+                            "name": student.name,
+                            "time": get_lesson_time_for_day(student, weekday),
+                            "remaining": student.lessons_remaining
+                        })
+                
+                if today_lessons:
+                    # Group by time
+                    by_time = {}
+                    for lesson in today_lessons:
+                        time_key = lesson["time"]
+                        if time_key not in by_time:
+                            by_time[time_key] = []
+                        by_time[time_key].append(lesson)
+                    
+                    text += f"📅 <b>Сегодняшние тренировки ({len(today_lessons)}):</b>\n"
+                    for time_key in sorted(by_time.keys()):
+                        lessons = by_time[time_key]
+                        text += f"\n🕐 {time_key} ({len(lessons)} учеников)\n"
+                        for lesson in lessons[:5]:  # Show max 5 per group
+                            remaining = lesson["remaining"]
+                            if remaining <= 0:
+                                status = " ❌"
+                            elif remaining <= 2:
+                                status = " ⚠️"
+                            else:
+                                status = ""
+                            text += f"  • {lesson['name']}{status}\n"
+                        if len(lessons) > 5:
+                            text += f"  ... и ещё {len(lessons) - 5}\n"
+                
+                # Add action button
+                kb = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(
+                        text="📱 Открыть CRM",
+                        web_app=WebAppInfo(url=f"{WEBAPP_URL or 'https://your-app.up.railway.app'}/")
+                    )]
+                ])
+                
+                try:
+                    await bot.send_message(coach.telegram_id, text, parse_mode="HTML", reply_markup=kb)
+                    
+                    # Mark as sent
+                    log = DailyNotificationLog(
+                        coach_id=coach.id,
+                        notification_type="daily_summary",
+                        date=today
+                    )
+                    s.add(log)
+                    await s.commit()
+                    
+                    logger.info(f"Daily summary sent to coach {coach.id}")
+                except Exception as e:
+                    logger.error(f"Failed to send daily summary to coach {coach.id}: {e}")
+
+
+@router.message(Command("summary"))
+async def cmd_summary(message: Message):
+    """Manually request daily summary."""
+    user_id = message.from_user.id
+    
+    # Check if coach
+    async with async_session() as s:
+        result = await s.execute(select(Coach).where(Coach.telegram_id == user_id))
+        coach = result.scalar_one_or_none()
+    
+    if not coach:
+        await message.answer("❌ У вас нет доступа")
+        return
+    
+    await message.answer("⏳ Формирую сводку...")
+    await send_daily_summary(coach.id)
+    await message.answer("✅ Сводка отправлена!")
+
+
+# === Lesson Reminder Scheduler ===
+
+async def lesson_reminder_scheduler():
+    """Background task: check for unmarked lessons every 5 minutes."""
+    from app.models import Notification
+    
+    while True:
+        try:
+            await asyncio.sleep(300)  # 5 minutes
+            
+            now = datetime.now()
+            current_weekday = now.weekday()
+            current_date = now.date()
+            current_time = now.strftime("%H:%M")
+            
+            async with async_session() as s:
+                # Get all coaches
+                coaches_result = await s.execute(select(Coach).where(Coach.is_active == True))
+                coaches = coaches_result.scalars().all()
+                
+                for coach in coaches:
+                    # Get students with lessons at this time
+                    students_result = await s.execute(
+                        select(Student).where(
+                            Student.coach_id == coach.id,
+                            Student.is_active == True
+                        )
+                    )
+                    students = students_result.scalars().all()
+                    
+                    for student in students:
+                        days = student.lesson_days.split(",") if student.lesson_days else []
+                        if str(current_weekday) not in days:
+                            continue
+                        
+                        # Check if lesson time matches (within 5 min window)
+                        lesson_time = get_lesson_time_for_day(student, current_weekday)
+                        lesson_hour, lesson_min = map(int, lesson_time.split(":"))
+                        lesson_start = lesson_hour * 60 + lesson_min
+                        now_total = now.hour * 60 + now.minute
+                        
+                        # Only notify at lesson start time (within 5 min window)
+                        if not (0 <= now_total - lesson_start <= 5):
+                            continue
+                        
+                        # Check if already notified for this lesson
+                        existing_notification = await s.execute(
+                            select(Notification).where(
+                                Notification.coach_id == coach.id,
+                                Notification.type == "lesson_reminder",
+                                Notification.created_at >= now - timedelta(minutes=30)
+                            )
+                        )
+                        if existing_notification.scalar_one_or_none():
+                            continue
+                        
+                        # Check if lesson already marked
+                        existing_lesson = await s.execute(
+                            select(Lesson).where(
+                                Lesson.student_id == student.id,
+                                Lesson.date == current_date
+                            )
+                        )
+                        if existing_lesson.scalar_one_or_none():
+                            continue
+                        
+                        # Send reminder
+                        await send_lesson_reminder(coach, [student], lesson_time)
+                        
+                        # Log notification
+                        notification = Notification(
+                            coach_id=coach.id,
+                            student_id=student.id,
+                            type="lesson_reminder",
+                            message=f"Напоминание о тренировке {lesson_time}"
+                        )
+                        s.add(notification)
+                        await s.commit()
+                        
+        except Exception as e:
+            logger.error(f"Error in reminder scheduler: {e}")
+            await asyncio.sleep(60)
+
+
+async def send_lesson_reminder(coach: Coach, students: list, time_str: str):
+    """Send lesson reminder notification to coach."""
+    student_names = ", ".join([s.name for s in students[:3]])
+    if len(students) > 3:
+        student_names += f" и ещё {len(students) - 3}"
+    
+    text = f"⏰ <b>Тренировка {time_str}</b>\n\n"
+    text += f"👥 Не отмечены ({len(students)}):\n"
+    for st in students:
+        # Show remaining lessons indicator
+        remaining = getattr(st, 'lessons_remaining', None)
+        if remaining is not None:
+            if remaining <= 0:
+                indicator = " ❌"
+            elif remaining <= 2:
+                indicator = " ⚠️"
+            else:
+                indicator = ""
+            text += f"• {st.name}{indicator}\n"
+        else:
+            text += f"• {st.name}\n"
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📱 Открыть CRM", web_app=WebAppInfo(url=f"{WEBAPP_URL or 'https://your-app.up.railway.app'}/"))],
+        [InlineKeyboardButton(text="❌ Тренировки нет", callback_data="skip_lesson")]
+    ])
+    
+    try:
+        await bot.send_message(coach.telegram_id, text, parse_mode="HTML", reply_markup=kb)
+    except Exception as e:
+        logger.error(f"Failed to send reminder to coach {coach.id}: {e}")
+
+
+# === Daily Notification Scheduler ===
+
+async def daily_notification_scheduler():
+    """Background task: send daily summaries at 9:00 AM."""
+    while True:
+        try:
+            now = datetime.now()
+            
+            # Calculate time until 9:00 AM
+            target_time = now.replace(hour=9, minute=0, second=0, microsecond=0)
+            if target_time <= now:
+                target_time += timedelta(days=1)
+            
+            wait_seconds = (target_time - now).total_seconds()
+            logger.info(f"Daily notification scheduler: waiting {wait_seconds/3600:.1f} hours until 9:00 AM")
+            
+            await asyncio.sleep(wait_seconds)
+            
+            # Send daily summaries
+            await send_daily_summary()
+            
+            # Wait a bit to avoid double-sending
+            await asyncio.sleep(60)
+            
+        except Exception as e:
+            logger.error(f"Error in daily notification scheduler: {e}")
+            await asyncio.sleep(3600)  # Retry in 1 hour

@@ -19,6 +19,21 @@ class Coach(Base):
     lessons = relationship("Lesson", back_populates="coach", cascade="all, delete-orphan")
     payments = relationship("Payment", back_populates="coach", cascade="all, delete-orphan")
     notifications = relationship("Notification", back_populates="coach", cascade="all, delete-orphan")
+    locations = relationship("Location", back_populates="coach", cascade="all, delete-orphan")
+
+
+class Location(Base):
+    """Training locations (halls)."""
+    __tablename__ = "locations"
+    
+    id = Column(Integer, primary_key=True)
+    coach_id = Column(Integer, ForeignKey("coaches.id"), nullable=False)
+    name = Column(String(200), nullable=False)
+    address = Column(String(500))
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    coach = relationship("Coach", back_populates="locations")
 
 
 class Student(Base):
@@ -36,11 +51,13 @@ class Student(Base):
     
     # Individual settings per student
     location = Column(String(200), default="Зал Break Wave")
-    lesson_days = Column(String(100), default="1,3")  # 0=Пн, 1=Вт, etc.
-    lesson_time = Column(String(10), default="18:00")
-    lesson_duration = Column(Integer, default=90)  # minutes
+    location_id = Column(Integer, ForeignKey("locations.id"), nullable=True)
+    lesson_days = Column(String(100), default="1,3")
+    lesson_times = Column(String(500), default='{"1": "18:00", "3": "18:00"}')
+    lesson_duration = Column(Integer, default=90)
     lesson_price = Column(Integer, default=150)
     lessons_count = Column(Integer, default=8)
+    lessons_remaining = Column(Integer, default=8)
     subscription_start = Column(Date, nullable=True)
     subscription_end = Column(Date, nullable=True)
     
@@ -48,9 +65,27 @@ class Student(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     
     coach = relationship("Coach", back_populates="students")
+    location_ref = relationship("Location")
     lessons = relationship("Lesson", back_populates="student", cascade="all, delete-orphan")
     attendance_records = relationship("Attendance", back_populates="student", cascade="all, delete-orphan")
     payments = relationship("Payment", back_populates="student", cascade="all, delete-orphan")
+    
+    def get_attendance_stats(self):
+        """Calculate attendance statistics."""
+        total = len(self.attendance_records)
+        present = sum(1 for a in self.attendance_records if a.status == "present")
+        absent = sum(1 for a in self.attendance_records if a.status == "absent")
+        sick = sum(1 for a in self.attendance_records if a.status == "sick")
+        return {"total": total, "present": present, "absent": absent, "sick": sick}
+    
+    def get_lesson_time_for_day(self, day_of_week):
+        """Get lesson time for specific day of week."""
+        try:
+            import json
+            times = json.loads(self.lesson_times or '{}')
+            return times.get(str(day_of_week), times.get('default', '18:00'))
+        except:
+            return '18:00'
 
 
 class Lesson(Base):
@@ -62,12 +97,14 @@ class Lesson(Base):
     date = Column(Date, nullable=False)
     time = Column(String(10))
     location = Column(String(200))
+    location_id = Column(Integer, ForeignKey("locations.id"), nullable=True)
     topic = Column(String(200))
     notes = Column(Text)
     created_at = Column(DateTime, default=datetime.utcnow)
     
     coach = relationship("Coach", back_populates="lessons")
     student = relationship("Student", back_populates="lessons")
+    location_ref = relationship("Location")
     attendance = relationship("Attendance", back_populates="lesson", uselist=False, cascade="all, delete-orphan")
 
 
@@ -75,14 +112,19 @@ class Attendance(Base):
     __tablename__ = "attendance"
     
     id = Column(Integer, primary_key=True)
-    lesson_id = Column(Integer, ForeignKey("lessons.id"), nullable=False)
+    lesson_id = Column(Integer, ForeignKey("lessons.id"), nullable=True)
     student_id = Column(Integer, ForeignKey("students.id"), nullable=False)
-    status = Column(String(20), default="present")  # present, absent, sick, excused
+    location_id = Column(Integer, ForeignKey("locations.id"), nullable=True)
+    status = Column(String(20), default="present")
+    is_extra = Column(Boolean, default=False)
+    attendance_date = Column(Date, nullable=False)
+    attendance_time = Column(String(10))
     notes = Column(String(500))
     created_at = Column(DateTime, default=datetime.utcnow)
     
     lesson = relationship("Lesson", back_populates="attendance")
     student = relationship("Student", back_populates="attendance_records")
+    location = relationship("Location")
 
 
 class Payment(Base):
@@ -120,9 +162,20 @@ class Notification(Base):
     id = Column(Integer, primary_key=True)
     coach_id = Column(Integer, ForeignKey("coaches.id"), nullable=False)
     student_id = Column(Integer, ForeignKey("students.id"), nullable=True)
-    type = Column(String(50), nullable=False)  # payment_due, subscription_ending, etc.
+    type = Column(String(50), nullable=False)  # payment_due, subscription_ending, lesson_reminder, daily_digest
     message = Column(Text, nullable=False)
     is_read = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     
     coach = relationship("Coach", back_populates="notifications")
+
+
+class DailyNotificationLog(Base):
+    """Tracks which daily notifications have been sent to avoid duplicates."""
+    __tablename__ = "daily_notification_logs"
+    
+    id = Column(Integer, primary_key=True)
+    coach_id = Column(Integer, ForeignKey("coaches.id"), nullable=False)
+    notification_type = Column(String(50), nullable=False)  # payment_due, low_lessons
+    sent_at = Column(DateTime, default=datetime.utcnow)
+    date = Column(Date, nullable=False)  # The date for which notification was sent

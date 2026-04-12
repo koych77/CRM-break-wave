@@ -41,6 +41,18 @@ async def init_db():
             )
         """))
         
+        # Locations table
+        await conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS locations (
+                id INTEGER PRIMARY KEY,
+                coach_id INTEGER NOT NULL REFERENCES coaches(id),
+                name VARCHAR(200) NOT NULL,
+                address VARCHAR(500),
+                is_active BOOLEAN DEFAULT 1,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        """))
+        
         # Students table - individual settings per student
         await conn.execute(text("""
             CREATE TABLE IF NOT EXISTS students (
@@ -53,12 +65,14 @@ async def init_db():
                 age INTEGER,
                 birthday DATE,
                 notes TEXT,
-                -- Individual settings
                 location VARCHAR(200) DEFAULT 'Зал Break Wave',
+                location_id INTEGER REFERENCES locations(id),
                 lesson_days VARCHAR(100) DEFAULT '1,3',
-                lesson_time VARCHAR(10) DEFAULT '18:00',
-                lesson_price INTEGER DEFAULT 5000,
+                lesson_times VARCHAR(500) DEFAULT '{"1": "18:00", "3": "18:00"}',
+                lesson_duration INTEGER DEFAULT 90,
+                lesson_price INTEGER DEFAULT 150,
                 lessons_count INTEGER DEFAULT 8,
+                lessons_remaining INTEGER DEFAULT 8,
                 subscription_start DATE,
                 subscription_end DATE,
                 is_active BOOLEAN DEFAULT 1,
@@ -75,22 +89,26 @@ async def init_db():
                 date DATE NOT NULL,
                 time VARCHAR(10),
                 location VARCHAR(200),
+                location_id INTEGER REFERENCES locations(id),
                 topic VARCHAR(200),
                 notes TEXT,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         """))
         
-        # Attendance table
+        # Attendance table (supports both scheduled and extra lessons)
         await conn.execute(text("""
             CREATE TABLE IF NOT EXISTS attendance (
                 id INTEGER PRIMARY KEY,
-                lesson_id INTEGER NOT NULL REFERENCES lessons(id),
+                lesson_id INTEGER REFERENCES lessons(id),
                 student_id INTEGER NOT NULL REFERENCES students(id),
+                location_id INTEGER REFERENCES locations(id),
                 status VARCHAR(20) DEFAULT 'present',
+                is_extra BOOLEAN DEFAULT 0,
+                attendance_date DATE NOT NULL,
+                attendance_time VARCHAR(10),
                 notes VARCHAR(500),
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(lesson_id, student_id)
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         """))
         
@@ -132,6 +150,17 @@ async def init_db():
                 message TEXT NOT NULL,
                 is_read BOOLEAN DEFAULT 0,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        """))
+        
+        # Daily notification logs (to prevent duplicate daily notifications)
+        await conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS daily_notification_logs (
+                id INTEGER PRIMARY KEY,
+                coach_id INTEGER NOT NULL REFERENCES coaches(id),
+                notification_type VARCHAR(50) NOT NULL,
+                sent_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                date DATE NOT NULL
             )
         """))
 

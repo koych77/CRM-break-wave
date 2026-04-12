@@ -1065,3 +1065,592 @@ body {
         grid-template-columns: 1fr;
     }
 }
+
+
+/* === New Styles for Lesson Tracking & Extra Attendance === */
+
+/* Lessons Indicator */
+.lessons-indicator {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 2px 8px;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    margin-left: 8px;
+}
+
+.lessons-indicator.low {
+    background: var(--warning);
+    color: var(--bg-primary);
+    border-color: var(--warning);
+}
+
+.lessons-indicator.none {
+    background: var(--danger);
+    color: white;
+    border-color: var(--danger);
+}
+
+/* Progress Bar for Lessons */
+.lessons-progress {
+    margin-top: 8px;
+}
+
+.progress-bar {
+    height: 8px;
+    background: var(--bg-secondary);
+    border-radius: 4px;
+    overflow: hidden;
+    margin-bottom: 8px;
+}
+
+.progress-fill {
+    height: 100%;
+    background: linear-gradient(90deg, var(--accent), var(--accent-secondary));
+    border-radius: 4px;
+    transition: width 0.3s ease;
+}
+
+.progress-fill.low {
+    background: var(--warning);
+}
+
+.progress-fill.empty {
+    background: var(--danger);
+    width: 100% !important;
+}
+
+.progress-text {
+    display: flex;
+    justify-content: space-between;
+    font-size: 12px;
+    color: var(--text-secondary);
+}
+
+.progress-text .text-warning {
+    color: var(--warning);
+    font-weight: 600;
+}
+
+/* Alert Messages */
+.alert-danger {
+    background: rgba(255, 82, 82, 0.15);
+    border: 1px solid var(--danger);
+    border-radius: 8px;
+    padding: 12px 16px;
+    margin: 12px 16px;
+    color: var(--danger);
+    font-size: 14px;
+    font-weight: 500;
+}
+
+.alert-warning {
+    background: rgba(255, 193, 7, 0.15);
+    border: 1px solid var(--warning);
+    border-radius: 8px;
+    padding: 12px 16px;
+    margin: 12px 16px;
+    color: var(--warning);
+    font-size: 14px;
+    font-weight: 500;
+}
+
+/* Action Buttons Grid */
+.action-buttons-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+    margin: 24px 16px;
+}
+
+.action-buttons-grid .btn-primary,
+.action-buttons-grid .btn-secondary {
+    padding: 12px 8px;
+    font-size: 13px;
+}
+
+/* Modal Styles */
+.modal {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(10, 22, 40, 0.95);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+    padding: 20px;
+    animation: fadeIn 0.2s ease;
+}
+
+.modal-content {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 24px;
+    width: 100%;
+    max-width: 400px;
+    animation: slideUp 0.3s ease;
+}
+
+.modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 20px;
+}
+
+.modal-header h3 {
+    font-size: 18px;
+    color: var(--accent);
+}
+
+.close-btn {
+    background: none;
+    border: none;
+    color: var(--text-secondary);
+    font-size: 20px;
+    cursor: pointer;
+    padding: 4px;
+}
+
+.close-btn:hover {
+    color: var(--text-primary);
+}
+
+.modal-actions {
+    display: flex;
+    gap: 12px;
+    margin-top: 24px;
+}
+
+.modal-actions button {
+    flex: 1;
+}
+
+/* Student Summary in Modal */
+.student-summary {
+    background: var(--bg-secondary);
+    border-radius: 12px;
+    padding: 16px;
+    margin-bottom: 16px;
+}
+
+.summary-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.summary-name {
+    font-weight: 600;
+    font-size: 16px;
+}
+
+.summary-lessons {
+    background: var(--bg-card);
+    padding: 4px 12px;
+    border-radius: 12px;
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--accent);
+}
+
+.summary-lessons.warning {
+    background: var(--warning);
+    color: var(--bg-primary);
+}
+
+/* Attendance Stats Bar */
+.attendance-stats-bar {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 20px;
+    flex-wrap: wrap;
+}
+
+.stat-pill {
+    background: var(--bg-secondary);
+    border-radius: 20px;
+    padding: 8px 16px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    flex: 1;
+    min-width: 80px;
+}
+
+.stat-pill .stat-value {
+    font-size: 18px;
+    font-weight: 700;
+    color: var(--accent);
+}
+
+.stat-pill .stat-label {
+    font-size: 10px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+}
+
+.stat-pill.success .stat-value {
+    color: var(--success);
+}
+
+/* Attendance History List */
+.attendance-history-list {
+    max-height: 400px;
+    overflow-y: auto;
+}
+
+.attendance-history-item {
+    background: var(--bg-secondary);
+    border-radius: 12px;
+    padding: 16px;
+    margin-bottom: 12px;
+}
+
+.attendance-date {
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 8px;
+}
+
+.date-day {
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.date-time {
+    color: var(--text-muted);
+    font-size: 13px;
+}
+
+.attendance-status {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 8px;
+}
+
+.status-emoji {
+    font-size: 18px;
+}
+
+.status-text {
+    font-weight: 500;
+    font-size: 14px;
+}
+
+.badge-extra {
+    background: var(--accent-secondary);
+    color: white;
+    font-size: 10px;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-weight: 600;
+    margin-left: auto;
+}
+
+.attendance-notes {
+    font-size: 13px;
+    color: var(--text-secondary);
+    padding-top: 8px;
+    border-top: 1px solid var(--border);
+    margin-top: 8px;
+}
+
+/* Attendance Summary in Student Detail */
+.attendance-summary {
+    display: flex;
+    justify-content: space-around;
+    background: var(--bg-secondary);
+    border-radius: 12px;
+    padding: 16px;
+    margin-top: 12px;
+}
+
+.attendance-stat {
+    text-align: center;
+}
+
+.attendance-stat .stat-number {
+    display: block;
+    font-size: 24px;
+    font-weight: 700;
+    color: var(--accent);
+}
+
+.attendance-stat .stat-number.success {
+    color: var(--success);
+}
+
+.attendance-stat .stat-label {
+    font-size: 11px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    margin-top: 4px;
+}
+
+/* Checkbox styling */
+.form-group label:has(input[type="checkbox"]) {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+}
+
+.form-group input[type="checkbox"] {
+    width: 20px;
+    height: 20px;
+    accent-color: var(--accent);
+}
+
+/* Low lessons warning in student list */
+.text-warning {
+    color: var(--warning);
+    font-weight: 600;
+}
+
+/* Dashboard alerts enhancement */
+.alerts-section .alert-danger,
+.alerts-section .alert-warning {
+    margin: 8px 0;
+}
+
+
+/* === Lesson Times Grid === */
+
+.lesson-times-grid {
+    background: var(--bg-card);
+    border-radius: 12px;
+    padding: 16px;
+    margin-bottom: 16px;
+    border: 1px solid var(--border);
+}
+
+.lesson-times-grid .section-label {
+    display: block;
+    font-size: 13px;
+    color: var(--text-secondary);
+    margin-bottom: 12px;
+    font-weight: 500;
+}
+
+.times-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+    gap: 12px;
+}
+
+.time-input-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: var(--bg-secondary);
+    padding: 8px 12px;
+    border-radius: 8px;
+}
+
+.time-input-row .day-label {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--accent);
+    min-width: 24px;
+}
+
+.time-input-row .day-time {
+    background: transparent;
+    border: none;
+    color: var(--text-primary);
+    font-size: 14px;
+    padding: 4px;
+    flex: 1;
+}
+
+/* === Statistics Styles === */
+
+.statistics-container {
+    padding: 16px;
+    padding-bottom: 100px;
+}
+
+.stats-summary-cards {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 12px;
+    margin-bottom: 24px;
+}
+
+.summary-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 16px 12px;
+    text-align: center;
+}
+
+.summary-card.highlight {
+    background: linear-gradient(135deg, var(--accent), var(--accent-secondary));
+    border-color: transparent;
+}
+
+.summary-card.highlight .summary-value,
+.summary-card.highlight .summary-label {
+    color: var(--bg-primary);
+}
+
+.summary-value {
+    display: block;
+    font-size: 24px;
+    font-weight: 700;
+    color: var(--accent);
+    margin-bottom: 4px;
+}
+
+.summary-label {
+    font-size: 11px;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+}
+
+.stat-section {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 16px;
+    margin-bottom: 16px;
+}
+
+.stat-section h3 {
+    font-size: 14px;
+    color: var(--accent);
+    margin-bottom: 16px;
+}
+
+.stat-bars {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.stat-bar-item {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.bar-label {
+    min-width: 80px;
+    font-size: 13px;
+    color: var(--text-secondary);
+}
+
+.bar-wrapper {
+    flex: 1;
+    height: 8px;
+    background: var(--bg-secondary);
+    border-radius: 4px;
+    overflow: hidden;
+}
+
+.bar-fill {
+    height: 100%;
+    background: linear-gradient(90deg, var(--accent), var(--accent-secondary));
+    border-radius: 4px;
+    transition: width 0.3s ease;
+}
+
+.bar-value {
+    min-width: 40px;
+    text-align: right;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.age-groups {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+}
+
+.age-groups .stat-pill {
+    background: var(--bg-secondary);
+    border-radius: 20px;
+    padding: 10px 16px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    min-width: 100px;
+}
+
+.age-groups .stat-value {
+    font-size: 20px;
+    font-weight: 700;
+    color: var(--accent);
+}
+
+.age-groups .stat-label {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-top: 2px;
+}
+
+.trend-chart {
+    display: flex;
+    justify-content: space-around;
+    align-items: flex-end;
+    height: 150px;
+    padding-top: 20px;
+}
+
+.trend-item {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    flex: 1;
+}
+
+.trend-month {
+    font-size: 12px;
+    color: var(--text-secondary);
+}
+
+.trend-bar-wrapper {
+    flex: 1;
+    display: flex;
+    align-items: flex-end;
+    width: 100%;
+    justify-content: center;
+}
+
+.trend-bar {
+    width: 24px;
+    background: linear-gradient(180deg, var(--accent), var(--accent-secondary));
+    border-radius: 4px 4px 0 0;
+    min-height: 4px;
+}
+
+.trend-count {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+/* === Search Results === */
+
+#search-results .list-item {
+    margin-bottom: 8px;
+}
+
+#search-results .list-item-meta {
+    flex-wrap: wrap;
+}

@@ -5,7 +5,7 @@ const tg = window.Telegram?.WebApp;
 
 // Cache busting - force reload if version changed
 const APP_VERSION_KEY = 'crm_bw_version';
-const CURRENT_VERSION = '2'; // Change this when deploying major updates
+const CURRENT_VERSION = '4'; // Version 4: Multi-time per day, locations, statistics, search
 
 // Check version on load
 const savedVersion = localStorage.getItem(APP_VERSION_KEY);
@@ -325,7 +325,7 @@ async function loadDashboard() {
     }
 }
 
-function renderDashboard(data) {
+async function renderDashboard(data) {
     // Update stats
     document.getElementById('stat-students').textContent = data.students_count;
     document.getElementById('stat-lessons').textContent = data.lessons_this_month;
@@ -336,12 +336,16 @@ function renderDashboard(data) {
     const dateOptions = { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' };
     document.getElementById('current-date').textContent = new Date().toLocaleDateString('ru-RU', dateOptions);
     
+    // Load daily summary for detailed alerts
+    const summary = await loadDailySummary();
+    
     // Alerts
     const alertsContainer = document.getElementById('alerts-list');
     const alertsSection = document.getElementById('alerts-section');
     
     let alerts = [];
     
+    // Subscription alerts
     if (data.overdue_count > 0) {
         alerts.push({
             icon: '❌',
@@ -358,6 +362,27 @@ function renderDashboard(data) {
             subtitle: 'Осталось менее 3 дней',
             type: 'warning'
         });
+    }
+    
+    // Lessons remaining alerts from summary
+    if (summary && summary.alerts) {
+        if (summary.alerts.depleted && summary.alerts.depleted.length > 0) {
+            alerts.push({
+                icon: '🚫',
+                title: `Закончились занятия: ${summary.alerts.depleted.length}`,
+                subtitle: 'Требуется оплата',
+                type: 'danger'
+            });
+        }
+        
+        if (summary.alerts.low_lessons && summary.alerts.low_lessons.length > 0) {
+            alerts.push({
+                icon: '⚠️',
+                title: `Мало занятий: ${summary.alerts.low_lessons.length}`,
+                subtitle: 'Осталось 1-2 занятия',
+                type: 'warning'
+            });
+        }
     }
     
     if (alerts.length === 0) {
@@ -444,6 +469,15 @@ function renderStudentsList(list) {
             }
         }
         
+        // Check lessons remaining
+        let lessonsBadge = '';
+        const remaining = s.lessons_remaining !== undefined ? s.lessons_remaining : s.lessons_count;
+        if (remaining <= 0) {
+            lessonsBadge = '<span class="list-item-badge danger">Нет занятий</span>';
+        } else if (remaining <= 2) {
+            lessonsBadge = `<span class="list-item-badge warning">${remaining} занятия</span>`;
+        }
+        
         // Get coach info if available
         let coachInfo = '';
         if (s.coach_id && coaches.length > 1) {
@@ -455,17 +489,20 @@ function renderStudentsList(list) {
             }
         }
         
+        // Lessons indicator
+        const lessonsIndicator = `<span class="lessons-indicator ${remaining <= 2 ? 'low' : remaining <= 0 ? 'none' : ''}">${remaining}/${s.lessons_count || 8}</span>`;
+        
         return `
             <div class="list-item" onclick="openStudentDetail(${s.id})">
                 <div class="list-item-header">
-                    <span class="list-item-title">${escapeHtml(s.name)}</span>
-                    ${statusBadge}
+                    <span class="list-item-title">${escapeHtml(s.name)} ${lessonsIndicator}</span>
+                    ${lessonsBadge || statusBadge}
                 </div>
                 <div class="list-item-subtitle">${escapeHtml(s.nickname || '')}</div>
                 ${coachInfo}
                 <div class="list-item-meta">
                     <span>📍 ${escapeHtml(s.location || 'Зал Break Wave')}</span>
-                    <span>🕐 ${days} ${s.lesson_time || ''}</span>
+                    <span>🕐 ${days}</span>
                 </div>
             </div>
         `;
@@ -494,16 +531,21 @@ async function openAddStudent() {
     
     // Set default values
     document.getElementById('st-location').value = 'Зал Break Wave';
-    document.getElementById('st-time').value = '18:00';
-    document.getElementById('st-price').value = '5000';
+    document.getElementById('st-price').value = '150';
     document.getElementById('st-count').value = '8';
     
     const today = new Date().toISOString().split('T')[0];
     document.getElementById('st-sub-start').value = today;
     
+    // Load locations
+    await loadLocations();
+    
     // Load coaches list
     await loadCoaches();
     renderCoachSelect();
+    
+    // Generate time inputs
+    generateLessonTimeInputs();
     
     navigate('student-form');
 }
@@ -527,7 +569,9 @@ async function openStudentDetail(id) {
             return daysMap[d];
         }).join(', ') : '—';
         
+        // Subscription status
         let subStatus = 'Нет абонемента';
+        let subAlert = '';
         if (student.subscription_end) {
             const end = new Date(student.subscription_end);
             const today = new Date();
@@ -535,9 +579,48 @@ async function openStudentDetail(id) {
             
             if (daysLeft < 0) {
                 subStatus = `❌ Просрочен (${formatDate(student.subscription_end)})`;
+                subAlert = '<div class="alert-danger">Абонемент просрочен! Требуется оплата.</div>';
+            } else if (daysLeft <= 3) {
+                subStatus = `⏳ До ${formatDate(student.subscription_end)} (${daysLeft} дн.)`;
+                subAlert = `<div class="alert-warning">Абонемент заканчивается через ${daysLeft} дн.</div>`;
             } else {
                 subStatus = `✅ До ${formatDate(student.subscription_end)} (${daysLeft} дн.)`;
             }
+        }
+        
+        // Lessons remaining
+        const remaining = student.lessons_remaining !== undefined ? student.lessons_remaining : student.lessons_count;
+        const total = student.lessons_count || 8;
+        const used = total - remaining;
+        let lessonsAlert = '';
+        
+        if (remaining <= 0) {
+            lessonsAlert = '<div class="alert-danger">Занятия закончились! Требуется оплата.</div>';
+        } else if (remaining <= 2) {
+            lessonsAlert = `<div class="alert-warning">Осталось ${remaining} занятия. Пора оплачивать!</div>`;
+        }
+        
+        // Attendance history summary
+        let attendanceSummary = '';
+        if (student.attendance && student.attendance.length > 0) {
+            const present = student.attendance.filter(a => a.status === 'present').length;
+            const rate = Math.round((present / student.attendance.length) * 100);
+            attendanceSummary = `
+                <div class="attendance-summary">
+                    <div class="attendance-stat">
+                        <span class="stat-number">${student.attendance.length}</span>
+                        <span class="stat-label">Всего</span>
+                    </div>
+                    <div class="attendance-stat">
+                        <span class="stat-number success">${present}</span>
+                        <span class="stat-label">Посещено</span>
+                    </div>
+                    <div class="attendance-stat">
+                        <span class="stat-number">${rate}%</span>
+                        <span class="stat-label">Посещаемость</span>
+                    </div>
+                </div>
+            `;
         }
         
         const content = document.getElementById('student-detail-content');
@@ -550,6 +633,9 @@ async function openStudentDetail(id) {
                     ${student.is_active ? 'Активен' : 'Неактивен'}
                 </span>
             </div>
+            
+            ${lessonsAlert}
+            ${subAlert}
             
             <div class="info-section">
                 <h3>📞 Контакты</h3>
@@ -583,13 +669,23 @@ async function openStudentDetail(id) {
                 </div>
                 <div class="info-row">
                     <span class="info-label">Стоимость</span>
-                    <span class="info-value">${student.lesson_price?.toLocaleString() || 0} Br / ${student.lessons_count || 8} занятий</span>
+                    <span class="info-value">${student.lesson_price?.toLocaleString() || 0} Br / ${total} занятий</span>
                 </div>
             </div>
             
             <div class="info-section">
                 <h3>📅 Абонемент</h3>
-                <div class="info-row">
+                <div class="lessons-progress">
+                    <div class="progress-bar">
+                        <div class="progress-fill ${remaining <= 2 ? 'low' : remaining <= 0 ? 'empty' : ''}" 
+                             style="width: ${(used / total) * 100}%"></div>
+                    </div>
+                    <div class="progress-text">
+                        <span>Использовано: <b>${used}</b></span>
+                        <span class="${remaining <= 2 ? 'text-warning' : ''}">Осталось: <b>${remaining}</b></span>
+                    </div>
+                </div>
+                <div class="info-row" style="margin-top: 12px;">
                     <span class="info-label">Статус</span>
                     <span class="info-value">${subStatus}</span>
                 </div>
@@ -601,6 +697,13 @@ async function openStudentDetail(id) {
                 ` : ''}
             </div>
             
+            ${attendanceSummary ? `
+            <div class="info-section">
+                <h3>📊 Посещаемость</h3>
+                ${attendanceSummary}
+            </div>
+            ` : ''}
+            
             ${student.notes ? `
             <div class="info-section">
                 <h3>📝 Заметки</h3>
@@ -608,9 +711,11 @@ async function openStudentDetail(id) {
             </div>
             ` : ''}
             
-            <div style="display: flex; gap: 12px; margin-top: 24px;">
-                <button class="btn-primary" style="flex: 1;" onclick="editStudent(${student.id})">✏️ Редактировать</button>
-                <button class="btn-secondary" style="flex: 1;" onclick="addPaymentForStudent(${student.id})">💰 Оплата</button>
+            <div class="action-buttons-grid">
+                <button class="btn-primary" onclick="editStudent(${student.id})">✏️ Редактировать</button>
+                <button class="btn-secondary" onclick="addPaymentForStudent(${student.id})">💰 Оплата</button>
+                <button class="btn-secondary" onclick="markExtraAttendance(${student.id})">⭐ Внеплановое</button>
+                <button class="btn-secondary" onclick="viewAttendanceHistory(${student.id})">📋 История</button>
             </div>
         `;
         
@@ -1105,4 +1210,628 @@ if (quickLessonContent) {
     saveBtn.textContent = '💾 Сохранить занятия';
     saveBtn.onclick = saveQuickLesson;
     quickLessonContent.appendChild(saveBtn);
+}
+
+
+// === Extra Attendance & Attendance History ===
+
+async function markExtraAttendance(studentId) {
+    // Show confirmation dialog with options
+    const now = new Date();
+    const today = now.toISOString().split('T')[0];
+    const currentTime = now.toTimeString().slice(0, 5);
+    
+    // Create modal
+    const modal = document.createElement('div');
+    modal.className = 'modal';
+    modal.innerHTML = `
+        <div class="modal-content">
+            <h3>⭐ Внеплановое посещение</h3>
+            <p style="margin-bottom: 16px; color: var(--text-secondary);">Отметить ученика вне расписания (отработка/дополнительное занятие)</p>
+            
+            <div class="form-group">
+                <label>Дата</label>
+                <input type="date" id="extra-date" value="${today}">
+            </div>
+            
+            <div class="form-group">
+                <label>Время</label>
+                <input type="time" id="extra-time" value="${currentTime}">
+            </div>
+            
+            <div class="form-group">
+                <label>Статус</label>
+                <select id="extra-status">
+                    <option value="present">✅ Присутствовал</option>
+                    <option value="absent">❌ Отсутствовал</option>
+                    <option value="sick">🤒 Болеет</option>
+                </select>
+            </div>
+            
+            <div class="form-group">
+                <label>Заметки</label>
+                <input type="text" id="extra-notes" placeholder="Например: Отработка за 15.03">
+            </div>
+            
+            <div class="form-group">
+                <label>
+                    <input type="checkbox" id="extra-deduct" checked>
+                    Списать занятие с абонемента
+                </label>
+            </div>
+            
+            <div class="modal-actions">
+                <button class="btn-secondary" onclick="this.closest('.modal').remove()">Отмена</button>
+                <button class="btn-primary" onclick="saveExtraAttendance(${studentId})">Сохранить</button>
+            </div>
+        </div>
+    `;
+    
+    document.body.appendChild(modal);
+}
+
+async function saveExtraAttendance(studentId) {
+    const date = document.getElementById('extra-date').value;
+    const time = document.getElementById('extra-time').value;
+    const status = document.getElementById('extra-status').value;
+    const notes = document.getElementById('extra-notes').value;
+    const deduct = document.getElementById('extra-deduct').checked;
+    
+    try {
+        const res = await fetch(`${API}/api/extra-attendance`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                initData,
+                student_id: studentId,
+                date,
+                time,
+                status,
+                notes,
+                deduct_lesson: deduct
+            })
+        });
+        
+        const result = await res.json();
+        
+        if (result.success) {
+            showNotification(result.message, 'success');
+            document.querySelector('.modal')?.remove();
+            // Refresh student detail
+            openStudentDetail(studentId);
+        } else if (result.error === 'no_lessons_remaining') {
+            showNotification('У ученика не осталось занятий в абонементе', 'error');
+        } else {
+            showNotification('Ошибка сохранения', 'error');
+        }
+    } catch (e) {
+        console.error('Extra attendance error:', e);
+        showNotification('Ошибка сохранения', 'error');
+    }
+}
+
+async function viewAttendanceHistory(studentId) {
+    try {
+        const res = await fetch(`${API}/api/students/${studentId}/attendance-history`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({initData})
+        });
+        
+        const data = await res.json();
+        
+        if (data.error) {
+            showNotification('Ошибка загрузки истории', 'error');
+            return;
+        }
+        
+        const student = data.student;
+        const attendance = data.attendance;
+        const stats = data.stats;
+        
+        // Create modal
+        const modal = document.createElement('div');
+        modal.className = 'modal';
+        modal.style.alignItems = 'flex-start';
+        modal.style.paddingTop = '20px';
+        
+        let attendanceHtml = '';
+        if (attendance.length === 0) {
+            attendanceHtml = '<p style="text-align: center; color: var(--text-secondary); padding: 20px;">Нет записей о посещениях</p>';
+        } else {
+            attendanceHtml = attendance.map(a => {
+                const statusEmoji = {
+                    'present': '✅',
+                    'absent': '❌',
+                    'sick': '🤒',
+                    'excused': '📝'
+                }[a.status] || '❓';
+                
+                const statusText = {
+                    'present': 'Присутствовал',
+                    'absent': 'Отсутствовал',
+                    'sick': 'Болел',
+                    'excused': 'Отменено'
+                }[a.status] || a.status;
+                
+                const extraBadge = a.is_extra ? '<span class="badge-extra">⭐ Внеплановое</span>' : '';
+                
+                return `
+                    <div class="attendance-history-item">
+                        <div class="attendance-date">
+                            <span class="date-day">${formatDate(a.date)}</span>
+                            <span class="date-time">${a.time || a.scheduled_time || ''}</span>
+                        </div>
+                        <div class="attendance-status">
+                            <span class="status-emoji">${statusEmoji}</span>
+                            <span class="status-text">${statusText}</span>
+                            ${extraBadge}
+                        </div>
+                        ${a.notes ? `<div class="attendance-notes">${escapeHtml(a.notes)}</div>` : ''}
+                    </div>
+                `;
+            }).join('');
+        }
+        
+        modal.innerHTML = `
+            <div class="modal-content" style="max-height: 80vh; overflow-y: auto;">
+                <div class="modal-header">
+                    <h3>📋 История посещений</h3>
+                    <button class="close-btn" onclick="this.closest('.modal').remove()">✕</button>
+                </div>
+                
+                <div class="student-summary">
+                    <div class="summary-row">
+                        <span class="summary-name">${escapeHtml(student.name)}</span>
+                        <span class="summary-lessons ${student.lessons_remaining <= 2 ? 'warning' : ''}">
+                            ${student.lessons_remaining}/${student.lessons_count} занятий
+                        </span>
+                    </div>
+                </div>
+                
+                <div class="attendance-stats-bar">
+                    <div class="stat-pill">
+                        <span class="stat-value">${stats.total_scheduled}</span>
+                        <span class="stat-label">По расписанию</span>
+                    </div>
+                    <div class="stat-pill">
+                        <span class="stat-value">${stats.extra_lessons}</span>
+                        <span class="stat-label">Внеплановые</span>
+                    </div>
+                    <div class="stat-pill success">
+                        <span class="stat-value">${stats.attendance_rate}%</span>
+                        <span class="stat-label">Посещаемость</span>
+                    </div>
+                </div>
+                
+                <div class="attendance-history-list">
+                    ${attendanceHtml}
+                </div>
+            </div>
+        `;
+        
+        document.body.appendChild(modal);
+    } catch (e) {
+        console.error('Attendance history error:', e);
+        showNotification('Ошибка загрузки истории', 'error');
+    }
+}
+
+// === Daily Summary Button ===
+
+async function loadDailySummary() {
+    try {
+        const res = await fetch(`${API}/api/coach/daily-summary`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({initData})
+        });
+        
+        const data = await res.json();
+        
+        // Store for dashboard use
+        window.dailySummaryData = data;
+        
+        return data;
+    } catch (e) {
+        console.error('Daily summary error:', e);
+        return null;
+    }
+}
+
+
+// === Locations ===
+
+let locations = [];
+
+async function loadLocations() {
+    try {
+        const res = await fetch(`${API}/api/locations`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({initData})
+        });
+        locations = await res.json();
+        renderLocationSelect();
+    } catch (e) {
+        console.error('Locations load error:', e);
+    }
+}
+
+function renderLocationSelect() {
+    const select = document.getElementById('st-location-id');
+    if (!select) return;
+    
+    let html = '<option value="">Основной зал</option>';
+    locations.forEach(loc => {
+        html += `<option value="${loc.id}">${escapeHtml(loc.name)}</option>`;
+    });
+    select.innerHTML = html;
+}
+
+// === Lesson Times (per day) ===
+
+let lessonTimes = {}; // day -> time
+
+function generateLessonTimeInputs() {
+    const container = document.getElementById('lesson-times-container');
+    if (!container) return;
+    
+    const daysMap = {0:'Пн',1:'Вт',2:'Ср',3:'Чт',4:'Пт',5:'Сб',6:'Вс'};
+    
+    let html = '<div class="lesson-times-grid">';
+    html += '<label class="section-label">Время по дням:</label>';
+    html += '<div class="times-grid">';
+    
+    selectedDays.forEach(day => {
+        const time = lessonTimes[day] || '18:00';
+        html += `
+            <div class="time-input-row" data-day="${day}">
+                <span class="day-label">${daysMap[day]}</span>
+                <input type="time" class="day-time" value="${time}" data-day="${day}">
+            </div>
+        `;
+    });
+    
+    html += '</div></div>';
+    container.innerHTML = html;
+    
+    // Add change listeners
+    container.querySelectorAll('.day-time').forEach(input => {
+        input.addEventListener('change', (e) => {
+            lessonTimes[e.target.dataset.day] = e.target.value;
+        });
+    });
+}
+
+// Override setupWeekdaySelector to regenerate time inputs
+const originalSetupWeekdaySelector = setupWeekdaySelector;
+setupWeekdaySelector = function() {
+    const container = document.getElementById('weekdays-selector');
+    if (!container) return;
+    
+    container.querySelectorAll('button').forEach(btn => {
+        const day = parseInt(btn.dataset.day);
+        if (selectedDays.has(day)) {
+            btn.classList.add('active');
+        }
+        
+        btn.addEventListener('click', () => {
+            btn.classList.toggle('active');
+            if (btn.classList.contains('active')) {
+                selectedDays.add(day);
+                if (!lessonTimes[day]) lessonTimes[day] = '18:00';
+            } else {
+                selectedDays.delete(day);
+                delete lessonTimes[day];
+            }
+            generateLessonTimeInputs();
+        });
+    });
+    
+    generateLessonTimeInputs();
+};
+
+// Override saveStudent to include lesson_times
+const originalSaveStudent = saveStudent;
+saveStudent = async function() {
+    // Collect lesson times
+    const times = {};
+    selectedDays.forEach(day => {
+        const input = document.querySelector(`.day-time[data-day="${day}"]`);
+        times[day] = input ? input.value : '18:00';
+    });
+    
+    const coachSelect = document.getElementById('st-coach');
+    const coachId = coachSelect && coachSelect.value ? parseInt(coachSelect.value) : null;
+    const locationSelect = document.getElementById('st-location-id');
+    const locationId = locationSelect ? parseInt(locationSelect.value) || null : null;
+    
+    const data = {
+        name: document.getElementById('st-name').value,
+        nickname: document.getElementById('st-nickname').value,
+        phone: document.getElementById('st-phone').value,
+        parent_phone: document.getElementById('st-parent-phone').value,
+        age: document.getElementById('st-age').value,
+        location: document.getElementById('st-location').value,
+        location_id: locationId,
+        lesson_days: Array.from(selectedDays).join(','),
+        lesson_times: times,
+        lesson_price: parseInt(document.getElementById('st-price').value) || 150,
+        lessons_count: parseInt(document.getElementById('st-count').value) || 8,
+        subscription_start: document.getElementById('st-sub-start').value,
+        subscription_end: document.getElementById('st-sub-end').value,
+        notes: document.getElementById('st-notes').value,
+        coach_id: coachId,
+    };
+    
+    try {
+        const url = editingStudentId 
+            ? `${API}/api/students/${editingStudentId}/update`
+            : `${API}/api/students/create`;
+        
+        const res = await fetch(url, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({initData, student: data})
+        });
+        
+        const result = await res.json();
+        
+        if (result.success) {
+            showNotification(editingStudentId ? 'Ученик обновлен' : 'Ученик добавлен', 'success');
+            DataCache.clear();
+            goBack();
+            if (currentScreen === 'students') {
+                loadStudents();
+            }
+        } else {
+            showNotification('Ошибка сохранения', 'error');
+        }
+    } catch (e) {
+        console.error('Save student error:', e);
+        showNotification('Ошибка сохранения', 'error');
+    }
+};
+
+// Override editStudent to load lesson_times
+const originalEditStudent = editStudent;
+editStudent = async function(id) {
+    editingStudentId = id;
+    
+    try {
+        const res = await fetch(`${API}/api/students/${id}`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({initData})
+        });
+        
+        const student = await res.json();
+        
+        // Load locations first
+        await loadLocations();
+        if (student.location_id) {
+            document.getElementById('st-location-id').value = student.location_id;
+        }
+        
+        document.getElementById('student-form-title').textContent = 'Редактировать ученика';
+        document.getElementById('st-name').value = student.name || '';
+        document.getElementById('st-nickname').value = student.nickname || '';
+        document.getElementById('st-phone').value = student.phone || '';
+        document.getElementById('st-parent-phone').value = student.parent_phone || '';
+        document.getElementById('st-age').value = student.age || '';
+        document.getElementById('st-location').value = student.location || 'Зал Break Wave';
+        document.getElementById('st-price').value = student.lesson_price || 150;
+        document.getElementById('st-count').value = student.lessons_count || 8;
+        document.getElementById('st-notes').value = student.notes || '';
+        
+        if (student.subscription_start) {
+            document.getElementById('st-sub-start').value = student.subscription_start;
+        }
+        if (student.subscription_end) {
+            document.getElementById('st-sub-end').value = student.subscription_end;
+        }
+        
+        // Set weekdays and times
+        selectedDays = new Set((student.lesson_days || '1,3').split(',').map(Number));
+        document.querySelectorAll('#weekdays-selector button').forEach(btn => {
+            const day = parseInt(btn.dataset.day);
+            btn.classList.toggle('active', selectedDays.has(day));
+        });
+        
+        // Parse lesson_times JSON
+        try {
+            lessonTimes = JSON.parse(student.lesson_times || '{}');
+        } catch {
+            lessonTimes = {};
+        }
+        generateLessonTimeInputs();
+        
+        navigate('student-form');
+    } catch (e) {
+        console.error('Edit student error:', e);
+    }
+};
+
+// === Statistics ===
+
+let currentStatsPeriod = 'month';
+
+function switchStatsPeriod(period, btn) {
+    document.querySelectorAll('#screen-statistics .tab').forEach(t => t.classList.remove('active'));
+    btn.classList.add('active');
+    currentStatsPeriod = period;
+    loadStatistics();
+}
+
+async function loadStatistics() {
+    const container = document.getElementById('statistics-content');
+    container.innerHTML = '<div class="loading"><div class="spinner"></div>Загрузка...</div>';
+    
+    try {
+        const res = await fetch(`${API}/api/statistics`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({initData, period: currentStatsPeriod})
+        });
+        
+        const data = await res.json();
+        renderStatistics(data);
+    } catch (e) {
+        console.error('Statistics error:', e);
+        container.innerHTML = '<div class="empty-state">Ошибка загрузки статистики</div>';
+    }
+}
+
+function renderStatistics(data) {
+    const container = document.getElementById('statistics-content');
+    
+    const daysMap = {0:'Пн',1:'Вт',2:'Ср',3:'Чт',4:'Пт',5:'Сб',6:'Вс'};
+    
+    let byDayHtml = '';
+    for (let day = 0; day < 7; day++) {
+        const dayData = data.by_day_of_week[day];
+        if (dayData && dayData.total > 0) {
+            byDayHtml += `
+                <div class="stat-bar-item">
+                    <span class="bar-label">${daysMap[day]}</span>
+                    <div class="bar-wrapper">
+                        <div class="bar-fill" style="width: ${dayData.rate}%"></div>
+                    </div>
+                    <span class="bar-value">${dayData.rate}%</span>
+                </div>
+            `;
+        }
+    }
+    
+    let byLocationHtml = '';
+    for (const [loc, locData] of Object.entries(data.by_location)) {
+        if (locData.total > 0) {
+            byLocationHtml += `
+                <div class="stat-bar-item">
+                    <span class="bar-label">${escapeHtml(loc)}</span>
+                    <div class="bar-wrapper">
+                        <div class="bar-fill" style="width: ${locData.rate}%"></div>
+                    </div>
+                    <span class="bar-value">${locData.rate}%</span>
+                </div>
+            `;
+        }
+    }
+    
+    let ageGroupsHtml = '';
+    for (const [age, count] of Object.entries(data.age_groups)) {
+        if (count > 0) {
+            ageGroupsHtml += `
+                <div class="stat-pill">
+                    <span class="stat-value">${count}</span>
+                    <span class="stat-label">${age}</span>
+                </div>
+            `;
+        }
+    }
+    
+    let trendHtml = '';
+    data.monthly_trend.forEach(m => {
+        trendHtml += `
+            <div class="trend-item">
+                <span class="trend-month">${m.month}</span>
+                <div class="trend-bar-wrapper">
+                    <div class="trend-bar" style="height: ${Math.max(10, m.count * 2)}px"></div>
+                </div>
+                <span class="trend-count">${m.count}</span>
+            </div>
+        `;
+    });
+    
+    container.innerHTML = `
+        <div class="statistics-content">
+            <div class="stats-summary-cards">
+                <div class="summary-card">
+                    <span class="summary-value">${data.summary.total_students}</span>
+                    <span class="summary-label">Учеников</span>
+                </div>
+                <div class="summary-card">
+                    <span class="summary-value">${data.summary.total_lessons}</span>
+                    <span class="summary-label">Занятий</span>
+                </div>
+                <div class="summary-card highlight">
+                    <span class="summary-value">${data.summary.attendance_rate}%</span>
+                    <span class="summary-label">Посещаемость</span>
+                </div>
+            </div>
+            
+            <div class="stat-section">
+                <h3>📅 По дням недели</h3>
+                <div class="stat-bars">${byDayHtml || '<p>Нет данных</p>'}</div>
+            </div>
+            
+            <div class="stat-section">
+                <h3>📍 По залам</h3>
+                <div class="stat-bars">${byLocationHtml || '<p>Нет данных</p>'}</div>
+            </div>
+            
+            <div class="stat-section">
+                <h3>👥 Возрастные группы</h3>
+                <div class="age-groups">${ageGroupsHtml || '<p>Нет данных</p>'}</div>
+            </div>
+            
+            <div class="stat-section">
+                <h3>📈 Динамика (6 мес)</h3>
+                <div class="trend-chart">${trendHtml || '<p>Нет данных</p>'}</div>
+            </div>
+        </div>
+    `;
+}
+
+// === Search ===
+
+let searchTimeout = null;
+
+function performSearch(query) {
+    clearTimeout(searchTimeout);
+    
+    if (!query || query.length < 2) {
+        document.getElementById('search-results').innerHTML = '';
+        return;
+    }
+    
+    searchTimeout = setTimeout(async () => {
+        try {
+            const res = await fetch(`${API}/api/search`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({initData, query})
+            });
+            
+            const data = await res.json();
+            renderSearchResults(data.results);
+        } catch (e) {
+            console.error('Search error:', e);
+        }
+    }, 300);
+}
+
+function renderSearchResults(results) {
+    const container = document.getElementById('search-results');
+    
+    if (results.length === 0) {
+        container.innerHTML = '<div class="empty-state">Ничего не найдено</div>';
+        return;
+    }
+    
+    container.innerHTML = results.map(r => `
+        <div class="list-item" onclick="openStudentDetail(${r.id}); goBack();">
+            <div class="list-item-header">
+                <span class="list-item-title">${escapeHtml(r.name)}</span>
+                <span class="lessons-indicator ${r.lessons_remaining <= 2 ? 'low' : ''}">${r.lessons_remaining}</span>
+            </div>
+            <div class="list-item-subtitle">${escapeHtml(r.nickname || '')}</div>
+            <div class="list-item-meta">
+                ${r.phone ? `<span>📞 ${r.phone}</span>` : ''}
+                ${r.age ? `<span>🎂 ${r.age} лет</span>` : ''}
+                <span>📍 ${escapeHtml(r.location || 'Зал Break Wave')}</span>
+            </div>
+        </div>
+    `).join('');
 }

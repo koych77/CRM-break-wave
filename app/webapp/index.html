@@ -59,7 +59,7 @@
                         <div class="stat-label">Посещаемость</div>
                     </div>
                     <div class="stat-card">
-                        <div class="stat-value" id="stat-revenue">0₽</div>
+                        <div class="stat-value" id="stat-revenue">0 Br</div>
                         <div class="stat-label">Выручка в мес.</div>
                     </div>
                 </div>
@@ -87,6 +87,14 @@
                         <button class="action-card" onclick="openQuickLesson()">
                             <div class="action-icon">✅</div>
                             <div class="action-label">Отметить занятие</div>
+                        </button>
+                        <button class="action-card" onclick="navigate('statistics')">
+                            <div class="action-icon">📊</div>
+                            <div class="action-label">Статистика</div>
+                        </button>
+                        <button class="action-card" onclick="navigate('search')">
+                            <div class="action-icon">🔍</div>
+                            <div class="action-label">Поиск</div>
                         </button>
                     </div>
                 </div>
@@ -162,8 +170,11 @@
                     <h3 class="form-section-title">📍 Настройки занятий</h3>
                     
                     <div class="form-group">
-                        <label>Место проведения</label>
-                        <input type="text" id="st-location" placeholder="Зал Break Wave">
+                        <label>Зал</label>
+                        <select id="st-location-id" class="form-input">
+                            <option value="">Основной зал</option>
+                        </select>
+                        <input type="hidden" id="st-location" value="Зал Break Wave">
                     </div>
                     <div class="form-group">
                         <label>Дни недели</label>
@@ -177,19 +188,18 @@
                             <button type="button" data-day="6">Вс</button>
                         </div>
                     </div>
+                    <div id="lesson-times-container">
+                        <!-- Time inputs will be generated here -->
+                    </div>
                     <div class="form-row">
                         <div class="form-group">
-                            <label>Время</label>
-                            <input type="time" id="st-time" value="18:00">
+                            <label>Стоимость (Br)</label>
+                            <input type="number" id="st-price" value="150" min="0" placeholder="150">
                         </div>
                         <div class="form-group">
-                            <label>Стоимость (₽)</label>
-                            <input type="number" id="st-price" value="150" min="0">
+                            <label>Кол-во занятий</label>
+                            <input type="number" id="st-count" value="8" min="1">
                         </div>
-                    </div>
-                    <div class="form-group">
-                        <label>Количество занятий в абонементе</label>
-                        <input type="number" id="st-count" value="8" min="1">
                     </div>
                     
                     <h3 class="form-section-title">📅 Абонемент</h3>
@@ -272,8 +282,8 @@
                         </select>
                     </div>
                     <div class="form-group">
-                        <label>Сумма (₽) *</label>
-                        <input type="number" id="pay-amount" required min="0" placeholder="150">
+                        <label>Сумма (Br) *</label>
+                        <input type="number" id="pay-amount" required min="0" placeholder="Например: 1200">
                     </div>
                     <div class="form-group">
                         <label>Количество занятий</label>
@@ -328,6 +338,38 @@
             <!-- Lesson Detail -->
             <div id="screen-lesson-detail" class="screen">
                 <div id="lesson-detail-content"></div>
+            </div>
+
+            <!-- Statistics -->
+            <div id="screen-statistics" class="screen">
+                <div class="screen-header">
+                    <button class="back-btn" onclick="goBack()">
+                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none"><path d="M15 18L9 12L15 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                    </button>
+                    <span class="screen-title">📊 Статистика</span>
+                    <div style="width: 40px;"></div>
+                </div>
+                <div class="tabs">
+                    <button class="tab active" onclick="switchStatsPeriod('month', this)">Месяц</button>
+                    <button class="tab" onclick="switchStatsPeriod('week', this)">Неделя</button>
+                    <button class="tab" onclick="switchStatsPeriod('year', this)">Год</button>
+                </div>
+                <div id="statistics-content" class="statistics-container"></div>
+            </div>
+
+            <!-- Search -->
+            <div id="screen-search" class="screen">
+                <div class="screen-header">
+                    <button class="back-btn" onclick="goBack()">
+                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none"><path d="M15 18L9 12L15 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                    </button>
+                    <span class="screen-title">🔍 Поиск</span>
+                    <div style="width: 40px;"></div>
+                </div>
+                <div class="search-box" style="padding: 16px;">
+                    <input type="text" id="search-input" placeholder="Имя, телефон или никнейм..." oninput="performSearch(this.value)">
+                </div>
+                <div id="search-results" class="list-container" style="padding: 0 16px;"></div>
             </div>
 
         </main>

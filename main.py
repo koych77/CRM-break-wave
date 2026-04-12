@@ -110,6 +110,37 @@ async def lesson_reminder_scheduler():
             logger.error(f"Scheduler error: {e}")
 
 
+async def daily_notification_scheduler():
+    """Background task: send daily summaries at 9:00 AM."""
+    from app.bot import send_daily_summary
+    
+    while True:
+        try:
+            now = datetime.now()
+            
+            # Calculate time until 9:00 AM
+            target_time = now.replace(hour=9, minute=0, second=0, microsecond=0)
+            if target_time <= now:
+                target_time += timedelta(days=1)
+            
+            wait_seconds = (target_time - now).total_seconds()
+            logger.info(f"Daily notification scheduler: waiting {wait_seconds/3600:.1f} hours until 9:00 AM")
+            
+            await asyncio.sleep(wait_seconds)
+            
+            # Send daily summaries
+            await send_daily_summary()
+            
+            # Wait a bit to avoid double-sending
+            await asyncio.sleep(60)
+            
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"Error in daily notification scheduler: {e}")
+            await asyncio.sleep(3600)  # Retry in 1 hour
+
+
 async def on_startup():
     await init_db()
     logger.info("Database initialized")
@@ -117,12 +148,18 @@ async def on_startup():
     # Set bot commands
     await bot.set_my_commands([
         BotCommand(command="start", description="Открыть CRM"),
+        BotCommand(command="now", description="Текущая тренировка"),
+        BotCommand(command="summary", description="Ежедневная сводка"),
         BotCommand(command="help", description="Помощь"),
     ])
     
     # Start reminder scheduler
     asyncio.create_task(lesson_reminder_scheduler())
     logger.info("Lesson reminder scheduler started")
+    
+    # Start daily notification scheduler
+    asyncio.create_task(daily_notification_scheduler())
+    logger.info("Daily notification scheduler started")
 
 
 def run_api():
