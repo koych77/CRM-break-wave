@@ -15,8 +15,8 @@ import logging
 import urllib.parse
 
 from app.database import async_session, init_db
-from app.models import Coach, Student, Lesson, Attendance, Payment, Notification
-from app.config import WEBAPP_DIR, BOT_TOKEN, WEEKDAYS
+from app.models import Coach, Student, Lesson, Attendance, Payment, Notification, AdminUser
+from app.config import WEBAPP_DIR, BOT_TOKEN, WEEKDAYS, ADMIN_IDS
 
 # Version for cache busting - auto-generated on server start (timestamp)
 import time
