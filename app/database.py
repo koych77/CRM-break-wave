@@ -224,7 +224,14 @@ async def run_migrations():
             logger.info("Migrating: Adding location_id to attendance")
             await conn.execute(text("ALTER TABLE attendance ADD COLUMN location_id INTEGER"))
         
-        # 5b. Check and add attendance_date to attendance
+        # 5b. Check and add is_extra to attendance
+        try:
+            await conn.execute(text("SELECT is_extra FROM attendance LIMIT 1"))
+        except:
+            logger.info("Migrating: Adding is_extra to attendance")
+            await conn.execute(text("ALTER TABLE attendance ADD COLUMN is_extra BOOLEAN DEFAULT 0"))
+        
+        # 5c. Check and add attendance_date to attendance
         try:
             await conn.execute(text("SELECT attendance_date FROM attendance LIMIT 1"))
         except:
@@ -236,6 +243,27 @@ async def run_migrations():
                 SET attendance_date = (SELECT date FROM lessons WHERE lessons.id = attendance.lesson_id)
                 WHERE attendance_date IS NULL
             """))
+        
+        # 5d. Check and add attendance_time to attendance
+        try:
+            await conn.execute(text("SELECT attendance_time FROM attendance LIMIT 1"))
+        except:
+            logger.info("Migrating: Adding attendance_time to attendance")
+            await conn.execute(text("ALTER TABLE attendance ADD COLUMN attendance_time VARCHAR(10)"))
+        
+        # 6. Check and add lesson_duration to students
+        try:
+            await conn.execute(text("SELECT lesson_duration FROM students LIMIT 1"))
+        except:
+            logger.info("Migrating: Adding lesson_duration to students")
+            await conn.execute(text("ALTER TABLE students ADD COLUMN lesson_duration INTEGER DEFAULT 90"))
+        
+        # 7. Check and add is_extra to lessons (if not exists)
+        try:
+            await conn.execute(text("SELECT topic FROM lessons LIMIT 1"))
+        except:
+            logger.info("Migrating: Adding topic to lessons")
+            await conn.execute(text("ALTER TABLE lessons ADD COLUMN topic VARCHAR(200)"))
         
         # 6. Create locations table if not exists
         try:
