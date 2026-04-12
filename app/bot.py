@@ -380,7 +380,7 @@ async def cb_my_students(callback: CallbackQuery):
     for st in students:
         days = st.lesson_days or "1,3"
         days_str = ",".join([{"0":"Пн","1":"Вт","2":"Ср","3":"Чт","4":"Пт","5":"Сб","6":"Вс"}[d] for d in days.split(",")])
-        text += f"• <b>{st.name}</b>\n  📍 {st.location} | 🕐 {days_str} {st.lesson_time}\n  💰 {st.lesson_price}₽/{st.lessons_count} занятий\n\n"
+        text += f"• <b>{st.name}</b>\n  📍 {st.location} | 🕐 {days_str} {st.lesson_time}\n  💰 {st.lesson_price} Br/{st.lessons_count} занятий\n\n"
     
     await callback.message.edit_text(text, parse_mode="HTML")
 
