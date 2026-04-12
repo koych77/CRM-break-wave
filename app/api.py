@@ -1951,15 +1951,20 @@ async def api_statistics(request: Request):
             else:
                 age_groups["Взрослые (18+)"] += 1
         
-        # Monthly trend (last 6 months)
+        # Monthly trend (last 6 months) - correct month calculation
         monthly_trend = []
         for i in range(5, -1, -1):
-            month_date = today.replace(day=1) - timedelta(days=i*30)
-            month_start = month_date.replace(day=1)
-            if month_date.month == 12:
-                month_end = month_date.replace(year=month_date.year + 1, month=1, day=1)
+            # Calculate month correctly (handle year boundaries)
+            total_months = today.year * 12 + today.month - 1 - i
+            year = total_months // 12
+            month = (total_months % 12) + 1
+            month_date = date(year, month, 1)
+            
+            month_start = month_date
+            if month == 12:
+                month_end = date(year + 1, 1, 1)
             else:
-                month_end = month_date.replace(month=month_date.month + 1, day=1)
+                month_end = date(year, month + 1, 1)
             
             month_attendance = await s.execute(
                 select(func.count(Attendance.id)).join(Student).where(
@@ -2373,15 +2378,20 @@ async def api_finance_summary(request: Request):
                 "days_overdue": (today - payment.period_end).days if payment.period_end else 0
             })
         
-        # Monthly trend (last 6 months)
+        # Monthly trend (last 6 months) - correct month calculation
         monthly_trend = []
         for i in range(5, -1, -1):
-            month_date = today.replace(day=1) - timedelta(days=i*30)
-            month_start = month_date.replace(day=1)
-            if month_date.month == 12:
-                month_end = month_date.replace(year=month_date.year + 1, month=1, day=1)
+            # Calculate month correctly (handle year boundaries)
+            total_months = today.year * 12 + today.month - 1 - i
+            year = total_months // 12
+            month = (total_months % 12) + 1
+            month_date = date(year, month, 1)
+            
+            month_start = month_date
+            if month == 12:
+                month_end = date(year + 1, 1, 1)
             else:
-                month_end = month_date.replace(month=month_date.month + 1, day=1)
+                month_end = date(year, month + 1, 1)
             
             month_revenue = await s.execute(
                 select(func.sum(Payment.amount)).where(
