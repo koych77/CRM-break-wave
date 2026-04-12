@@ -5,7 +5,7 @@ const tg = window.Telegram?.WebApp;
 
 // Cache busting - force reload if version changed
 const APP_VERSION_KEY = 'crm_bw_version';
-const CURRENT_VERSION = '6'; // Version 6: Unlimited subscriptions, coach names in filters
+const CURRENT_VERSION = '7'; // Version 7: Smart notifications, auto group switching
 
 // Check version on load
 const savedVersion = localStorage.getItem(APP_VERSION_KEY);

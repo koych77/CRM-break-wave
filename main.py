@@ -22,6 +22,15 @@ from app.bot import bot, dp
 from app.database import init_db, async_session
 from app.config import DATA_DIR
 from sqlalchemy import select
+import json
+
+def get_lesson_time_for_day(student, day_of_week):
+    """Get lesson time for specific day from lesson_times JSON."""
+    try:
+        times = json.loads(student.lesson_times or '{}')
+        return times.get(str(day_of_week), times.get('default', '18:00'))
+    except:
+        return '18:00'
 
 logging.basicConfig(
     level=logging.INFO,
@@ -31,8 +40,11 @@ logger = logging.getLogger(__name__)
 
 
 async def lesson_reminder_scheduler():
-    """Background task: check for unmarked lessons and send reminders."""
+    """Background task: check for unmarked lessons and send reminders every 15 min."""
     from app.models import Coach, Student, Lesson, Attendance
+    
+    # Track last reminder time per coach to avoid spam
+    last_reminder = {}
     
     while True:
         try:
@@ -43,12 +55,17 @@ async def lesson_reminder_scheduler():
             current_date = now.date()
             
             async with async_session() as s:
-                # Get all coaches
                 coaches_result = await s.execute(select(Coach).where(Coach.is_active == True))
                 coaches = coaches_result.scalars().all()
                 
                 for coach in coaches:
-                    # Get students who should have lesson now
+                    # Check if we already sent reminder in last 15 minutes
+                    coach_id = coach.id
+                    last_time = last_reminder.get(coach_id)
+                    if last_time and (now - last_time).total_seconds() < 900:  # 15 minutes
+                        continue
+                    
+                    # Get students grouped by time
                     students_result = await s.execute(
                         select(Student).where(
                             Student.coach_id == coach.id,
@@ -57,19 +74,22 @@ async def lesson_reminder_scheduler():
                     )
                     students = students_result.scalars().all()
                     
-                    unmarked_students = []
+                    # Group by time slot
+                    groups = {}
                     for student in students:
                         days = student.lesson_days.split(",") if student.lesson_days else []
                         if str(current_weekday) in days:
-                            # Check time window
-                            lesson_time = student.lesson_time or "18:00"
+                            lesson_time = get_lesson_time_for_day(student, current_weekday)
                             lesson_hour, lesson_min = map(int, lesson_time.split(":"))
                             lesson_start = lesson_hour * 60 + lesson_min
                             
                             now_total = now.hour * 60 + now.minute
                             
-                            # If lesson started 0-45 min ago
-                            if 0 <= now_total - lesson_start <= 45:
+                            # Check if in active lesson window (started 0-90 min ago)
+                            if 0 <= now_total - lesson_start <= 90:
+                                if lesson_time not in groups:
+                                    groups[lesson_time] = []
+                                
                                 # Check if marked
                                 existing = await s.execute(
                                     select(Lesson).where(
@@ -78,31 +98,42 @@ async def lesson_reminder_scheduler():
                                     )
                                 )
                                 if not existing.scalar_one_or_none():
-                                    unmarked_students.append(student)
+                                    groups[lesson_time].append(student)
                     
-                    # Send reminder if there are unmarked students
-                    if unmarked_students and len(unmarked_students) > 0:
-                        try:
-                            student_names = "\n".join([f"• {s.name}" for s in unmarked_students[:5]])
-                            if len(unmarked_students) > 5:
-                                student_names += f"\n... и ещё {len(unmarked_students) - 5}"
-                            
-                            kb = InlineKeyboardMarkup(inline_keyboard=[
-                                [InlineKeyboardButton(text="✅ Отметить посещаемость", callback_data="quick_attendance")],
-                                [InlineKeyboardButton(text="❌ Тренировки нет", callback_data="skip_lesson")]
-                            ])
-                            
-                            await bot.send_message(
-                                coach.telegram_id,
-                                f"⏰ Напоминание!\n\n"
-                                f"📅 Тренировка началась ({now.strftime('%H:%M')})\n"
-                                f"👥 Не отмечены ({len(unmarked_students)}):\n{student_names}\n\n"
-                                f"Отметьте посещаемость:",
-                                reply_markup=kb
-                            )
-                            logger.info(f"Sent reminder to coach {coach.telegram_id}")
-                        except Exception as e:
-                            logger.error(f"Failed to send reminder: {e}")
+                    # Find first unmarked group
+                    for time_key in sorted(groups.keys()):
+                        unmarked = groups[time_key]
+                        if unmarked:
+                            try:
+                                student_names = "\n".join([f"• {s.name}" for s in unmarked[:5]])
+                                if len(unmarked) > 5:
+                                    student_names += f"\n... и ещё {len(unmarked) - 5}"
+                                
+                                kb = InlineKeyboardMarkup(inline_keyboard=[
+                                    [InlineKeyboardButton(
+                                        text=f"✅ Отметить ({len(unmarked)} чел.)", 
+                                        callback_data=f"quick_group:{time_key}"
+                                    )],
+                                    [InlineKeyboardButton(
+                                        text="❌ Тренировки нет", 
+                                        callback_data=f"skip_group:{time_key}"
+                                    )]
+                                ])
+                                
+                                await bot.send_message(
+                                    coach.telegram_id,
+                                    f"⏰ Напоминание о тренировке!\n\n"
+                                    f"🕐 Время: {time_key}\n"
+                                    f"👥 Не отмечены: {len(unmarked)}\n\n"
+                                    f"{student_names}",
+                                    reply_markup=kb
+                                )
+                                
+                                last_reminder[coach_id] = now
+                                logger.info(f"Sent reminder to coach {coach_id} for group {time_key}")
+                                break  # Only send one reminder at a time
+                            except Exception as e:
+                                logger.error(f"Failed to send reminder: {e}")
                             
         except asyncio.CancelledError:
             break
