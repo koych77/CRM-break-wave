@@ -187,14 +187,6 @@ function showScreen(screen) {
         el.classList.add('active');
     }
     
-    // Back button
-    const backBtn = document.getElementById('btn-back');
-    if (screen === 'dashboard' || screen === 'loading' || screen === 'auth') {
-        backBtn?.classList.add('hidden');
-    } else {
-        backBtn?.classList.remove('hidden');
-    }
-    
     // Scroll to top
     document.getElementById('content')?.scrollTo(0, 0);
     

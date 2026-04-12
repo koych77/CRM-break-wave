@@ -12,17 +12,10 @@
 </head>
 <body>
     <div id="app">
-        <!-- Header -->
-        <header id="header">
-            <div class="header-title">
-                <span id="header-text">CRM BREAK WAVE</span>
-            </div>
+        <!-- Global Header -->
+        <header id="global-header">
+            <span class="app-title">CRM BREAK WAVE</span>
         </header>
-        
-        <!-- Back Button (positioned under system close button) -->
-        <button id="btn-back" class="back-btn hidden" onclick="goBack()">
-            <svg width="24" height="24" viewBox="0 0 24 24" fill="none"><path d="M15 18L9 12L15 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-        </button>
 
         <!-- Main Content -->
         <main id="content">
@@ -102,7 +95,10 @@
             <!-- Students List -->
             <div id="screen-students" class="screen">
                 <div class="screen-header">
-                    <h2>👥 Мои ученики</h2>
+                    <button class="back-btn" onclick="goBack()">
+                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none"><path d="M15 18L9 12L15 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                    </button>
+                    <span class="screen-title">👥 Ученики</span>
                     <button class="btn-primary" onclick="openAddStudent()">+ Добавить</button>
                 </div>
                 <div class="search-box">
@@ -113,12 +109,25 @@
 
             <!-- Student Detail -->
             <div id="screen-student-detail" class="screen">
+                <div class="screen-header">
+                    <button class="back-btn" onclick="goBack()">
+                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none"><path d="M15 18L9 12L15 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                    </button>
+                    <span class="screen-title">Карточка ученика</span>
+                    <div style="width: 40px;"></div>
+                </div>
                 <div id="student-detail-content"></div>
             </div>
 
             <!-- Add/Edit Student -->
             <div id="screen-student-form" class="screen">
-                <h2 id="student-form-title">Новый ученик</h2>
+                <div class="screen-header">
+                    <button class="back-btn" onclick="goBack()">
+                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none"><path d="M15 18L9 12L15 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                    </button>
+                    <span class="screen-title" id="student-form-title">Новый ученик</span>
+                    <div style="width: 40px;"></div>
+                </div>
                 <form id="student-form" class="form-container">
                     <div class="form-group">
                         <label>Имя и фамилия *</label>
@@ -203,9 +212,16 @@
 
             <!-- Calendar -->
             <div id="screen-calendar" class="screen">
-                <div class="calendar-header">
+                <div class="screen-header">
+                    <button class="back-btn" onclick="goBack()">
+                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none"><path d="M15 18L9 12L15 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                    </button>
+                    <span class="screen-title">📅 Календарь</span>
+                    <div style="width: 40px;"></div>
+                </div>
+                <div class="calendar-nav">
                     <button onclick="changeMonth(-1)">←</button>
-                    <h2 id="calendar-month">Апрель 2026</h2>
+                    <h3 id="calendar-month">Апрель 2026</h3>
                     <button onclick="changeMonth(1)">→</button>
                 </div>
                 <div class="calendar-weekdays">
@@ -218,7 +234,10 @@
             <!-- Payments -->
             <div id="screen-payments" class="screen">
                 <div class="screen-header">
-                    <h2>💰 Оплаты</h2>
+                    <button class="back-btn" onclick="goBack()">
+                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none"><path d="M15 18L9 12L15 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                    </button>
+                    <span class="screen-title">💰 Оплаты</span>
                     <button class="btn-primary" onclick="openAddPayment()">+ Добавить</button>
                 </div>
                 <div class="tabs">
@@ -231,7 +250,13 @@
 
             <!-- Add Payment -->
             <div id="screen-payment-form" class="screen">
-                <h2>Новая оплата</h2>
+                <div class="screen-header">
+                    <button class="back-btn" onclick="goBack()">
+                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none"><path d="M15 18L9 12L15 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                    </button>
+                    <span class="screen-title">Новая оплата</span>
+                    <div style="width: 40px;"></div>
+                </div>
                 <form id="payment-form" class="form-container">
                     <div class="form-group">
                         <label>Ученик *</label>
@@ -277,9 +302,15 @@
 
             <!-- Quick Lesson -->
             <div id="screen-quick-lesson" class="screen">
-                <h2>✅ Отметить занятие</h2>
+                <div class="screen-header">
+                    <button class="back-btn" onclick="goBack()">
+                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none"><path d="M15 18L9 12L15 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                    </button>
+                    <span class="screen-title">✅ Отметить занятие</span>
+                    <div style="width: 40px;"></div>
+                </div>
                 <div id="quick-lesson-content">
-                    <div class="form-group">
+                    <div class="form-group" style="padding: 0 16px;">
                         <label>Дата</label>
                         <input type="date" id="ql-date">
                     </div>
