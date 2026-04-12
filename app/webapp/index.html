@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>CRM Break Wave</title>
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div id="app">
+        <!-- Header -->
+        <header id="header">
+            <button id="btn-back" class="header-btn hidden" onclick="goBack()">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none"><path d="M15 18L9 12L15 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </button>
+            <div class="header-title">
+                <span id="header-text">CRM BREAK WAVE</span>
+            </div>
+            <div class="header-spacer"></div>
+        </header>
+
+        <!-- Main Content -->
+        <main id="content">
+            
+            <!-- Loading Screen -->
+            <div id="screen-loading" class="screen active">
+                <div class="loading-container">
+                    <div class="spinner"></div>
+                    <p>Загрузка...</p>
+                </div>
+            </div>
+
+            <!-- Auth Required -->
+            <div id="screen-auth" class="screen">
+                <div class="auth-container">
+                    <div class="auth-icon">🔒</div>
+                    <h2>Доступ ограничен</h2>
+                    <p>Эта система только для тренеров Break Wave.</p>
+                    <p>Используйте команду /coach в боте для регистрации.</p>
+                </div>
+            </div>
+
+            <!-- Dashboard -->
+            <div id="screen-dashboard" class="screen">
+                <div class="dashboard-header">
+                    <h2>Панель управления</h2>
+                    <p id="current-date"></p>
+                </div>
+                
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-value" id="stat-students">0</div>
+                        <div class="stat-label">Учеников</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="stat-lessons">0</div>
+                        <div class="stat-label">Занятий в мес.</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="stat-attendance">0%</div>
+                        <div class="stat-label">Посещаемость</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="stat-revenue">0₽</div>
+                        <div class="stat-label">Выручка в мес.</div>
+                    </div>
+                </div>
+
+                <div class="alerts-section" id="alerts-section">
+                    <h3>⚠️ Требуют внимания</h3>
+                    <div id="alerts-list"></div>
+                </div>
+
+                <div class="quick-actions">
+                    <h3>Быстрые действия</h3>
+                    <div class="actions-grid">
+                        <button class="action-card" onclick="navigate('students')">
+                            <div class="action-icon">👥</div>
+                            <div class="action-label">Ученики</div>
+                        </button>
+                        <button class="action-card" onclick="navigate('calendar')">
+                            <div class="action-icon">📅</div>
+                            <div class="action-label">Календарь</div>
+                        </button>
+                        <button class="action-card" onclick="navigate('payments')">
+                            <div class="action-icon">💰</div>
+                            <div class="action-label">Оплаты</div>
+                        </button>
+                        <button class="action-card" onclick="openQuickLesson()">
+                            <div class="action-icon">✅</div>
+                            <div class="action-label">Отметить занятие</div>
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Students List -->
+            <div id="screen-students" class="screen">
+                <div class="screen-header">
+                    <h2>👥 Мои ученики</h2>
+                    <button class="btn-primary" onclick="openAddStudent()">+ Добавить</button>
+                </div>
+                <div class="search-box">
+                    <input type="text" id="students-search" placeholder="Поиск по имени..." oninput="filterStudents(this.value)">
+                </div>
+                <div id="students-list" class="list-container"></div>
+            </div>
+
+            <!-- Student Detail -->
+            <div id="screen-student-detail" class="screen">
+                <div id="student-detail-content"></div>
+            </div>
+
+            <!-- Add/Edit Student -->
+            <div id="screen-student-form" class="screen">
+                <h2 id="student-form-title">Новый ученик</h2>
+                <form id="student-form" class="form-container">
+                    <div class="form-group">
+                        <label>Имя и фамилия *</label>
+                        <input type="text" id="st-name" required placeholder="Иванов Иван">
+                    </div>
+                    <div class="form-group">
+                        <label>Никнейм</label>
+                        <input type="text" id="st-nickname" placeholder="Bboy Ice">
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Телефон</label>
+                            <input type="tel" id="st-phone" placeholder="+7 999 123-45-67">
+                        </div>
+                        <div class="form-group">
+                            <label>Тел. родителя</label>
+                            <input type="tel" id="st-parent-phone" placeholder="+7 999 987-65-43">
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label>Возраст</label>
+                        <input type="number" id="st-age" placeholder="12" min="3" max="99">
+                    </div>
+                    
+                    <h3 class="form-section-title">📍 Настройки занятий</h3>
+                    
+                    <div class="form-group">
+                        <label>Место проведения</label>
+                        <input type="text" id="st-location" placeholder="Зал Break Wave">
+                    </div>
+                    <div class="form-group">
+                        <label>Дни недели</label>
+                        <div class="weekdays-selector" id="weekdays-selector">
+                            <button type="button" data-day="0">Пн</button>
+                            <button type="button" data-day="1">Вт</button>
+                            <button type="button" data-day="2">Ср</button>
+                            <button type="button" data-day="3">Чт</button>
+                            <button type="button" data-day="4">Пт</button>
+                            <button type="button" data-day="5">Сб</button>
+                            <button type="button" data-day="6">Вс</button>
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Время</label>
+                            <input type="time" id="st-time" value="18:00">
+                        </div>
+                        <div class="form-group">
+                            <label>Стоимость (₽)</label>
+                            <input type="number" id="st-price" value="5000" min="0">
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label>Количество занятий в абонементе</label>
+                        <input type="number" id="st-count" value="8" min="1">
+                    </div>
+                    
+                    <h3 class="form-section-title">📅 Абонемент</h3>
+                    
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Начало</label>
+                            <input type="date" id="st-sub-start">
+                        </div>
+                        <div class="form-group">
+                            <label>Окончание</label>
+                            <input type="date" id="st-sub-end">
+                        </div>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label>Заметки</label>
+                        <textarea id="st-notes" rows="3" placeholder="Дополнительная информация..."></textarea>
+                    </div>
+                    
+                    <div class="form-actions">
+                        <button type="button" class="btn-secondary" onclick="goBack()">Отмена</button>
+                        <button type="submit" class="btn-primary">Сохранить</button>
+                    </div>
+                </form>
+            </div>
+
+            <!-- Calendar -->
+            <div id="screen-calendar" class="screen">
+                <div class="calendar-header">
+                    <button onclick="changeMonth(-1)">←</button>
+                    <h2 id="calendar-month">Апрель 2026</h2>
+                    <button onclick="changeMonth(1)">→</button>
+                </div>
+                <div class="calendar-weekdays">
+                    <div>Пн</div><div>Вт</div><div>Ср</div><div>Чт</div><div>Пт</div><div>Сб</div><div>Вс</div>
+                </div>
+                <div id="calendar-grid" class="calendar-grid"></div>
+                <div id="calendar-day-details" class="day-details"></div>
+            </div>
+
+            <!-- Payments -->
+            <div id="screen-payments" class="screen">
+                <div class="screen-header">
+                    <h2>💰 Оплаты</h2>
+                    <button class="btn-primary" onclick="openAddPayment()">+ Добавить</button>
+                </div>
+                <div class="tabs">
+                    <button class="tab active" onclick="switchPaymentTab('all', this)">Все</button>
+                    <button class="tab" onclick="switchPaymentTab('pending', this)">Ожидают</button>
+                    <button class="tab" onclick="switchPaymentTab('overdue', this)">Просрочены</button>
+                </div>
+                <div id="payments-list" class="list-container"></div>
+            </div>
+
+            <!-- Add Payment -->
+            <div id="screen-payment-form" class="screen">
+                <h2>Новая оплата</h2>
+                <form id="payment-form" class="form-container">
+                    <div class="form-group">
+                        <label>Ученик *</label>
+                        <select id="pay-student" required>
+                            <option value="">Выберите ученика</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Сумма (₽) *</label>
+                        <input type="number" id="pay-amount" required min="0" placeholder="5000">
+                    </div>
+                    <div class="form-group">
+                        <label>Количество занятий</label>
+                        <input type="number" id="pay-count" value="8" min="1">
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Период с</label>
+                            <input type="date" id="pay-start">
+                        </div>
+                        <div class="form-group">
+                            <label>По</label>
+                            <input type="date" id="pay-end">
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label>Статус</label>
+                        <select id="pay-status">
+                            <option value="pending">Ожидает оплаты</option>
+                            <option value="paid">Оплачено</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Заметки</label>
+                        <textarea id="pay-notes" rows="2"></textarea>
+                    </div>
+                    <div class="form-actions">
+                        <button type="button" class="btn-secondary" onclick="goBack()">Отмена</button>
+                        <button type="submit" class="btn-primary">Сохранить</button>
+                    </div>
+                </form>
+            </div>
+
+            <!-- Quick Lesson -->
+            <div id="screen-quick-lesson" class="screen">
+                <h2>✅ Отметить занятие</h2>
+                <div id="quick-lesson-content">
+                    <div class="form-group">
+                        <label>Дата</label>
+                        <input type="date" id="ql-date">
+                    </div>
+                    <div id="quick-lesson-students"></div>
+                </div>
+            </div>
+
+            <!-- Lesson Detail -->
+            <div id="screen-lesson-detail" class="screen">
+                <div id="lesson-detail-content"></div>
+            </div>
+
+        </main>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
