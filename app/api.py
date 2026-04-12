@@ -16,6 +16,7 @@ import urllib.parse
 from app.database import async_session, init_db
 from app.models import Coach, Student, Lesson, Attendance, Payment, Notification
 from app.config import WEBAPP_DIR, BOT_TOKEN, WEEKDAYS
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -27,8 +28,17 @@ async def lifespan(application: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-# Static files
-app.mount("/assets", StaticFiles(directory=str(WEBAPP_DIR / "assets")), name="assets")
+# Create assets directory if not exists
+assets_dir = WEBAPP_DIR / "assets"
+assets_dir.mkdir(parents=True, exist_ok=True)
+(assets_dir / "icons").mkdir(exist_ok=True)
+
+# Static files (only if directory exists and has content)
+if assets_dir.exists():
+    try:
+        app.mount("/assets", StaticFiles(directory=str(assets_dir)), name="assets")
+    except Exception as e:
+        logger.warning(f"Could not mount assets: {e}")
 
 
 # === Telegram Auth Helpers ===
