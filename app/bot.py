@@ -808,17 +808,18 @@ async def send_daily_summary(coach_id: int = None):
                             "days": days_left
                         })
                 
-                # Check lessons remaining
-                if student.lessons_remaining <= 0:
-                    depleted.append({
-                        "name": student.name,
-                        "remaining": 0
-                    })
-                elif student.lessons_remaining <= 2:
-                    low_lessons.append({
-                        "name": student.name,
-                        "remaining": student.lessons_remaining
-                    })
+                # Check lessons remaining (only for non-unlimited subscriptions)
+                if not getattr(student, 'is_unlimited', False):
+                    if student.lessons_remaining <= 0:
+                        depleted.append({
+                            "name": student.name,
+                            "remaining": 0
+                        })
+                    elif student.lessons_remaining <= 2:
+                        low_lessons.append({
+                            "name": student.name,
+                            "remaining": student.lessons_remaining
+                        })
             
             # Only send if there are alerts
             total_alerts = len(expired) + len(ending_soon) + len(low_lessons) + len(depleted)
@@ -868,7 +869,8 @@ async def send_daily_summary(coach_id: int = None):
                         today_lessons.append({
                             "name": student.name,
                             "time": get_lesson_time_for_day(student, weekday),
-                            "remaining": student.lessons_remaining
+                            "remaining": student.lessons_remaining,
+                            "is_unlimited": getattr(student, 'is_unlimited', False)
                         })
                 
                 if today_lessons:
@@ -885,10 +887,11 @@ async def send_daily_summary(coach_id: int = None):
                         lessons = by_time[time_key]
                         text += f"\n🕐 {time_key} ({len(lessons)} учеников)\n"
                         for lesson in lessons[:5]:  # Show max 5 per group
-                            remaining = lesson["remaining"]
-                            if remaining <= 0:
+                            if lesson.get("is_unlimited"):
+                                status = " ♾️"  # Unlimited symbol
+                            elif lesson["remaining"] <= 0:
                                 status = " ❌"
-                            elif remaining <= 2:
+                            elif lesson["remaining"] <= 2:
                                 status = " ⚠️"
                             else:
                                 status = ""
@@ -1033,7 +1036,11 @@ async def send_lesson_reminder(coach: Coach, students: list, time_str: str):
     text = f"⏰ <b>Тренировка {time_str}</b>\n\n"
     text += f"👥 Не отмечены ({len(students)}):\n"
     for st in students:
-        # Show remaining lessons indicator
+        # Show remaining lessons indicator (skip for unlimited)
+        if getattr(st, 'is_unlimited', False):
+            text += f"• {st.name} ♾️\n"
+            continue
+        
         remaining = getattr(st, 'lessons_remaining', None)
         if remaining is not None:
             if remaining <= 0:
