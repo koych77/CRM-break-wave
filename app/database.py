@@ -274,6 +274,38 @@ async def run_migrations():
                 )
             """))
         
+        # 7. Check and add is_unlimited to students
+        try:
+            await conn.execute(text("SELECT is_unlimited FROM students LIMIT 1"))
+        except:
+            logger.info("Migrating: Adding is_unlimited to students")
+            await conn.execute(text("ALTER TABLE students ADD COLUMN is_unlimited BOOLEAN DEFAULT 0"))
+        
+        # 8. Check and add birthday to students
+        try:
+            await conn.execute(text("SELECT birthday FROM students LIMIT 1"))
+        except:
+            logger.info("Migrating: Adding birthday to students")
+            await conn.execute(text("ALTER TABLE students ADD COLUMN birthday DATE"))
+        
+        # 9. Create student_schedules table if not exists
+        try:
+            await conn.execute(text("SELECT id FROM student_schedules LIMIT 1"))
+        except:
+            logger.info("Migrating: Creating student_schedules table")
+            await conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS student_schedules (
+                    id INTEGER PRIMARY KEY,
+                    student_id INTEGER NOT NULL REFERENCES students(id),
+                    location_id INTEGER NOT NULL REFERENCES locations(id),
+                    days VARCHAR(100) DEFAULT '1,3',
+                    times VARCHAR(500) DEFAULT '{"1": "18:00", "3": "18:00"}',
+                    duration INTEGER DEFAULT 90,
+                    is_primary BOOLEAN DEFAULT 1,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            """))
+        
         logger.info("Migrations completed")
 
 
