@@ -2617,7 +2617,7 @@ function renderFinance(summary, debtors) {
                 <div class="trend-bar-wrapper">
                     <div class="trend-bar" style="height: ${Math.max(10, (m.revenue / maxRevenue) * 100)}px"></div>
                 </div>
-                <span class="trend-count">${(m.revenue / 1000).toFixed(0)}k</span>
+                <span class="trend-count">${m.revenue >= 1000 ? (m.revenue / 1000).toFixed(1) + 'k' : m.revenue}</span>
             </div>
         `).join('');
     }
