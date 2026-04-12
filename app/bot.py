@@ -81,17 +81,48 @@ async def cmd_start(message: Message):
     user_id = message.from_user.id
     logger.info(f"Start command from user: {user_id} ({message.from_user.first_name})")
     
-    # Check if admin first
-    if await is_admin(user_id):
-        await message.answer(
+    # Check roles
+    is_admin_user = await is_admin(user_id)
+    coach = await get_coach(user_id)
+    
+    # If admin - show admin panel + coach interface if registered
+    if is_admin_user:
+        admin_text = (
             "👑 <b>Админ-панель CRM Break Wave</b>\n\n"
             "Вы администратор системы.\n"
-            "Команды:\n"
+            "Админ-команды:\n"
             "/coaches - список тренеров\n"
-            "/add_coach - добавить тренера\n"
-            "/stats - общая статистика",
-            parse_mode="HTML"
+            "/stats - общая статистика\n\n"
         )
+        
+        if coach:
+            # Admin is also a coach - show both interfaces
+            webapp_url = WEBAPP_URL or "https://your-app.up.railway.app"
+            
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(
+                    text="📱 Открыть CRM (как тренер)",
+                    web_app=WebAppInfo(url=f"{webapp_url}/")
+                )],
+                [InlineKeyboardButton(text="👥 Мои ученики", callback_data="my_students")],
+                [InlineKeyboardButton(text="⚠️ Проверить оплаты", callback_data="check_payments")],
+            ])
+            
+            await message.answer(
+                admin_text + 
+                f"✅ Вы также зарегистрированы как тренер: {coach.first_name or 'Тренер'}\n\n"
+                "Быстрые действия:",
+                parse_mode="HTML",
+                reply_markup=kb
+            )
+        else:
+            # Admin but not a coach
+            await message.answer(
+                admin_text + 
+                "❌ Вы не зарегистрированы как тренер.\n"
+                "Используйте /coach <код> чтобы стать тренером.",
+                parse_mode="HTML"
+            )
         return
     
     # Check if coach
@@ -175,19 +206,30 @@ async def cmd_me(message: Message):
     """Show user registration status."""
     user_id = message.from_user.id
     
-    # Check admin
-    if await is_admin(user_id):
-        await message.answer(
-            "👑 <b>Вы администратор</b>\n\n"
-            f"ID: {user_id}\n"
-            f"Имя: {message.from_user.first_name}\n"
-            f"Username: @{message.from_user.username or 'нет'}"
-        )
-        return
-    
-    # Check coach
+    is_admin_user = await is_admin(user_id)
     coach = await get_coach(user_id)
+    
+    text_parts = []
+    
+    # Admin status
+    if is_admin_user:
+        text_parts.append("👑 <b>Администратор</b>")
+    
+    # Coach status
     if coach:
+        text_parts.append("✅ <b>Тренер</b>")
+        text_parts.append(f"\nИмя: {coach.first_name or 'Не указано'}")
+        text_parts.append(f"ID: {coach.telegram_id}")
+        text_parts.append(f"Username: @{coach.username or 'нет'}")
+        text_parts.append(f"Дата регистрации: {coach.created_at.strftime('%d.%m.%Y') if coach.created_at else '—'}")
+    elif not is_admin_user:
+        text_parts.append("❌ <b>Не зарегистрированы</b>")
+        text_parts.append("\nИспользуйте: /coach <код>")
+    
+    if not text_parts:
+        text_parts.append("❌ <b>Нет доступа</b>")
+    
+    await message.answer("\n".join(text_parts), parse_mode="HTML")
         await message.answer(
             "✅ <b>Вы зарегистрированы как тренер</b>\n\n"
             f"ID: {coach.telegram_id}\n"
@@ -205,20 +247,32 @@ async def cmd_me(message: Message):
 
 @router.message(Command("help"))
 async def cmd_help(message: Message):
-    text = """📋 <b>Помощь по CRM Break Wave</b>
-
-<b>Основные возможности:</b>
-• Ученики — база с индивидуальными настройками
-• Расписание — дни, время, место занятий
-• Посещаемость — отметка на каждом занятии
-• Оплата — контроль абонементов
-
-<b>Команды:</b>
-/start — Главное меню
-/me — Мой статус
-/help — Эта справка
-
-Откройте Mini App для полного функционала."""
+    user_id = message.from_user.id
+    is_admin_user = await is_admin(user_id)
+    coach = await get_coach(user_id)
+    
+    text = "📋 <b>Помощь по CRM Break Wave</b>\n\n"
+    
+    if is_admin_user:
+        text += "👑 <b>Админ-команды:</b>\n"
+        text += "/coaches - список тренеров\n"
+        text += "/stats - общая статистика\n\n"
+    
+    if coach or is_admin_user:
+        text += "📱 <b>Тренерские команды:</b>\n"
+        text += "/start - открыть CRM\n"
+        text += "/me - мой статус\n\n"
+        text += "<b>Основные возможности:</b>\n"
+        text += "• Ученики — база с настройками\n"
+        text += "• Расписание — календарь занятий\n"
+        text += "• Посещаемость — отметки\n"
+        text += "• Оплата — контроль абонементов\n\n"
+    
+    if not is_admin_user and not coach:
+        text += "❌ У вас нет доступа.\n"
+        text += "Используйте: /coach <код>\n\n"
+    
+    text += "/help - эта справка"
     await message.answer(text, parse_mode="HTML")
 
 
