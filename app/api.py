@@ -1,7 +1,7 @@
 from fastapi import FastAPI, UploadFile, File, Query, Request, Form, Depends
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse, HTMLResponse
-from starlette.middleware.base import BaseHTTPMiddleware
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select, func, and_, or_, desc
 from contextlib import asynccontextmanager
 from datetime import datetime, date, timedelta
@@ -16,7 +16,6 @@ import urllib.parse
 from app.database import async_session, init_db
 from app.models import Coach, Student, Lesson, Attendance, Payment, Notification
 from app.config import WEBAPP_DIR, BOT_TOKEN, WEEKDAYS
-import os
 
 logger = logging.getLogger(__name__)
 
@@ -28,17 +27,17 @@ async def lifespan(application: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-# Create assets directory if not exists
-assets_dir = WEBAPP_DIR / "assets"
-assets_dir.mkdir(parents=True, exist_ok=True)
-(assets_dir / "icons").mkdir(exist_ok=True)
+# CORS for Telegram WebApp
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-# Static files (only if directory exists and has content)
-if assets_dir.exists():
-    try:
-        app.mount("/assets", StaticFiles(directory=str(assets_dir)), name="assets")
-    except Exception as e:
-        logger.warning(f"Could not mount assets: {e}")
+# Static files
+app.mount("/assets", StaticFiles(directory=str(WEBAPP_DIR / "assets")), name="assets")
 
 
 # === Telegram Auth Helpers ===
