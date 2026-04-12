@@ -15,7 +15,7 @@ import logging
 import urllib.parse
 
 from app.database import async_session, init_db
-from app.models import Coach, Student, Lesson, Attendance, Payment, Notification, AdminUser, DailyNotificationLog, Location
+from app.models import Coach, Student, Lesson, Attendance, Payment, Notification, AdminUser, DailyNotificationLog, Location, StudentSchedule
 from app.config import WEBAPP_DIR, BOT_TOKEN, WEEKDAYS, ADMIN_IDS
 
 # Version for cache busting - auto-generated on server start (timestamp)
@@ -385,7 +385,7 @@ async def api_coaches(request: Request):
 
 @app.post("/api/students")
 async def api_students(request: Request):
-    """Get all students for coach (or all for admin)."""
+    """Get all students for coach (or all for admin/shared view)."""
     body = await request.json()
     coach = await get_current_coach(body.get("initData", ""))
     if not coach:
@@ -403,22 +403,32 @@ async def api_students(request: Request):
             if admin_result.scalar_one_or_none():
                 is_admin_user = True
     
+    # Get filter parameters
+    view_mode = body.get("view_mode", "all")  # "all" or "my"
+    coach_filter = body.get("coach_id")  # Filter by specific coach
+    
     async with async_session() as s:
-        if is_admin_user:
-            # Admin sees all students
-            result = await s.execute(
-                select(Student).order_by(Student.name)
-            )
-        else:
-            # Regular coach sees only their students
-            result = await s.execute(
-                select(Student).where(Student.coach_id == coach.id).order_by(Student.name)
-            )
-        students = result.scalars().all()
+        # Build query
+        query = select(Student, Coach).join(Coach)
+        
+        if coach_filter:
+            # Filter by specific coach
+            query = query.where(Student.coach_id == coach_filter)
+        elif view_mode == "my" and not is_admin_user:
+            # Show only my students
+            query = query.where(Student.coach_id == coach.id)
+        # else: show all students (shared view for coaches)
+        
+        query = query.where(Student.is_active == True).order_by(Student.name)
+        result = await s.execute(query)
+        rows = result.all()
     
     return [{
         "id": st.id,
         "coach_id": st.coach_id,
+        "coach_name": coach_obj.first_name if coach_obj else "Unknown",
+        "coach_username": coach_obj.username if coach_obj else None,
+        "is_my_student": st.coach_id == coach.id,
         "name": st.name,
         "nickname": st.nickname,
         "phone": st.phone,
@@ -435,7 +445,7 @@ async def api_students(request: Request):
         "subscription_end": st.subscription_end.isoformat() if st.subscription_end else None,
         "notes": st.notes,
         "is_active": st.is_active,
-    } for st in students]
+    } for st, coach_obj in rows]
 
 
 @app.post("/api/students/create")
@@ -484,6 +494,44 @@ async def api_create_student(request: Request):
             notes=data.get("notes") or None,
         )
         s.add(student)
+        await s.flush()  # Get student.id without committing
+        
+        # Create primary schedule in new table (for multi-location support)
+        # This duplicates data temporarily for migration purposes
+        schedule_days = data.get("lesson_days", "1,3")
+        schedule_times = lesson_times
+        
+        # If schedules array provided (new format), use it
+        if data.get("schedules") and len(data["schedules"]) > 0:
+            for idx, sched_data in enumerate(data["schedules"]):
+                times = sched_data.get("times")
+                if not times and sched_data.get("time"):
+                    days_list = sched_data.get("days", "1,3").split(",")
+                    times = json.dumps({d.strip(): sched_data["time"] for d in days_list})
+                elif isinstance(times, dict):
+                    times = json.dumps(times)
+                
+                schedule = StudentSchedule(
+                    student_id=student.id,
+                    location_id=sched_data.get("location_id"),
+                    days=sched_data.get("days", "1,3"),
+                    times=times or '{"1": "18:00"}',
+                    duration=sched_data.get("duration", 90),
+                    is_primary=(idx == 0)  # First schedule is primary
+                )
+                s.add(schedule)
+        else:
+            # Create from legacy fields (default behavior)
+            schedule = StudentSchedule(
+                student_id=student.id,
+                location_id=data.get("location_id"),
+                days=schedule_days,
+                times=schedule_times,
+                duration=int(data.get("lesson_duration", 90)),
+                is_primary=True
+            )
+            s.add(schedule)
+        
         await s.commit()
         
         return {"success": True, "id": student.id}
@@ -531,7 +579,7 @@ async def api_get_student(student_id: int, request: Request):
             "paid_at": p.paid_at.isoformat() if p.paid_at else None,
         } for p in payments_result.scalars().all()]
         
-        # Get location info
+        # Get location info (legacy)
         location_name = st.location
         if st.location_id:
             loc_result = await s.execute(select(Location).where(Location.id == st.location_id))
@@ -539,18 +587,54 @@ async def api_get_student(student_id: int, request: Request):
             if loc:
                 location_name = loc.name
         
+        # Get schedules (new multi-location system)
+        schedules_result = await s.execute(
+            select(StudentSchedule, Location).outerjoin(
+                Location, StudentSchedule.location_id == Location.id
+            ).where(StudentSchedule.student_id == student_id)
+        )
+        schedules = []
+        for sched, loc in schedules_result.all():
+            schedules.append({
+                "id": sched.id,
+                "location_id": sched.location_id,
+                "location_name": loc.name if loc else "Зал",
+                "location_address": loc.address if loc else None,
+                "days": sched.days,
+                "times": sched.times,
+                "duration": sched.duration,
+                "is_primary": sched.is_primary,
+            })
+        
+        # If no schedules yet, create fallback from legacy data
+        if not schedules and st.lesson_days:
+            schedules = [{
+                "id": None,
+                "location_id": st.location_id,
+                "location_name": location_name,
+                "days": st.lesson_days,
+                "times": st.lesson_times,
+                "duration": st.lesson_duration,
+                "is_primary": True,
+                "is_legacy": True
+            }]
+        
         return {
             "id": st.id,
+            "coach_id": st.coach_id,
             "name": st.name,
             "nickname": st.nickname,
             "phone": st.phone,
             "parent_phone": st.parent_phone,
             "age": st.age,
             "birthday": st.birthday.isoformat() if st.birthday else None,
+            # Legacy fields (for backward compatibility)
             "location": location_name,
             "location_id": st.location_id,
             "lesson_days": st.lesson_days,
             "lesson_times": st.lesson_times,
+            # New multi-location system
+            "schedules": schedules,
             "lesson_price": st.lesson_price,
             "lessons_count": st.lessons_count,
             "lessons_remaining": st.lessons_remaining if st.lessons_remaining is not None else st.lessons_count,
@@ -1954,4 +2038,446 @@ async def api_search(request: Request):
         return {
             "results": results,
             "count": len(results)
+        }
+
+
+# === Student Schedules (Multiple Locations) ===
+
+@app.post("/api/students/{student_id}/schedules")
+async def api_get_student_schedules(student_id: int, request: Request):
+    """Get all schedules (locations) for a student."""
+    body = await request.json()
+    coach = await get_current_coach(body.get("initData", ""))
+    if not coach:
+        return JSONResponse({"error": "unauthorized"}, 403)
+    
+    async with async_session() as s:
+        # Verify student exists and belongs to coach
+        student_result = await s.execute(
+            select(Student).where(Student.id == student_id)
+        )
+        student = student_result.scalar_one_or_none()
+        if not student:
+            return JSONResponse({"error": "not_found"}, 404)
+        
+        # Get all schedules with location info
+        schedules_result = await s.execute(
+            select(StudentSchedule, Location).outerjoin(
+                Location, StudentSchedule.location_id == Location.id
+            ).where(StudentSchedule.student_id == student_id)
+        )
+        
+        schedules = []
+        for sched, loc in schedules_result.all():
+            schedules.append({
+                "id": sched.id,
+                "location_id": sched.location_id,
+                "location_name": loc.name if loc else "Зал",
+                "location_address": loc.address if loc else None,
+                "days": sched.days,
+                "times": sched.times,
+                "duration": sched.duration,
+                "is_primary": sched.is_primary,
+            })
+        
+        return {
+            "student_id": student_id,
+            "student_name": student.name,
+            "schedules": schedules
+        }
+
+
+@app.post("/api/students/{student_id}/schedules/create")
+async def api_create_student_schedule(student_id: int, request: Request):
+    """Add a new schedule (location) for a student."""
+    body = await request.json()
+    coach = await get_current_coach(body.get("initData", ""))
+    if not coach:
+        return JSONResponse({"error": "unauthorized"}, 403)
+    
+    data = body.get("schedule", {})
+    
+    async with async_session() as s:
+        # Verify student belongs to coach
+        student_result = await s.execute(
+            select(Student).where(Student.id == student_id, Student.coach_id == coach.id)
+        )
+        student = student_result.scalar_one_or_none()
+        if not student:
+            return JSONResponse({"error": "not_found"}, 404)
+        
+        # Verify location belongs to coach
+        location_id = data.get("location_id")
+        if location_id:
+            loc_result = await s.execute(
+                select(Location).where(Location.id == location_id, Location.coach_id == coach.id)
+            )
+            if not loc_result.scalar_one_or_none():
+                return JSONResponse({"error": "location_not_found"}, 404)
+        
+        # If this is the first schedule, mark as primary
+        existing_count = await s.execute(
+            select(func.count(StudentSchedule.id)).where(StudentSchedule.student_id == student_id)
+        )
+        is_primary = existing_count.scalar() == 0
+        
+        # Handle times JSON
+        times = data.get("times")
+        if not times and data.get("time"):
+            # Legacy format: single time for all days
+            days = data.get("days", "1,3").split(",")
+            times = json.dumps({day.strip(): data["time"] for day in days})
+        elif isinstance(times, dict):
+            times = json.dumps(times)
+        
+        schedule = StudentSchedule(
+            student_id=student_id,
+            location_id=location_id,
+            days=data.get("days", "1,3"),
+            times=times or '{"1": "18:00", "3": "18:00"}',
+            duration=int(data.get("duration", 90)),
+            is_primary=data.get("is_primary", is_primary)
+        )
+        s.add(schedule)
+        await s.commit()
+        
+        return {"success": True, "id": schedule.id}
+
+
+@app.post("/api/schedules/{schedule_id}/update")
+async def api_update_schedule(schedule_id: int, request: Request):
+    """Update a student schedule."""
+    body = await request.json()
+    coach = await get_current_coach(body.get("initData", ""))
+    if not coach:
+        return JSONResponse({"error": "unauthorized"}, 403)
+    
+    data = body.get("schedule", {})
+    
+    async with async_session() as s:
+        # Get schedule and verify ownership through student
+        sched_result = await s.execute(
+            select(StudentSchedule, Student).join(Student).where(
+                StudentSchedule.id == schedule_id,
+                Student.coach_id == coach.id
+            )
+        )
+        row = sched_result.one_or_none()
+        if not row:
+            return JSONResponse({"error": "not_found"}, 404)
+        
+        schedule, student = row
+        
+        # Update fields
+        if "location_id" in data:
+            schedule.location_id = data["location_id"]
+        if "days" in data:
+            schedule.days = data["days"]
+        if "times" in data:
+            schedule.times = json.dumps(data["times"]) if isinstance(data["times"], dict) else data["times"]
+        elif "time" in data:
+            # Update time for all days
+            days = schedule.days.split(",") if schedule.days else []
+            times = {}
+            for day in days:
+                times[day.strip()] = data["time"]
+            schedule.times = json.dumps(times)
+        if "duration" in data:
+            schedule.duration = int(data["duration"])
+        if "is_primary" in data:
+            schedule.is_primary = bool(data["is_primary"])
+        
+        await s.commit()
+        return {"success": True}
+
+
+@app.post("/api/schedules/{schedule_id}/delete")
+async def api_delete_schedule(schedule_id: int, request: Request):
+    """Delete a student schedule."""
+    body = await request.json()
+    coach = await get_current_coach(body.get("initData", ""))
+    if not coach:
+        return JSONResponse({"error": "unauthorized"}, 403)
+    
+    async with async_session() as s:
+        # Get schedule and verify ownership
+        sched_result = await s.execute(
+            select(StudentSchedule, Student).join(Student).where(
+                StudentSchedule.id == schedule_id,
+                Student.coach_id == coach.id
+            )
+        )
+        row = sched_result.one_or_none()
+        if not row:
+            return JSONResponse({"error": "not_found"}, 404)
+        
+        schedule, student = row
+        
+        # Check if it's the only schedule
+        count_result = await s.execute(
+            select(func.count(StudentSchedule.id)).where(StudentSchedule.student_id == student.id)
+        )
+        if count_result.scalar() <= 1:
+            return JSONResponse({"error": "cannot_delete_only_schedule"}, 400)
+        
+        await s.delete(schedule)
+        await s.commit()
+        return {"success": True}
+
+
+@app.post("/api/students/{student_id}/schedules/set-primary")
+async def api_set_primary_schedule(student_id: int, request: Request):
+    """Set a schedule as primary (and unset others)."""
+    body = await request.json()
+    coach = await get_current_coach(body.get("initData", ""))
+    if not coach:
+        return JSONResponse({"error": "unauthorized"}, 403)
+    
+    primary_schedule_id = body.get("schedule_id")
+    
+    async with async_session() as s:
+        # Verify student belongs to coach
+        student_result = await s.execute(
+            select(Student).where(Student.id == student_id, Student.coach_id == coach.id)
+        )
+        if not student_result.scalar_one_or_none():
+            return JSONResponse({"error": "not_found"}, 404)
+        
+        # Unset all primary for this student
+        await s.execute(
+            select(StudentSchedule).where(StudentSchedule.student_id == student_id)
+        )
+        schedules = await s.execute(
+            select(StudentSchedule).where(StudentSchedule.student_id == student_id)
+        )
+        for sched in schedules.scalars().all():
+            sched.is_primary = (sched.id == primary_schedule_id)
+        
+        await s.commit()
+        return {"success": True}
+
+
+# === Finance Reports ===
+
+@app.post("/api/finance/summary")
+async def api_finance_summary(request: Request):
+    """Get financial summary for period."""
+    body = await request.json()
+    coach = await get_current_coach(body.get("initData", ""))
+    if not coach:
+        return JSONResponse({"error": "unauthorized"}, 403)
+    
+    period = body.get("period", "month")  # month, year, all
+    location_id = body.get("location_id")  # Filter by location
+    
+    today = date.today()
+    
+    if period == "month":
+        start_date = today.replace(day=1)
+    elif period == "year":
+        start_date = today.replace(month=1, day=1)
+    else:
+        start_date = date(2000, 1, 1)
+    
+    async with async_session() as s:
+        # Base query
+        base_query = select(Payment).where(
+            Payment.paid_at >= start_date
+        )
+        
+        if location_id:
+            # Join with students to filter by location
+            base_query = base_query.join(Student).where(Student.location_id == location_id)
+        
+        # Total revenue
+        revenue_result = await s.execute(
+            select(func.sum(Payment.amount)).where(
+                Payment.status == "paid",
+                Payment.paid_at >= start_date
+            )
+        )
+        total_revenue = revenue_result.scalar() or 0
+        
+        # Revenue by coach (for shared view)
+        revenue_by_coach = []
+        coaches_result = await s.execute(select(Coach).where(Coach.is_active == True))
+        all_coaches = coaches_result.scalars().all()
+        
+        for c in all_coaches:
+            coach_revenue = await s.execute(
+                select(func.sum(Payment.amount)).where(
+                    Payment.coach_id == c.id,
+                    Payment.status == "paid",
+                    Payment.paid_at >= start_date
+                )
+            )
+            rev = coach_revenue.scalar() or 0
+            if rev > 0:
+                revenue_by_coach.append({
+                    "coach_id": c.id,
+                    "coach_name": c.first_name,
+                    "revenue": rev
+                })
+        
+        # Revenue by location
+        revenue_by_location = []
+        locations_result = await s.execute(
+            select(Location).where(Location.is_active == True)
+        )
+        all_locations = locations_result.scalars().all()
+        
+        for loc in all_locations:
+            # Get payments for students in this location
+            loc_revenue = await s.execute(
+                select(func.sum(Payment.amount)).join(Student).where(
+                    Student.location_id == loc.id,
+                    Payment.status == "paid",
+                    Payment.paid_at >= start_date
+                )
+            )
+            rev = loc_revenue.scalar() or 0
+            if rev > 0:
+                revenue_by_location.append({
+                    "location_id": loc.id,
+                    "location_name": loc.name,
+                    "revenue": rev
+                })
+        
+        # Pending payments (overdue + pending)
+        pending_result = await s.execute(
+            select(func.sum(Payment.amount)).where(
+                Payment.status.in_(["pending", "overdue"]),
+                Payment.created_at >= start_date
+            )
+        )
+        pending_amount = pending_result.scalar() or 0
+        
+        # Overdue breakdown
+        overdue_result = await s.execute(
+            select(Payment, Student).join(Student).where(
+                Payment.status == "overdue"
+            ).order_by(desc(Payment.created_at))
+        )
+        
+        overdue_list = []
+        for payment, student in overdue_result.all():
+            overdue_list.append({
+                "id": payment.id,
+                "student_name": student.name,
+                "amount": payment.amount,
+                "period_end": payment.period_end.isoformat() if payment.period_end else None,
+                "days_overdue": (today - payment.period_end).days if payment.period_end else 0
+            })
+        
+        # Monthly trend (last 6 months)
+        monthly_trend = []
+        for i in range(5, -1, -1):
+            month_date = today.replace(day=1) - timedelta(days=i*30)
+            month_start = month_date.replace(day=1)
+            if month_date.month == 12:
+                month_end = month_date.replace(year=month_date.year + 1, month=1, day=1)
+            else:
+                month_end = month_date.replace(month=month_date.month + 1, day=1)
+            
+            month_revenue = await s.execute(
+                select(func.sum(Payment.amount)).where(
+                    Payment.status == "paid",
+                    Payment.paid_at >= month_start,
+                    Payment.paid_at < month_end
+                )
+            )
+            monthly_trend.append({
+                "month": month_date.strftime("%b"),
+                "revenue": month_revenue.scalar() or 0
+            })
+        
+        return {
+            "period": period,
+            "summary": {
+                "total_revenue": total_revenue,
+                "pending_amount": pending_amount,
+                "overdue_count": len(overdue_list),
+                "overdue_total": sum(o["amount"] for o in overdue_list)
+            },
+            "by_coach": revenue_by_coach,
+            "by_location": revenue_by_location,
+            "overdue_payments": overdue_list[:10],  # Top 10
+            "monthly_trend": monthly_trend
+        }
+
+
+@app.post("/api/finance/debtors")
+async def api_finance_debtors(request: Request):
+    """Get list of students with payment issues."""
+    body = await request.json()
+    coach = await get_current_coach(body.get("initData", ""))
+    if not coach:
+        return JSONResponse({"error": "unauthorized"}, 403)
+    
+    today = date.today()
+    
+    async with async_session() as s:
+        # Get all active students with subscription info
+        result = await s.execute(
+            select(Student).where(Student.is_active == True).order_by(Student.name)
+        )
+        students = result.scalars().all()
+        
+        debtors = {
+            "expired_subscription": [],  # Subscription ended
+            "ending_soon": [],           # 1-3 days left
+            "no_lessons": [],            # 0 lessons remaining
+            "low_lessons": []            # 1-2 lessons remaining
+        }
+        
+        for student in students:
+            remaining = student.lessons_remaining if student.lessons_remaining is not None else student.lessons_count
+            
+            # Check lessons
+            if remaining <= 0:
+                debtors["no_lessons"].append({
+                    "id": student.id,
+                    "name": student.name,
+                    "coach_id": student.coach_id,
+                    "reason": "no_lessons",
+                    "remaining": 0
+                })
+            elif remaining <= 2:
+                debtors["low_lessons"].append({
+                    "id": student.id,
+                    "name": student.name,
+                    "coach_id": student.coach_id,
+                    "reason": "low_lessons",
+                    "remaining": remaining
+                })
+            
+            # Check subscription
+            if student.subscription_end:
+                days_left = (student.subscription_end - today).days
+                if days_left < 0:
+                    debtors["expired_subscription"].append({
+                        "id": student.id,
+                        "name": student.name,
+                        "coach_id": student.coach_id,
+                        "reason": "expired",
+                        "days_overdue": abs(days_left)
+                    })
+                elif days_left <= 3:
+                    debtors["ending_soon"].append({
+                        "id": student.id,
+                        "name": student.name,
+                        "coach_id": student.coach_id,
+                        "reason": "ending_soon",
+                        "days_left": days_left
+                    })
+        
+        return {
+            "counts": {
+                "expired": len(debtors["expired_subscription"]),
+                "ending_soon": len(debtors["ending_soon"]),
+                "no_lessons": len(debtors["no_lessons"]),
+                "low_lessons": len(debtors["low_lessons"]),
+                "total": sum(len(v) for v in debtors.values())
+            },
+            "debtors": debtors
         }

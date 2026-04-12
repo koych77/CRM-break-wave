@@ -36,6 +36,45 @@ class Location(Base):
     coach = relationship("Coach", back_populates="locations")
 
 
+class StudentSchedule(Base):
+    """Student can have multiple locations with different schedules."""
+    __tablename__ = "student_schedules"
+    
+    id = Column(Integer, primary_key=True)
+    student_id = Column(Integer, ForeignKey("students.id"), nullable=False)
+    location_id = Column(Integer, ForeignKey("locations.id"), nullable=False)
+    days = Column(String(100), default="1,3")  # Days of week (0=Mon, 6=Sun)
+    times = Column(String(500), default='{"1": "18:00", "3": "18:00"}')  # JSON: {"day": "time"}
+    duration = Column(Integer, default=90)  # Minutes
+    is_primary = Column(Boolean, default=True)  # Primary or additional location
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    student = relationship("Student", back_populates="schedules")
+    location = relationship("Location")
+    
+    def get_time_for_day(self, day_of_week):
+        """Get lesson time for specific day at this location."""
+        try:
+            import json
+            if not self.times:
+                return '18:00'
+            times = json.loads(self.times)
+            day_str = str(day_of_week)
+            if day_str in times:
+                return times[day_str]
+            if times:
+                return list(times.values())[0]
+            return '18:00'
+        except Exception:
+            return '18:00'
+    
+    def has_lesson_on_day(self, day_of_week):
+        """Check if student has lesson at this location on given day."""
+        if not self.days:
+            return False
+        return str(day_of_week) in self.days.split(",")
+
+
 class Student(Base):
     __tablename__ = "students"
     
@@ -49,12 +88,14 @@ class Student(Base):
     birthday = Column(Date, nullable=True)
     notes = Column(Text)
     
-    # Individual settings per student
+    # DEPRECATED: Kept for backward compatibility
+    # Use student_schedules table instead for multiple locations
     location = Column(String(200), default="Зал Break Wave")
     location_id = Column(Integer, ForeignKey("locations.id"), nullable=True)
     lesson_days = Column(String(100), default="1,3")
     lesson_times = Column(String(500), default='{"1": "18:00", "3": "18:00"}')
     lesson_duration = Column(Integer, default=90)
+    
     lesson_price = Column(Integer, default=150)
     lessons_count = Column(Integer, default=8)
     lessons_remaining = Column(Integer, default=8)
@@ -69,6 +110,7 @@ class Student(Base):
     lessons = relationship("Lesson", back_populates="student", cascade="all, delete-orphan")
     attendance_records = relationship("Attendance", back_populates="student", cascade="all, delete-orphan")
     payments = relationship("Payment", back_populates="student", cascade="all, delete-orphan")
+    schedules = relationship("StudentSchedule", back_populates="student", cascade="all, delete-orphan")
     
     def get_attendance_stats(self):
         """Calculate attendance statistics."""
@@ -78,23 +120,77 @@ class Student(Base):
         sick = sum(1 for a in self.attendance_records if a.status == "sick")
         return {"total": total, "present": present, "absent": absent, "sick": sick}
     
+    def get_schedules_for_day(self, day_of_week):
+        """Get all schedules (locations) for a specific day.
+        
+        Returns list of tuples: (schedule, location_name, time)
+        Student may have multiple lessons on same day at different locations.
+        """
+        result = []
+        
+        # First check new schedules table
+        if self.schedules:
+            for schedule in self.schedules:
+                if schedule.has_lesson_on_day(day_of_week):
+                    time = schedule.get_time_for_day(day_of_week)
+                    loc_name = schedule.location.name if schedule.location else "Зал"
+                    result.append({
+                        "schedule": schedule,
+                        "location_id": schedule.location_id,
+                        "location_name": loc_name,
+                        "time": time,
+                        "is_primary": schedule.is_primary
+                    })
+        
+        # Fallback to legacy fields if no schedules defined
+        if not result and self.lesson_days:
+            days = self.lesson_days.split(",") if self.lesson_days else []
+            if str(day_of_week) in days:
+                time = self.get_lesson_time_for_day(day_of_week)
+                loc_name = self.location or "Зал"
+                result.append({
+                    "schedule": None,
+                    "location_id": self.location_id,
+                    "location_name": loc_name,
+                    "time": time,
+                    "is_primary": True
+                })
+        
+        return result
+    
+    def get_all_lesson_times_for_day(self, day_of_week):
+        """Get all lesson times for a day (for students with multiple locations)."""
+        schedules = self.get_schedules_for_day(day_of_week)
+        return [s["time"] for s in schedules]
+    
+    def has_lesson_on_day(self, day_of_week):
+        """Check if student has any lesson on given day."""
+        return len(self.get_schedules_for_day(day_of_week)) > 0
+    
     def get_lesson_time_for_day(self, day_of_week):
-        """Get lesson time for specific day of week."""
+        """Get lesson time for specific day of week (legacy fallback)."""
         try:
             import json
             if not self.lesson_times:
                 return '18:00'
             times = json.loads(self.lesson_times)
-            # Try to get time for specific day
             day_str = str(day_of_week)
             if day_str in times:
                 return times[day_str]
-            # Fallback to any available time
             if times:
                 return list(times.values())[0]
             return '18:00'
         except Exception:
             return '18:00'
+    
+    def get_primary_schedule(self):
+        """Get primary schedule (for backward compatibility)."""
+        if self.schedules:
+            primary = next((s for s in self.schedules if s.is_primary), None)
+            if primary:
+                return primary
+            return self.schedules[0] if self.schedules else None
+        return None
 
 
 class Lesson(Base):

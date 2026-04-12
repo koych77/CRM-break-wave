@@ -5,7 +5,7 @@ const tg = window.Telegram?.WebApp;
 
 // Cache busting - force reload if version changed
 const APP_VERSION_KEY = 'crm_bw_version';
-const CURRENT_VERSION = '4'; // Version 4: Multi-time per day, locations, statistics, search
+const CURRENT_VERSION = '5'; // Version 5: Multiple locations per student, shared students list, finance reports
 
 // Check version on load
 const savedVersion = localStorage.getItem(APP_VERSION_KEY);
@@ -403,9 +403,23 @@ async function renderDashboard(data) {
 
 // === Students ===
 
+let currentStudentsFilter = 'all'; // 'all', 'my', 'other'
+
 async function loadStudents() {
     // Load coaches first (for displaying coach info)
     await loadCoaches();
+    
+    // Build request body based on filter
+    const requestBody = {initData};
+    if (currentStudentsFilter === 'my') {
+        requestBody.view_mode = 'my';
+    } else if (currentStudentsFilter === 'other' && coaches.length > 1) {
+        // Find other coach (brother)
+        const otherCoach = coaches.find(c => !c.is_current);
+        if (otherCoach) {
+            requestBody.coach_id = otherCoach.id;
+        }
+    }
     
     // Show cached data first
     const cached = DataCache.load(DataCache.STUDENTS_KEY);
@@ -418,7 +432,7 @@ async function loadStudents() {
         const res = await fetch(`${API}/api/students`, {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({initData})
+            body: JSON.stringify(requestBody)
         });
         
         students = await res.json();
@@ -434,6 +448,18 @@ async function loadStudents() {
             showNotification('Ошибка загрузки учеников', 'error');
         }
     }
+}
+
+function setStudentsFilter(filter) {
+    currentStudentsFilter = filter;
+    
+    // Update UI
+    document.querySelectorAll('.filter-tab').forEach(tab => {
+        tab.classList.toggle('active', tab.dataset.filter === filter);
+    });
+    
+    // Reload students with filter
+    loadStudents();
 }
 
 function renderStudentsList(list) {
@@ -478,15 +504,23 @@ function renderStudentsList(list) {
             lessonsBadge = `<span class="list-item-badge warning">${remaining} занятия</span>`;
         }
         
-        // Get coach info if available
-        let coachInfo = '';
-        if (s.coach_id && coaches.length > 1) {
-            const coach = coaches.find(c => c.id === s.coach_id);
-            if (coach) {
-                const coachName = escapeHtml(coach.first_name || 'Без имени');
-                const coachUsername = coach.username ? `@${escapeHtml(coach.username)}` : '';
-                coachInfo = `<div class="list-item-coach">👤 ${coachName} ${coachUsername}</div>`;
-            }
+        // Get coach badge (my vs other)
+        let coachBadge = '';
+        if (coaches.length > 1) {
+            const isMyStudent = s.is_my_student !== undefined ? s.is_my_student : s.coach_id === currentCoach?.coach_id;
+            const badgeClass = isMyStudent ? 'my' : 'other';
+            const badgeText = isMyStudent ? 'Мой' : 'Брат';
+            coachBadge = `<span class="coach-badge ${badgeClass}">${badgeText}</span>`;
+        }
+        
+        // Show locations info
+        let locationsInfo = '';
+        if (s.schedules && s.schedules.length > 1) {
+            const locationCount = s.schedules.length;
+            const primaryLoc = s.schedules.find(sch => sch.is_primary);
+            locationsInfo = `<span>📍 ${primaryLoc?.location_name || 'Зал'} +${locationCount - 1}</span>`;
+        } else {
+            locationsInfo = `<span>📍 ${escapeHtml(s.location || 'Зал Break Wave')}</span>`;
         }
         
         // Lessons indicator
@@ -496,12 +530,14 @@ function renderStudentsList(list) {
             <div class="list-item" onclick="openStudentDetail(${s.id})">
                 <div class="list-item-header">
                     <span class="list-item-title">${escapeHtml(s.name)} ${lessonsIndicator}</span>
-                    ${lessonsBadge || statusBadge}
+                    <div style="display: flex; gap: 4px;">
+                        ${coachBadge}
+                        ${lessonsBadge || statusBadge}
+                    </div>
                 </div>
                 <div class="list-item-subtitle">${escapeHtml(s.nickname || '')}</div>
-                ${coachInfo}
                 <div class="list-item-meta">
-                    <span>📍 ${escapeHtml(s.location || 'Зал Break Wave')}</span>
+                    ${locationsInfo}
                     <span>🕐 ${days}</span>
                 </div>
             </div>
@@ -654,20 +690,9 @@ async function openStudentDetail(id) {
             </div>
             
             <div class="info-section">
-                <h3>📍 Занятия</h3>
-                <div class="info-row">
-                    <span class="info-label">Место</span>
-                    <span class="info-value">${escapeHtml(student.location || 'Зал Break Wave')}</span>
-                </div>
-                <div class="info-row">
-                    <span class="info-label">Дни</span>
-                    <span class="info-value">${days}</span>
-                </div>
-                <div class="info-row">
-                    <span class="info-label">Время</span>
-                    <span class="info-value">${student.lesson_time || '—'}</span>
-                </div>
-                <div class="info-row">
+                <h3>📍 Залы и расписание</h3>
+                ${renderStudentDetailLocations(student)}
+                <div class="info-row" style="margin-top: 12px;">
                     <span class="info-label">Стоимость</span>
                     <span class="info-value">${student.lesson_price?.toLocaleString() || 0} Br / ${total} занятий</span>
                 </div>
@@ -1082,86 +1107,255 @@ async function openQuickLesson() {
     navigate('quick-lesson');
 }
 
+// Quick attendance data
+let quickAttendanceData = {};
+
 async function loadQuickLesson() {
-    const date = document.getElementById('ql-date').value;
+    const dateInput = document.getElementById('ql-date');
+    const locationSelect = document.getElementById('ql-location');
+    
+    // Set default date if not set
+    if (!dateInput.value) {
+        dateInput.value = new Date().toISOString().split('T')[0];
+    }
+    
+    // Load locations for filter
+    if (locationSelect.options.length <= 1) {
+        try {
+            const locRes = await fetch(`${API}/api/locations`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({initData})
+            });
+            const locations = await locRes.json();
+            locationSelect.innerHTML = '<option value="">Все залы</option>' +
+                locations.map(l => `<option value="${l.id}">${escapeHtml(l.name)}</option>`).join('');
+        } catch (e) {
+            console.error('Load locations error:', e);
+        }
+    }
+    
+    const date = dateInput.value;
+    const locationId = locationSelect.value;
     
     try {
+        // Get students with their schedules for this date
         const res = await fetch(`${API}/api/students`, {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({initData})
+            body: JSON.stringify({initData, view_mode: 'my'})
         });
         
         const studentsList = await res.json();
-        const container = document.getElementById('quick-lesson-students');
+        const dayOfWeek = new Date(date).getDay();
         
-        container.innerHTML = studentsList.map(s => `
-            <div class="quick-student-item" data-student-id="${s.id}">
-                <span class="quick-student-name">${escapeHtml(s.name)}</span>
-                <div class="attendance-buttons">
-                    <button class="att-btn present" onclick="setAttendance(${s.id}, 'present')" title="Был">✓</button>
-                    <button class="att-btn absent" onclick="setAttendance(${s.id}, 'absent')" title="Не был">✗</button>
-                    <button class="att-btn sick" onclick="setAttendance(${s.id}, 'sick')" title="Болеет">🤒</button>
-                </div>
-            </div>
-        `).join('');
+        // Filter students who have lesson on this day (and optionally in this location)
+        let filteredStudents = studentsList.filter(s => {
+            // Check if student has schedule for this day
+            if (!s.schedules || s.schedules.length === 0) {
+                // Legacy check
+                if (!s.lesson_days) return false;
+                return s.lesson_days.split(',').includes(String(dayOfWeek));
+            }
+            return s.schedules.some(sch => sch.days && sch.days.split(',').includes(String(dayOfWeek)));
+        });
+        
+        // Filter by location if selected
+        if (locationId) {
+            filteredStudents = filteredStudents.filter(s => 
+                s.schedules && s.schedules.some(sch => sch.location_id == locationId)
+            );
+        }
+        
+        // Sort by name
+        filteredStudents.sort((a, b) => a.name.localeCompare(b.name));
+        
+        // Initialize attendance data
+        quickAttendanceData = {};
+        filteredStudents.forEach(s => {
+            quickAttendanceData[s.id] = {
+                student_id: s.id,
+                status: null, // null, present, absent, sick
+                student: s
+            };
+        });
+        
+        renderQuickLessonList(filteredStudents);
+        updateQuickStats();
+        
     } catch (e) {
         console.error('Quick lesson load error:', e);
+        document.getElementById('quick-lesson-students').innerHTML = `
+            <div class="empty-state">
+                <p>Ошибка загрузки</p>
+            </div>
+        `;
     }
 }
 
-function setAttendance(studentId, status) {
-    const row = document.querySelector(`[data-student-id="${studentId}"]`);
-    row.querySelectorAll('.att-btn').forEach(btn => btn.classList.remove('selected'));
-    row.querySelector(`.att-btn.${status}`).classList.add('selected');
-    row.dataset.status = status;
+function renderQuickLessonList(students) {
+    const container = document.getElementById('quick-lesson-students');
+    
+    if (students.length === 0) {
+        container.innerHTML = `
+            <div class="empty-state">
+                <div class="empty-state-icon">📅</div>
+                <p>Нет учеников на этот день</p>
+            </div>
+        `;
+        return;
+    }
+    
+    container.innerHTML = students.map((s, index) => {
+        const remaining = s.lessons_remaining !== undefined ? s.lessons_remaining : s.lessons_count;
+        let dotClass = 'ok';
+        if (remaining <= 0) dotClass = 'none';
+        else if (remaining <= 2) dotClass = 'low';
+        
+        return `
+            <div class="quick-student-item" data-student-id="${s.id}" onclick="toggleQuickStatus(${s.id})">
+                <div class="quick-student-avatar">${s.name.charAt(0)}</div>
+                <div class="quick-student-info">
+                    <div class="quick-student-name">
+                        ${index + 1}. ${escapeHtml(s.name)}
+                        <span class="lessons-dot ${dotClass}"></span>
+                    </div>
+                    <div class="quick-student-meta">${remaining} занятий</div>
+                </div>
+                <div class="quick-student-status" id="status-${s.id}">⏳</div>
+            </div>
+        `;
+    }).join('');
+    
+    document.getElementById('ql-title').textContent = `✅ Отметка (${students.length})`;
 }
 
-async function saveQuickLesson() {
-    const date = document.getElementById('ql-date').value;
-    const rows = document.querySelectorAll('#quick-lesson-students > div');
+function toggleQuickStatus(studentId) {
+    const data = quickAttendanceData[studentId];
+    const item = document.querySelector(`[data-student-id="${studentId}"]`);
+    const statusEl = document.getElementById(`status-${studentId}`);
     
-    const attendances = [];
-    rows.forEach(row => {
-        if (row.dataset.status) {
-            attendances.push({
-                student_id: parseInt(row.dataset.studentId),
-                status: row.dataset.status
-            });
-        }
+    // Cycle: null -> present -> absent -> sick -> null
+    const cycle = [null, 'present', 'absent', 'sick'];
+    const currentIndex = cycle.indexOf(data.status);
+    const nextStatus = cycle[(currentIndex + 1) % cycle.length];
+    
+    data.status = nextStatus;
+    
+    // Update UI
+    item.classList.remove('selected-present', 'selected-absent', 'selected-sick');
+    
+    if (nextStatus === 'present') {
+        item.classList.add('selected-present');
+        statusEl.textContent = '✅';
+    } else if (nextStatus === 'absent') {
+        item.classList.add('selected-absent');
+        statusEl.textContent = '❌';
+    } else if (nextStatus === 'sick') {
+        item.classList.add('selected-sick');
+        statusEl.textContent = '🤒';
+    } else {
+        statusEl.textContent = '⏳';
+    }
+    
+    updateQuickStats();
+}
+
+function selectAllQuick(status) {
+    Object.keys(quickAttendanceData).forEach(id => {
+        quickAttendanceData[id].status = status;
+        const item = document.querySelector(`[data-student-id="${id}"]`);
+        const statusEl = document.getElementById(`status-${id}`);
+        
+        item.classList.remove('selected-present', 'selected-absent', 'selected-sick');
+        item.classList.add(`selected-${status}`);
+        
+        if (status === 'present') statusEl.textContent = '✅';
+        else if (status === 'absent') statusEl.textContent = '❌';
+        else if (status === 'sick') statusEl.textContent = '🤒';
     });
+    
+    updateQuickStats();
+}
+
+function updateQuickStats() {
+    const total = Object.keys(quickAttendanceData).length;
+    const marked = Object.values(quickAttendanceData).filter(d => d.status !== null).length;
+    const present = Object.values(quickAttendanceData).filter(d => d.status === 'present').length;
+    
+    document.getElementById('quick-lesson-stats').innerHTML = `
+        <div class="quick-stat">
+            <span class="quick-stat-value">${marked}/${total}</span>
+            <span class="quick-stat-label">Отмечено</span>
+        </div>
+        <div class="quick-stat">
+            <span class="quick-stat-value" style="color: var(--success)">${present}</span>
+            <span class="quick-stat-label">Присутствуют</span>
+        </div>
+        <div class="quick-stat">
+            <span class="quick-stat-value">${total - marked}</span>
+            <span class="quick-stat-label">Осталось</span>
+        </div>
+    `;
+}
+
+async function saveQuickAttendance() {
+    const date = document.getElementById('ql-date').value;
+    const attendances = Object.values(quickAttendanceData)
+        .filter(d => d.status !== null)
+        .map(d => ({
+            student_id: d.student_id,
+            status: d.status
+        }));
     
     if (attendances.length === 0) {
         showNotification('Отметьте хотя бы одного ученика', 'error');
         return;
     }
     
-    // Create lessons with attendance
     try {
-        for (const att of attendances) {
-            await fetch(`${API}/api/lessons/create`, {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({
-                    initData,
-                    lesson: {
-                        student_id: att.student_id,
-                        date: date,
-                        status: att.status
-                    }
-                })
-            });
-        }
+        const res = await fetch(`${API}/api/bulk-attendance`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                initData,
+                date: date,
+                attendance: attendances
+            })
+        });
         
-        showNotification('Занятия сохранены!', 'success');
-        // Clear cache to force refresh
-        DataCache.clear();
-        goBack();
-        loadDashboard();
+        const result = await res.json();
+        
+        if (result.success) {
+            showNotification(`Сохранено: ${result.marked} учеников`, 'success');
+            
+            // Show alert about low lessons if any
+            if (result.low_lessons_alert && result.low_lessons_alert.length > 0) {
+                const names = result.low_lessons_alert.map(s => s.name).join(', ');
+                setTimeout(() => {
+                    showNotification(`⚠️ Мало занятий: ${names}`, 'warning', 5000);
+                }, 1000);
+            }
+            
+            DataCache.clear();
+            goBack();
+            loadDashboard();
+        } else {
+            showNotification('Ошибка сохранения', 'error');
+        }
     } catch (e) {
-        console.error('Save quick lesson error:', e);
-        showNotification('Ошибка сохранения', 'error');
+        console.error('Save quick attendance error:', e);
+        showNotification('Ошибка сети', 'error');
     }
+}
+
+// Legacy function for compatibility
+function setAttendance(studentId, status) {
+    toggleQuickStatus(studentId);
+}
+
+async function saveQuickLesson() {
+    await saveQuickAttendance();
 }
 
 // === Helpers ===
@@ -1835,3 +2029,588 @@ function renderSearchResults(results) {
         </div>
     `).join('');
 }
+
+
+// === Multiple Locations Management ===
+
+let currentLocationSchedules = [];
+let availableLocations = [];
+
+// Initialize with one default location
+function initLocationSchedules(schedules = null) {
+    if (schedules && schedules.length > 0) {
+        currentLocationSchedules = schedules.map(s => ({
+            id: s.id,
+            location_id: s.location_id,
+            days: s.days ? s.days.split(',').map(d => parseInt(d.trim())) : [],
+            times: typeof s.times === 'string' ? JSON.parse(s.times) : s.times,
+            duration: s.duration || 90,
+            is_primary: s.is_primary
+        }));
+    } else {
+        // Default schedule
+        currentLocationSchedules = [{
+            id: null,
+            location_id: null,
+            days: [1, 3], // Tue, Thu
+            times: {"1": "18:00", "3": "18:00"},
+            duration: 90,
+            is_primary: true
+        }];
+    }
+    renderLocationSchedules();
+}
+
+function addLocationSchedule() {
+    currentLocationSchedules.push({
+        id: null,
+        location_id: null,
+        days: [],
+        times: {},
+        duration: 90,
+        is_primary: false
+    });
+    renderLocationSchedules();
+}
+
+function removeLocationSchedule(index) {
+    if (currentLocationSchedules.length <= 1) {
+        showNotification('Нужен хотя бы один зал', 'error');
+        return;
+    }
+    currentLocationSchedules.splice(index, 1);
+    // Ensure at least one is primary
+    if (!currentLocationSchedules.some(s => s.is_primary)) {
+        currentLocationSchedules[0].is_primary = true;
+    }
+    renderLocationSchedules();
+}
+
+function setPrimaryLocation(index) {
+    currentLocationSchedules.forEach((s, i) => {
+        s.is_primary = (i === index);
+    });
+    renderLocationSchedules();
+}
+
+function toggleLocationDay(locationIndex, day) {
+    const schedule = currentLocationSchedules[locationIndex];
+    const dayIndex = schedule.days.indexOf(day);
+    
+    if (dayIndex > -1) {
+        schedule.days.splice(dayIndex, 1);
+        delete schedule.times[day];
+    } else {
+        schedule.days.push(day);
+        schedule.days.sort();
+        schedule.times[day] = '18:00';
+    }
+    renderLocationSchedules();
+}
+
+function updateLocationTime(locationIndex, day, time) {
+    currentLocationSchedules[locationIndex].times[day] = time;
+}
+
+function updateLocationField(locationIndex, field, value) {
+    currentLocationSchedules[locationIndex][field] = value;
+}
+
+function renderLocationSchedules() {
+    const container = document.getElementById('student-locations-container');
+    if (!container) return;
+    
+    container.innerHTML = currentLocationSchedules.map((schedule, index) => {
+        const locationOptions = availableLocations.map(loc => 
+            `<option value="${loc.id}" ${schedule.location_id == loc.id ? 'selected' : ''}>${escapeHtml(loc.name)}</option>`
+        ).join('');
+        
+        const dayButtons = [0, 1, 2, 3, 4, 5, 6].map(day => {
+            const dayNames = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
+            const isActive = schedule.days.includes(day);
+            return `<button type="button" class="${isActive ? 'active' : ''}" onclick="toggleLocationDay(${index}, ${day})">${dayNames[day]}</button>`;
+        }).join('');
+        
+        const timeInputs = schedule.days.map(day => {
+            const dayNames = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
+            const time = schedule.times[day] || '18:00';
+            return `
+                <div class="time-input-row">
+                    <span class="day-label">${dayNames[day]}</span>
+                    <input type="time" class="day-time" value="${time}" 
+                           onchange="updateLocationTime(${index}, ${day}, this.value)">
+                </div>
+            `;
+        }).join('');
+        
+        return `
+            <div class="location-schedule-card ${schedule.is_primary ? 'primary' : ''}">
+                <div class="location-header">
+                    <span class="location-number">${schedule.is_primary ? '⭐ Основной зал' : `Доп. зал #${index + 1}`}</span>
+                    <div class="location-actions">
+                        ${!schedule.is_primary ? `<button type="button" class="btn-set-primary" onclick="setPrimaryLocation(${index})">Сделать основным</button>` : ''}
+                        <button type="button" class="btn-icon" onclick="removeLocationSchedule(${index})">×</button>
+                    </div>
+                </div>
+                
+                <select onchange="updateLocationField(${index}, 'location_id', this.value ? parseInt(this.value) : null)">
+                    <option value="">-- Выберите зал --</option>
+                    ${locationOptions}
+                </select>
+                
+                <div class="form-group">
+                    <label>Дни недели</label>
+                    <div class="weekdays-selector">
+                        ${dayButtons}
+                    </div>
+                </div>
+                
+                ${schedule.days.length > 0 ? `
+                    <div class="lesson-times-grid">
+                        <span class="section-label">Время занятий</span>
+                        <div class="times-grid">
+                            ${timeInputs}
+                        </div>
+                    </div>
+                ` : '<p style="color: var(--text-muted); font-size: 13px; margin: 12px 0;">Выберите дни недели</p>'}
+            </div>
+        `;
+    }).join('');
+}
+
+function collectLocationSchedules() {
+    return currentLocationSchedules.map(s => ({
+        id: s.id,
+        location_id: s.location_id,
+        days: s.days.join(','),
+        times: JSON.stringify(s.times),
+        duration: s.duration,
+        is_primary: s.is_primary
+    }));
+}
+
+// Load locations for select
+async function loadLocationsForSelect() {
+    try {
+        const res = await fetch(`${API}/api/locations`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({initData})
+        });
+        availableLocations = await res.json();
+        renderLocationSchedules();
+    } catch (e) {
+        console.error('Load locations error:', e);
+    }
+}
+
+// Override openAddStudent to init locations
+const originalOpenAddStudent = openAddStudent;
+openAddStudent = async function() {
+    editingStudentId = null;
+    document.getElementById('student-form-title').textContent = 'Новый ученик';
+    document.getElementById('student-form').reset();
+    
+    // Load locations first
+    await loadLocationsForSelect();
+    
+    // Init with default schedule
+    initLocationSchedules();
+    
+    // Load coaches for admin
+    await loadCoaches();
+    renderCoachSelect();
+    
+    showScreen('student-form');
+};
+
+// Override openEditStudent
+const originalOpenEditStudent = openEditStudent;
+openEditStudent = async function(studentId) {
+    editingStudentId = studentId;
+    document.getElementById('student-form-title').textContent = 'Редактирование';
+    
+    // Load locations first
+    await loadLocationsForSelect();
+    
+    try {
+        const res = await fetch(`${API}/api/students/${studentId}`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({initData})
+        });
+        
+        const student = await res.json();
+        
+        // Fill basic fields
+        document.getElementById('st-name').value = student.name || '';
+        document.getElementById('st-nickname').value = student.nickname || '';
+        document.getElementById('st-phone').value = student.phone || '';
+        document.getElementById('st-parent-phone').value = student.parent_phone || '';
+        document.getElementById('st-age').value = student.age || '';
+        document.getElementById('st-price').value = student.lesson_price || 150;
+        document.getElementById('st-count').value = student.lessons_count || 8;
+        document.getElementById('st-notes').value = student.notes || '';
+        document.getElementById('st-sub-start').value = student.subscription_start || '';
+        document.getElementById('st-sub-end').value = student.subscription_end || '';
+        
+        // Load coaches for admin
+        await loadCoaches();
+        renderCoachSelect();
+        
+        // Set coach if admin
+        const coachSelect = document.getElementById('st-coach');
+        if (coachSelect && student.coach_id) {
+            coachSelect.value = student.coach_id;
+        }
+        
+        // Init schedules
+        if (student.schedules && student.schedules.length > 0) {
+            initLocationSchedules(student.schedules);
+        } else {
+            // Fallback to legacy data
+            const legacySchedule = {
+                id: null,
+                location_id: student.location_id,
+                days: student.lesson_days ? student.lesson_days.split(',').map(d => parseInt(d.trim())) : [1, 3],
+                times: student.lesson_times ? JSON.parse(student.lesson_times) : {"1": "18:00", "3": "18:00"},
+                duration: 90,
+                is_primary: true
+            };
+            initLocationSchedules([legacySchedule]);
+        }
+        
+        showScreen('student-form');
+    } catch (e) {
+        console.error('Edit student error:', e);
+        showNotification('Ошибка загрузки', 'error');
+    }
+};
+
+// Override saveStudent to include schedules
+const originalSaveStudent = saveStudent;
+saveStudent = async function() {
+    const studentData = {
+        name: document.getElementById('st-name').value,
+        nickname: document.getElementById('st-nickname').value || null,
+        phone: document.getElementById('st-phone').value || null,
+        parent_phone: document.getElementById('st-parent-phone').value || null,
+        age: document.getElementById('st-age').value ? parseInt(document.getElementById('st-age').value) : null,
+        lesson_price: parseInt(document.getElementById('st-price').value) || 150,
+        lessons_count: parseInt(document.getElementById('st-count').value) || 8,
+        notes: document.getElementById('st-notes').value || null,
+        subscription_start: document.getElementById('st-sub-start').value || null,
+        subscription_end: document.getElementById('st-sub-end').value || null,
+        schedules: collectLocationSchedules()
+    };
+    
+    // Add coach_id for admin
+    const coachSelect = document.getElementById('st-coach');
+    if (coachSelect && coachSelect.style.display !== 'none') {
+        studentData.coach_id = parseInt(coachSelect.value);
+    }
+    
+    try {
+        const url = editingStudentId 
+            ? `${API}/api/students/${editingStudentId}/update`
+            : `${API}/api/students/create`;
+        
+        const res = await fetch(url, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({initData, student: studentData})
+        });
+        
+        const result = await res.json();
+        
+        if (result.success) {
+            showNotification(editingStudentId ? 'Сохранено!' : 'Ученик добавлен!', 'success');
+            DataCache.clear();
+            goBack();
+            if (currentScreen === 'students') {
+                loadStudents();
+            }
+        } else if (result.error === 'coach_not_found') {
+            showNotification('Тренер не найден', 'error');
+        } else {
+            showNotification('Ошибка сохранения', 'error');
+        }
+    } catch (e) {
+        console.error('Save student error:', e);
+        showNotification('Ошибка сети', 'error');
+    }
+};
+
+// Update renderStudentDetail to show multiple locations
+function renderStudentDetailLocations(student) {
+    if (!student.schedules || student.schedules.length === 0) {
+        // Fallback to legacy display
+        return `
+            <div class="detail-locations">
+                <div class="detail-location-item primary">
+                    <div class="detail-location-icon">📍</div>
+                    <div class="detail-location-info">
+                        <div class="detail-location-name">${escapeHtml(student.location || 'Зал Break Wave')}</div>
+                        <div class="detail-location-schedule">${formatDays(student.lesson_days)} ${formatTimes(student.lesson_times)}</div>
+                    </div>
+                </div>
+            </div>
+        `;
+    }
+    
+    return `
+        <div class="detail-locations">
+            ${student.schedules.map(schedule => `
+                <div class="detail-location-item ${schedule.is_primary ? 'primary' : ''}">
+                    <div class="detail-location-icon">📍</div>
+                    <div class="detail-location-info">
+                        <div class="detail-location-name">${escapeHtml(schedule.location_name || 'Зал')}</div>
+                        <div class="detail-location-schedule">${formatDays(schedule.days)} ${formatTimes(schedule.times)}</div>
+                    </div>
+                    ${schedule.is_primary ? '<span class="detail-location-primary-badge">ОСНОВНОЙ</span>' : ''}
+                </div>
+            `).join('')}
+        </div>
+    `;
+}
+
+// Helper functions
+function formatDays(daysStr) {
+    if (!daysStr) return '';
+    const dayNames = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
+    return daysStr.split(',').map(d => dayNames[parseInt(d.trim())]).join(', ');
+}
+
+function formatTimes(timesStr) {
+    if (!timesStr) return '';
+    try {
+        const times = typeof timesStr === 'string' ? JSON.parse(timesStr) : timesStr;
+        const uniqueTimes = [...new Set(Object.values(times))];
+        return uniqueTimes.join(', ');
+    } catch {
+        return '';
+    }
+}
+
+
+// === Finance ===
+
+let currentFinancePeriod = 'month';
+
+async function loadFinance() {
+    const container = document.getElementById('finance-content');
+    container.innerHTML = `
+        <div class="loading-container">
+            <div class="spinner"></div>
+            <p>Загрузка...</p>
+        </div>
+    `;
+    
+    try {
+        // Load summary
+        const summaryRes = await fetch(`${API}/api/finance/summary`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({initData, period: currentFinancePeriod})
+        });
+        const summary = await summaryRes.json();
+        
+        // Load debtors
+        const debtorsRes = await fetch(`${API}/api/finance/debtors`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({initData})
+        });
+        const debtors = await debtorsRes.json();
+        
+        renderFinance(summary, debtors);
+    } catch (e) {
+        console.error('Finance load error:', e);
+        document.getElementById('finance-content').innerHTML = `
+            <div class="empty-state">
+                <p>Ошибка загрузки данных</p>
+            </div>
+        `;
+    }
+}
+
+function switchFinancePeriod(period, btn) {
+    currentFinancePeriod = period;
+    
+    // Update tabs
+    btn.parentElement.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    btn.classList.add('active');
+    
+    loadFinance();
+}
+
+function renderFinance(summary, debtors) {
+    const container = document.getElementById('finance-content');
+    
+    // Summary cards
+    const periodLabel = currentFinancePeriod === 'month' ? 'за месяц' : 
+                        currentFinancePeriod === 'year' ? 'за год' : 'всего';
+    
+    // By coach chart
+    let byCoachHtml = '';
+    if (summary.by_coach && summary.by_coach.length > 1) {
+        byCoachHtml = summary.by_coach.map(c => `
+            <div class="finance-row">
+                <span class="label">${escapeHtml(c.coach_name)}</span>
+                <span class="value positive">${c.revenue.toLocaleString()} Br</span>
+            </div>
+        `).join('');
+    }
+    
+    // By location chart
+    let byLocationHtml = '';
+    if (summary.by_location && summary.by_location.length > 0) {
+        byLocationHtml = summary.by_location.map(l => `
+            <div class="finance-row">
+                <span class="label">${escapeHtml(l.location_name)}</span>
+                <span class="value positive">${l.revenue.toLocaleString()} Br</span>
+            </div>
+        `).join('');
+    }
+    
+    // Monthly trend
+    let trendHtml = '';
+    if (summary.monthly_trend) {
+        const maxRevenue = Math.max(...summary.monthly_trend.map(m => m.revenue), 1);
+        trendHtml = summary.monthly_trend.map(m => `
+            <div class="trend-item">
+                <span class="trend-month">${m.month}</span>
+                <div class="trend-bar-wrapper">
+                    <div class="trend-bar" style="height: ${Math.max(10, (m.revenue / maxRevenue) * 100)}px"></div>
+                </div>
+                <span class="trend-count">${(m.revenue / 1000).toFixed(0)}k</span>
+            </div>
+        `).join('');
+    }
+    
+    // Debtors sections
+    let debtorsHtml = '';
+    
+    // Expired subscriptions
+    if (debtors.debtors.expired_subscription.length > 0) {
+        debtorsHtml += `
+            <div class="finance-section">
+                <h3>🚨 Просроченные абонементы (${debtors.debtors.expired_subscription.length})</h3>
+                ${debtors.debtors.expired_subscription.map(d => `
+                    <div class="debtor-item critical" onclick="openStudentDetail(${d.id})">
+                        <div class="debtor-info">
+                            <div class="debtor-name">${escapeHtml(d.name)}</div>
+                            <div class="debtor-meta">Просрочено ${d.days_overdue} дн.</div>
+                        </div>
+                        <span class="debtor-badge critical">Просрочен</span>
+                    </div>
+                `).join('')}
+            </div>
+        `;
+    }
+    
+    // Ending soon
+    if (debtors.debtors.ending_soon.length > 0) {
+        debtorsHtml += `
+            <div class="finance-section">
+                <h3>⏰ Заканчивается скоро (${debtors.debtors.ending_soon.length})</h3>
+                ${debtors.debtors.ending_soon.map(d => `
+                    <div class="debtor-item warning" onclick="openStudentDetail(${d.id})">
+                        <div class="debtor-info">
+                            <div class="debtor-name">${escapeHtml(d.name)}</div>
+                            <div class="debtor-meta">Осталось ${d.days_left} дн.</div>
+                        </div>
+                        <span class="debtor-badge warning">${d.days_left} дн.</span>
+                    </div>
+                `).join('')}
+            </div>
+        `;
+    }
+    
+    // No lessons
+    if (debtors.debtors.no_lessons.length > 0) {
+        debtorsHtml += `
+            <div class="finance-section">
+                <h3>❌ Закончились занятия (${debtors.debtors.no_lessons.length})</h3>
+                ${debtors.debtors.no_lessons.map(d => `
+                    <div class="debtor-item critical" onclick="openStudentDetail(${d.id})">
+                        <div class="debtor-info">
+                            <div class="debtor-name">${escapeHtml(d.name)}</div>
+                            <div class="debtor-meta">Нет доступных занятий</div>
+                        </div>
+                        <span class="debtor-badge critical">0 занятий</span>
+                    </div>
+                `).join('')}
+            </div>
+        `;
+    }
+    
+    // Low lessons
+    if (debtors.debtors.low_lessons.length > 0) {
+        debtorsHtml += `
+            <div class="finance-section">
+                <h3>⚠️ Мало занятий (${debtors.debtors.low_lessons.length})</h3>
+                ${debtors.debtors.low_lessons.map(d => `
+                    <div class="debtor-item warning" onclick="openStudentDetail(${d.id})">
+                        <div class="debtor-info">
+                            <div class="debtor-name">${escapeHtml(d.name)}</div>
+                            <div class="debtor-meta">Осталось ${d.remaining} занятия</div>
+                        </div>
+                        <span class="debtor-badge warning">${d.remaining} занятия</span>
+                    </div>
+                `).join('')}
+            </div>
+        `;
+    }
+    
+    container.innerHTML = `
+        <div class="finance-summary-cards">
+            <div class="finance-card revenue">
+                <span class="finance-value">${summary.summary.total_revenue.toLocaleString()} Br</span>
+                <span class="finance-label">Доход ${periodLabel}</span>
+            </div>
+            <div class="finance-card pending">
+                <span class="finance-value">${summary.summary.pending_amount.toLocaleString()} Br</span>
+                <span class="finance-label">Ожидается</span>
+            </div>
+            <div class="finance-card overdue">
+                <span class="finance-value">${summary.summary.overdue_total.toLocaleString()} Br</span>
+                <span class="finance-label">Просрочено</span>
+            </div>
+            <div class="finance-card">
+                <span class="finance-value">${debtors.counts.total}</span>
+                <span class="finance-label">Должников</span>
+            </div>
+        </div>
+        
+        ${byCoachHtml ? `
+            <div class="finance-section">
+                <h3>👥 По тренерам</h3>
+                ${byCoachHtml}
+            </div>
+        ` : ''}
+        
+        ${byLocationHtml ? `
+            <div class="finance-section">
+                <h3>📍 По залам</h3>
+                ${byLocationHtml}
+            </div>
+        ` : ''}
+        
+        <div class="finance-section">
+            <h3>📈 Динамика доходов (6 мес)</h3>
+            <div class="trend-chart">${trendHtml}</div>
+        </div>
+        
+        ${debtorsHtml}
+    `;
+}
+
+// Add finance to navigation
+const originalNavigate = navigate;
+navigate = function(screen) {
+    if (screen === 'finance') {
+        loadFinance();
+    }
+    return originalNavigate(screen);
+};
