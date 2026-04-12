@@ -230,19 +230,6 @@ async def cmd_me(message: Message):
         text_parts.append("❌ <b>Нет доступа</b>")
     
     await message.answer("\n".join(text_parts), parse_mode="HTML")
-        await message.answer(
-            "✅ <b>Вы зарегистрированы как тренер</b>\n\n"
-            f"ID: {coach.telegram_id}\n"
-            f"Имя: {coach.first_name or 'Не указано'}\n"
-            f"Username: @{coach.username or 'нет'}\n"
-            f"Дата регистрации: {coach.created_at.strftime('%d.%m.%Y') if coach.created_at else '—'}\n\n"
-            "Нажмите /start чтобы открыть CRM"
-        )
-    else:
-        await message.answer(
-            "❌ <b>Вы не зарегистрированы</b>\n\n"
-            "Для доступа используйте: /coach <код>"
-        )
 
 
 @router.message(Command("help"))
