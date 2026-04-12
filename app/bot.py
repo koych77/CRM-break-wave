@@ -248,6 +248,7 @@ async def cmd_help(message: Message):
     if coach or is_admin_user:
         text += "📱 <b>Тренерские команды:</b>\n"
         text += "/start - открыть CRM\n"
+        text += "/now - текущая тренировка\n"
         text += "/me - мой статус\n\n"
         text += "<b>Основные возможности:</b>\n"
         text += "• Ученики — база с настройками\n"
@@ -261,6 +262,96 @@ async def cmd_help(message: Message):
     
     text += "/help - эта справка"
     await message.answer(text, parse_mode="HTML")
+
+
+@router.message(Command("now"))
+async def cmd_now(message: Message):
+    """Show current lesson for quick attendance."""
+    coach = await get_coach(message.from_user.id)
+    if not coach:
+        await message.answer("❌ У вас нет доступа")
+        return
+    
+    from datetime import datetime
+    now = datetime.now()
+    current_weekday = now.weekday()
+    current_date = now.date()
+    
+    async with async_session() as s:
+        result = await s.execute(
+            select(Student).where(
+                Student.coach_id == coach.id,
+                Student.is_active == True
+            )
+        )
+        students = result.scalars().all()
+        
+        # Group by time
+        groups = {}
+        for st in students:
+            days = st.lesson_days.split(",") if st.lesson_days else []
+            if str(current_weekday) in days:
+                time_key = st.lesson_time or "18:00"
+                if time_key not in groups:
+                    groups[time_key] = []
+                
+                # Check if marked
+                existing = await s.execute(
+                    select(Lesson).where(
+                        Lesson.student_id == st.id,
+                        Lesson.date == current_date
+                    )
+                )
+                lesson_exists = existing.scalar_one_or_none()
+                status = None
+                if lesson_exists:
+                    att = await s.execute(
+                        select(Attendance).where(Attendance.lesson_id == lesson_exists.id)
+                    )
+                    att_record = att.scalar_one_or_none()
+                    if att_record:
+                        status = att_record.status
+                
+                groups[time_key].append({
+                    "student": st,
+                    "status": status,
+                    "marked": lesson_exists is not None
+                })
+        
+        if not groups:
+            await message.answer("📅 Сегодня у вас нет тренировок")
+            return
+        
+        # Show first unmarked group
+        for time_key, students_list in sorted(groups.items()):
+            unmarked = [s for s in students_list if not s["marked"]]
+            
+            if unmarked:
+                text = f"📋 Тренировка {time_key}\n\n"
+                for item in unmarked:
+                    st = item["student"]
+                    text += f"⏳ {st.name}\n"
+                
+                marked_count = len([s for s in students_list if s["marked"]])
+                total_count = len(students_list)
+                
+                if marked_count > 0:
+                    text += f"\n✅ Отмечено: {marked_count}/{total_count}"
+                
+                kb = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(
+                        text="📱 Открыть CRM",
+                        web_app=WebAppInfo(url=f"{WEBAPP_URL or 'https://your-app.up.railway.app'}/")
+                    )],
+                    [InlineKeyboardButton(text="❌ Тренировки нет", callback_data="skip_lesson")]
+                ])
+                
+                await message.answer(text, reply_markup=kb)
+                return
+        
+        # All marked
+        text = "✅ Все тренировки сегодня отмечены!"
+        await message.answer(text)
 
 
 # === Callback Handlers ===
@@ -348,6 +439,189 @@ async def cb_check_payments(callback: CallbackQuery):
             text += f"• {st.name} — осталось {days} дн.\n"
     
     await callback.message.edit_text(text, parse_mode="HTML")
+
+
+@router.callback_query(F.data == "quick_attendance")
+async def cb_quick_attendance(callback: CallbackQuery):
+    """Show quick attendance screen."""
+    coach = await get_coach(callback.from_user.id)
+    if not coach:
+        await callback.answer("Нет доступа")
+        return
+    
+    from datetime import datetime
+    now = datetime.now()
+    current_weekday = now.weekday()
+    current_date = now.date()
+    
+    async with async_session() as s:
+        result = await s.execute(
+            select(Student).where(
+                Student.coach_id == coach.id,
+                Student.is_active == True
+            )
+        )
+        students = result.scalars().all()
+        
+        # Filter students for current time
+        current_students = []
+        for st in students:
+            days = st.lesson_days.split(",") if st.lesson_days else []
+            if str(current_weekday) in days:
+                lesson_time = st.lesson_time or "18:00"
+                lesson_hour, lesson_min = map(int, lesson_time.split(":"))
+                lesson_start = lesson_hour * 60 + lesson_min
+                now_total = now.hour * 60 + now.minute
+                
+                # Within lesson time window
+                if -15 <= now_total - lesson_start <= 90:
+                    # Check if already marked
+                    existing = await s.execute(
+                        select(Lesson).where(
+                            Lesson.student_id == st.id,
+                            Lesson.date == current_date
+                        )
+                    )
+                    lesson_exists = existing.scalar_one_or_none()
+                    status = None
+                    if lesson_exists:
+                        att = await s.execute(
+                            select(Attendance).where(Attendance.lesson_id == lesson_exists.id)
+                        )
+                        att_record = att.scalar_one_or_none()
+                        if att_record:
+                            status = att_record.status
+                    
+                    current_students.append({
+                        "student": st,
+                        "status": status,
+                        "marked": lesson_exists is not None
+                    })
+        
+        if not current_students:
+            await callback.message.edit_text("❌ Сейчас нет тренировок")
+            return
+        
+        # Build attendance list
+        text = f"📋 Тренировка ({now.strftime('%H:%M')})\n\n"
+        
+        for item in current_students:
+            st = item["student"]
+            status = item["status"]
+            
+            if status == "present":
+                emoji = "✅"
+            elif status == "absent":
+                emoji = "❌"
+            elif status == "sick":
+                emoji = "🤒"
+            else:
+                emoji = "⏳"
+            
+            text += f"{emoji} {st.name}\n"
+        
+        text += "\nОтметьте учеников в Mini App"
+        
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📱 Открыть CRM", web_app=WebAppInfo(url=f"{WEBAPP_URL or 'https://your-app.up.railway.app'}/"))]
+        ])
+        
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+
+
+@router.callback_query(F.data == "skip_lesson")
+async def cb_skip_lesson(callback: CallbackQuery):
+    """Mark lesson as skipped."""
+    coach = await get_coach(callback.from_user.id)
+    if not coach:
+        await callback.answer("Нет доступа")
+        return
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🎉 Праздник", callback_data="skip_reason:holiday")],
+        [InlineKeyboardButton(text="🤒 Тренер болеет", callback_data="skip_reason:sick")],
+        [InlineKeyboardButton(text="🏠 Другое", callback_data="skip_reason:other")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_skip")]
+    ])
+    
+    await callback.message.edit_text(
+        "❌ Тренировка отменена\n\nВыберите причину:",
+        reply_markup=kb
+    )
+
+
+@router.callback_query(F.data.startswith("skip_reason:"))
+async def cb_skip_reason(callback: CallbackQuery):
+    """Handle skip reason selection."""
+    coach = await get_coach(callback.from_user.id)
+    if not coach:
+        await callback.answer("Нет доступа")
+        return
+    
+    reason = callback.data.split(":")[1]
+    reason_text = {"holiday": "Праздник", "sick": "Тренер болеет", "other": "Другое"}.get(reason, "Другое")
+    
+    from datetime import date
+    from app.models import Lesson, Attendance, Student
+    
+    today = date.today()
+    
+    async with async_session() as s:
+        # Get all students for this coach
+        result = await s.execute(
+            select(Student).where(
+                Student.coach_id == coach.id,
+                Student.is_active == True
+            )
+        )
+        students = result.scalars().all()
+        
+        skipped_count = 0
+        for student in students:
+            # Check if already marked
+            existing = await s.execute(
+                select(Lesson).where(
+                    Lesson.student_id == student.id,
+                    Lesson.date == today
+                )
+            )
+            if existing.scalar_one_or_none():
+                continue
+            
+            # Create skipped lesson
+            lesson = Lesson(
+                coach_id=coach.id,
+                student_id=student.id,
+                date=today,
+                time=student.lesson_time,
+                location=student.location,
+                notes=f"Отмена: {reason_text}"
+            )
+            s.add(lesson)
+            await s.flush()
+            
+            # Mark as excused
+            att = Attendance(
+                lesson_id=lesson.id,
+                student_id=student.id,
+                status="excused"
+            )
+            s.add(att)
+            skipped_count += 1
+        
+        await s.commit()
+    
+    await callback.message.edit_text(
+        f"✅ Сохранено\n\n"
+        f"Тренировка отменена: {reason_text}\n"
+        f"Учеников: {skipped_count}"
+    )
+
+
+@router.callback_query(F.data == "cancel_skip")
+async def cb_cancel_skip(callback: CallbackQuery):
+    """Cancel skip action."""
+    await callback.message.delete()
 
 
 # === Admin Commands ===

@@ -15,8 +15,8 @@ WEBAPP_URL = os.getenv("WEBAPP_URL", "")
 
 # Constants
 LESSON_STATUS = {
-    "present": "✅ Был",
-    "absent": "❌ Не был",
+    "present": "✅ Есть",
+    "absent": "❌ Пропуск",
     "sick": "🤒 Болеет",
     "excused": "📝 Уважительная",
 }
@@ -30,6 +30,10 @@ PAYMENT_STATUS = {
 # Belarus locale settings
 CURRENCY = "Br"  # Belarusian ruble
 PHONE_PREFIX = "+375"
+
+# Lesson settings
+LESSON_DURATION_MINUTES = 90  # Default lesson duration (1.5 hours)
+REMINDER_INTERVAL_MINUTES = 15  # Reminder every 15 min if not marked
 
 WEEKDAYS = {
     0: "Пн",

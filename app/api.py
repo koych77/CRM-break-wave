@@ -865,6 +865,235 @@ async def api_mark_payment_paid(payment_id: int, request: Request):
         return {"success": True}
 
 
+# === Current Lesson & Quick Attendance ===
+
+@app.post("/api/current-lesson")
+async def api_current_lesson(request: Request):
+    """Get current lesson(s) for coach based on time."""
+    body = await request.json()
+    coach = await get_current_coach(body.get("initData", ""))
+    if not coach:
+        return JSONResponse({"error": "unauthorized"}, 403)
+    
+    from datetime import datetime, timedelta
+    now = datetime.now()
+    current_weekday = now.weekday()
+    current_time = now.strftime("%H:%M")
+    current_date = now.date()
+    
+    async with async_session() as s:
+        # Get all active students for this coach
+        result = await s.execute(
+            select(Student).where(
+                Student.coach_id == coach.id,
+                Student.is_active == True
+            )
+        )
+        all_students = result.scalars().all()
+        
+        # Find students who have lesson now (within time window)
+        current_lessons = []
+        for student in all_students:
+            days = student.lesson_days.split(",") if student.lesson_days else []
+            if str(current_weekday) in days:
+                # Check if within lesson time (±15 min window)
+                lesson_time = student.lesson_time or "18:00"
+                lesson_hour, lesson_min = map(int, lesson_time.split(":"))
+                lesson_start = lesson_hour * 60 + lesson_min
+                
+                now_hour, now_min = now.hour, now.minute
+                now_total = now_hour * 60 + now_min
+                
+                # Window: 15 min before to 30 min after start
+                if lesson_start - 15 <= now_total <= lesson_start + 30:
+                    # Check if already marked today
+                    existing = await s.execute(
+                        select(Lesson).where(
+                            Lesson.student_id == student.id,
+                            Lesson.date == current_date
+                        )
+                    )
+                    lesson_exists = existing.scalar_one_or_none()
+                    
+                    status = None
+                    if lesson_exists:
+                        att = await s.execute(
+                            select(Attendance).where(Attendance.lesson_id == lesson_exists.id)
+                        )
+                        att_record = att.scalar_one_or_none()
+                        if att_record:
+                            status = att_record.status
+                    
+                    current_lessons.append({
+                        "student_id": student.id,
+                        "name": student.name,
+                        "nickname": student.nickname,
+                        "lesson_time": student.lesson_time,
+                        "lesson_duration": student.lesson_duration,
+                        "status": status,
+                        "marked": lesson_exists is not None
+                    })
+        
+        # Group by time
+        lessons_by_time = {}
+        for lesson in current_lessons:
+            time_key = lesson["lesson_time"]
+            if time_key not in lessons_by_time:
+                lessons_by_time[time_key] = []
+            lessons_by_time[time_key].append(lesson)
+        
+        # Sort by time
+        sorted_times = sorted(lessons_by_time.keys())
+        groups = []
+        for time_key in sorted_times:
+            groups.append({
+                "time": time_key,
+                "students": lessons_by_time[time_key],
+                "all_marked": all(s["marked"] for s in lessons_by_time[time_key])
+            })
+        
+        return {
+            "has_lessons": len(groups) > 0,
+            "groups": groups,
+            "current_time": current_time,
+            "current_date": current_date.isoformat()
+        }
+
+
+@app.post("/api/bulk-attendance")
+async def api_bulk_attendance(request: Request):
+    """Mark attendance for multiple students at once."""
+    body = await request.json()
+    coach = await get_current_coach(body.get("initData", ""))
+    if not coach:
+        return JSONResponse({"error": "unauthorized"}, 403)
+    
+    data = body.get("attendance", [])
+    lesson_date = body.get("date", datetime.now().date().isoformat())
+    
+    if not data:
+        return JSONResponse({"error": "no_data"}, 400)
+    
+    async with async_session() as s:
+        marked_count = 0
+        for item in data:
+            student_id = item.get("student_id")
+            status = item.get("status", "present")
+            
+            # Get student info
+            student_result = await s.execute(
+                select(Student).where(Student.id == student_id, Student.coach_id == coach.id)
+            )
+            student = student_result.scalar_one_or_none()
+            if not student:
+                continue
+            
+            # Check if lesson exists
+            lesson_result = await s.execute(
+                select(Lesson).where(
+                    Lesson.student_id == student_id,
+                    Lesson.date == date.fromisoformat(lesson_date)
+                )
+            )
+            lesson = lesson_result.scalar_one_or_none()
+            
+            if lesson:
+                # Update existing attendance
+                att_result = await s.execute(
+                    select(Attendance).where(Attendance.lesson_id == lesson.id)
+                )
+                att = att_result.scalar_one_or_none()
+                if att:
+                    att.status = status
+                else:
+                    att = Attendance(
+                        lesson_id=lesson.id,
+                        student_id=student_id,
+                        status=status
+                    )
+                    s.add(att)
+            else:
+                # Create new lesson
+                lesson = Lesson(
+                    coach_id=coach.id,
+                    student_id=student_id,
+                    date=date.fromisoformat(lesson_date),
+                    time=student.lesson_time,
+                    location=student.location,
+                )
+                s.add(lesson)
+                await s.flush()
+                
+                # Create attendance
+                att = Attendance(
+                    lesson_id=lesson.id,
+                    student_id=student_id,
+                    status=status
+                )
+                s.add(att)
+            
+            marked_count += 1
+        
+        await s.commit()
+        return {"success": True, "marked": marked_count}
+
+
+@app.post("/api/skip-lesson")
+async def api_skip_lesson(request: Request):
+    """Mark lesson as skipped (no training - holiday, etc.)."""
+    body = await request.json()
+    coach = await get_current_coach(body.get("initData", ""))
+    if not coach:
+        return JSONResponse({"error": "unauthorized"}, 403)
+    
+    reason = body.get("reason", "no_training")
+    lesson_date = body.get("date", datetime.now().date().isoformat())
+    
+    async with async_session() as s:
+        # Get all students for this coach
+        result = await s.execute(
+            select(Student).where(
+                Student.coach_id == coach.id,
+                Student.is_active == True
+            )
+        )
+        students = result.scalars().all()
+        
+        for student in students:
+            # Check if lesson already exists
+            existing = await s.execute(
+                select(Lesson).where(
+                    Lesson.student_id == student.id,
+                    Lesson.date == date.fromisoformat(lesson_date)
+                )
+            )
+            if existing.scalar_one_or_none():
+                continue  # Already marked
+            
+            # Create skipped lesson
+            lesson = Lesson(
+                coach_id=coach.id,
+                student_id=student.id,
+                date=date.fromisoformat(lesson_date),
+                time=student.lesson_time,
+                location=student.location,
+                notes=f"Тренировка отменена: {reason}"
+            )
+            s.add(lesson)
+            await s.flush()
+            
+            # Mark as excused (не влияет на статистику)
+            att = Attendance(
+                lesson_id=lesson.id,
+                student_id=student.id,
+                status="excused"
+            )
+            s.add(att)
+        
+        await s.commit()
+        return {"success": True, "skipped": len(students)}
+
+
 # === Calendar ===
 
 @app.post("/api/calendar")

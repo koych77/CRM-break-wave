@@ -38,7 +38,8 @@ class Student(Base):
     location = Column(String(200), default="Зал Break Wave")
     lesson_days = Column(String(100), default="1,3")  # 0=Пн, 1=Вт, etc.
     lesson_time = Column(String(10), default="18:00")
-    lesson_price = Column(Integer, default=5000)
+    lesson_duration = Column(Integer, default=90)  # minutes
+    lesson_price = Column(Integer, default=150)
     lessons_count = Column(Integer, default=8)
     subscription_start = Column(Date, nullable=True)
     subscription_end = Column(Date, nullable=True)
