@@ -5,7 +5,7 @@ const tg = window.Telegram?.WebApp;
 
 // Cache busting - force reload if version changed
 const APP_VERSION_KEY = 'crm_bw_version';
-const CURRENT_VERSION = '11'; // Version 11: Fixed notification system - group reminders by time, use new schedule system
+const CURRENT_VERSION = '12'; // Version 12: Fixed editStudent, calendar, statistics loading
 
 // Check version on load
 const savedVersion = localStorage.getItem(APP_VERSION_KEY);
@@ -224,6 +224,12 @@ function showScreen(screen) {
             break;
         case 'quick-lesson':
             loadQuickLesson();
+            break;
+        case 'statistics':
+            loadStatistics();
+            break;
+        case 'finance':
+            loadFinance();
             break;
     }
 }
@@ -977,7 +983,7 @@ function renderCalendar(year, month, daysWithLessons) {
         
         html += `
             <div class="calendar-day ${isToday ? 'today' : ''}" 
-                 onclick="selectCalendarDay(${day})">
+                 onclick="selectCalendarDay(${day}, this)">
                 ${day}
                 ${dot}
             </div>
@@ -992,7 +998,7 @@ function changeMonth(delta) {
     loadCalendar();
 }
 
-function selectCalendarDay(day) {
+function selectCalendarDay(day, element) {
     const lessons = calendarData.days[day] || [];
     const container = document.getElementById('calendar-day-details');
     
@@ -1018,10 +1024,12 @@ function selectCalendarDay(day) {
     }
     
     // Highlight selected day
-    document.querySelectorAll('.calendar-day').forEach((el, i) => {
+    document.querySelectorAll('.calendar-day').forEach((el) => {
         el.classList.remove('selected');
     });
-    event.currentTarget.classList.add('selected');
+    if (element) {
+        element.classList.add('selected');
+    }
 }
 
 // === Payments ===
@@ -1872,64 +1880,7 @@ saveStudent = async function() {
     }
 };
 
-// Override editStudent to load lesson_times
-const originalEditStudent = editStudent;
-editStudent = async function(id) {
-    editingStudentId = id;
-    
-    try {
-        const res = await fetch(`${API}/api/students/${id}`, {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({initData})
-        });
-        
-        const student = await res.json();
-        
-        // Load locations first
-        await loadLocations();
-        if (student.location_id) {
-            document.getElementById('st-location-id').value = student.location_id;
-        }
-        
-        document.getElementById('student-form-title').textContent = 'Редактировать ученика';
-        document.getElementById('st-name').value = student.name || '';
-        document.getElementById('st-nickname').value = student.nickname || '';
-        document.getElementById('st-phone').value = student.phone || '';
-        document.getElementById('st-parent-phone').value = student.parent_phone || '';
-        document.getElementById('st-age').value = student.age || '';
-        document.getElementById('st-location').value = student.location || 'Зал Break Wave';
-        document.getElementById('st-price').value = student.lesson_price || 150;
-        document.getElementById('st-count').value = student.lessons_count || 8;
-        document.getElementById('st-notes').value = student.notes || '';
-        
-        if (student.subscription_start) {
-            document.getElementById('st-sub-start').value = student.subscription_start;
-        }
-        if (student.subscription_end) {
-            document.getElementById('st-sub-end').value = student.subscription_end;
-        }
-        
-        // Set weekdays and times
-        selectedDays = new Set((student.lesson_days || '1,3').split(',').map(Number));
-        document.querySelectorAll('#weekdays-selector button').forEach(btn => {
-            const day = parseInt(btn.dataset.day);
-            btn.classList.toggle('active', selectedDays.has(day));
-        });
-        
-        // Parse lesson_times JSON
-        try {
-            lessonTimes = JSON.parse(student.lesson_times || '{}');
-        } catch {
-            lessonTimes = {};
-        }
-        generateLessonTimeInputs();
-        
-        navigate('student-form');
-    } catch (e) {
-        console.error('Edit student error:', e);
-    }
-};
+// Edit student function is defined above and works with new schedule system
 
 // === Statistics ===
 
