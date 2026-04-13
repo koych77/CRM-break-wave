@@ -5,7 +5,7 @@ const tg = window.Telegram?.WebApp;
 
 // Cache busting - force reload if version changed
 const APP_VERSION_KEY = 'crm_bw_version';
-const CURRENT_VERSION = '14'; // Version 14: Calendar shows schedule + attendance status (present/absent/sick)
+const CURRENT_VERSION = '15'; // Version 15: Fixed calendar API SQL join error
 
 // Check version on load
 const savedVersion = localStorage.getItem(APP_VERSION_KEY);

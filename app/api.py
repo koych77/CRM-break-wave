@@ -1294,9 +1294,8 @@ async def api_calendar(request: Request):
         
         # Get marked lessons for this period (for attendance status)
         lessons_result = await s.execute(
-            select(Lesson, Attendance).outerjoin(
-                Attendance, 
-                and_(Lesson.id == Attendance.lesson_id, Lesson.student_id == Attendance.student_id)
+            select(Lesson, Attendance).join(
+                Attendance, Lesson.id == Attendance.lesson_id, isouter=True
             ).where(
                 Lesson.coach_id == coach.id,
                 Lesson.date >= month_start,
