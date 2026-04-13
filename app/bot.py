@@ -1052,15 +1052,16 @@ async def send_daily_summary(coach_id: int = None):
                 if total_alerts == 0:
                     text += "✅ Все абонементы в порядке!\n\n"
                 
-                # Add today's schedule
+                # Add today's schedule (using new schedule system)
                 weekday = today.weekday()
                 today_lessons = []
                 for student in students:
-                    days = student.lesson_days.split(",") if student.lesson_days else []
-                    if str(weekday) in days:
+                    # Use new multi-location schedule system
+                    schedules = student.get_schedules_for_day(weekday)
+                    for sched_info in schedules:
                         today_lessons.append({
                             "name": student.name,
-                            "time": get_lesson_time_for_day(student, weekday),
+                            "time": sched_info["time"],
                             "remaining": student.lessons_remaining,
                             "is_unlimited": getattr(student, 'is_unlimited', False)
                         })
@@ -1148,7 +1149,6 @@ async def lesson_reminder_scheduler():
             now = datetime.now()
             current_weekday = now.weekday()
             current_date = now.date()
-            current_time = now.strftime("%H:%M")
             
             async with async_session() as s:
                 # Get all coaches
@@ -1156,7 +1156,9 @@ async def lesson_reminder_scheduler():
                 coaches = coaches_result.scalars().all()
                 
                 for coach in coaches:
-                    # Get students with lessons at this time
+                    # Group students by lesson time
+                    time_groups = {}
+                    
                     students_result = await s.execute(
                         select(Student).where(
                             Student.coach_id == coach.id,
@@ -1166,53 +1168,63 @@ async def lesson_reminder_scheduler():
                     students = students_result.scalars().all()
                     
                     for student in students:
-                        days = student.lesson_days.split(",") if student.lesson_days else []
-                        if str(current_weekday) not in days:
-                            continue
+                        # Use new schedule system first, fallback to legacy
+                        schedules = student.get_schedules_for_day(current_weekday)
                         
-                        # Check if lesson time matches (within 5 min window)
-                        lesson_time = get_lesson_time_for_day(student, current_weekday)
-                        lesson_hour, lesson_min = map(int, lesson_time.split(":"))
-                        lesson_start = lesson_hour * 60 + lesson_min
-                        now_total = now.hour * 60 + now.minute
-                        
-                        # Only notify at lesson start time (within 5 min window)
-                        if not (0 <= now_total - lesson_start <= 5):
-                            continue
-                        
-                        # Check if already notified for this lesson
+                        for sched_info in schedules:
+                            lesson_time = sched_info["time"]
+                            lesson_hour, lesson_min = map(int, lesson_time.split(":"))
+                            lesson_start = lesson_hour * 60 + lesson_min
+                            now_total = now.hour * 60 + now.minute
+                            
+                            # Only notify at lesson start time (within 5 min window)
+                            if not (0 <= now_total - lesson_start <= 5):
+                                continue
+                            
+                            # Check if lesson already marked
+                            existing_lesson = await s.execute(
+                                select(Lesson).where(
+                                    Lesson.student_id == student.id,
+                                    Lesson.date == current_date,
+                                    Lesson.time == lesson_time
+                                )
+                            )
+                            if existing_lesson.scalar_one_or_none():
+                                continue
+                            
+                            # Group by time
+                            if lesson_time not in time_groups:
+                                time_groups[lesson_time] = []
+                            time_groups[lesson_time].append(student)
+                    
+                    # Send ONE notification per time group
+                    for lesson_time, students_list in time_groups.items():
+                        # Check if already notified for THIS SPECIFIC TIME
                         existing_notification = await s.execute(
                             select(Notification).where(
                                 Notification.coach_id == coach.id,
                                 Notification.type == "lesson_reminder",
+                                Notification.message.like(f"%тренировке {lesson_time}%"),
                                 Notification.created_at >= now - timedelta(minutes=30)
                             )
                         )
                         if existing_notification.scalar_one_or_none():
                             continue
                         
-                        # Check if lesson already marked
-                        existing_lesson = await s.execute(
-                            select(Lesson).where(
-                                Lesson.student_id == student.id,
-                                Lesson.date == current_date
-                            )
-                        )
-                        if existing_lesson.scalar_one_or_none():
-                            continue
+                        # Send reminder for group
+                        await send_lesson_reminder(coach, students_list, lesson_time)
                         
-                        # Send reminder
-                        await send_lesson_reminder(coach, [student], lesson_time)
-                        
-                        # Log notification
+                        # Log notification (for first student in group)
                         notification = Notification(
                             coach_id=coach.id,
-                            student_id=student.id,
+                            student_id=students_list[0].id,
                             type="lesson_reminder",
-                            message=f"Напоминание о тренировке {lesson_time}"
+                            message=f"Напоминание о тренировке {lesson_time} ({len(students_list)} учеников)"
                         )
                         s.add(notification)
                         await s.commit()
+                        
+                        logger.info(f"Lesson reminder sent to coach {coach.id} for {lesson_time} ({len(students_list)} students)")
                         
         except Exception as e:
             logger.error(f"Error in reminder scheduler: {e}")

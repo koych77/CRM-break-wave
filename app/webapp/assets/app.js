@@ -5,7 +5,7 @@ const tg = window.Telegram?.WebApp;
 
 // Cache busting - force reload if version changed
 const APP_VERSION_KEY = 'crm_bw_version';
-const CURRENT_VERSION = '10'; // Version 10: Fixed location_id nullable constraint, full module integration
+const CURRENT_VERSION = '11'; // Version 11: Fixed notification system - group reminders by time, use new schedule system
 
 // Check version on load
 const savedVersion = localStorage.getItem(APP_VERSION_KEY);
