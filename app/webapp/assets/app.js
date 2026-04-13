@@ -5,7 +5,7 @@ const tg = window.Telegram?.WebApp;
 
 // Cache busting - force reload if version changed
 const APP_VERSION_KEY = 'crm_bw_version';
-const CURRENT_VERSION = '18'; // Version 18: Fixed days parsing with spaces, added debug logging
+const CURRENT_VERSION = '19'; // Version 19: Added debug to has_lesson_on_day method
 
 // Check version on load
 const savedVersion = localStorage.getItem(APP_VERSION_KEY);

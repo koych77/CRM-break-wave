@@ -74,7 +74,11 @@ class StudentSchedule(Base):
             return False
         # Strip spaces to handle "5, 6" format
         day_list = [d.strip() for d in self.days.split(",")]
-        return str(day_of_week) in day_list
+        result = str(day_of_week) in day_list
+        # Debug logging
+        import logging
+        logging.getLogger(__name__).info(f"DEBUG has_lesson_on_day: days={self.days}, day_list={day_list}, checking={day_of_week}, result={result}")
+        return result
 
 
 class Student(Base):
