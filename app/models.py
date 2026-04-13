@@ -247,6 +247,7 @@ class Payment(Base):
     status = Column(String(20), default="pending")  # paid, pending, overdue
     period_start = Column(Date)
     period_end = Column(Date)
+    is_unlimited = Column(Boolean, default=False)
     paid_at = Column(DateTime, nullable=True)
     notes = Column(String(500))
     created_at = Column(DateTime, default=datetime.utcnow)

@@ -71,6 +71,7 @@ let payments = [];
 let calendarData = {};
 let currentCalendarDate = new Date();
 let editingStudentId = null;
+let editingPaymentId = null;
 let selectedDays = new Set([1, 3]); // Default Mon, Wed
 
 // === Init ===
@@ -99,7 +100,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Initialize date inputs with today
     const today = new Date().toISOString().split('T')[0];
     document.getElementById('ql-date')?.setAttribute('value', today);
-    document.getElementById('st-sub-start')?.setAttribute('value', today);
     
     // Setup weekday selector
     setupWeekdaySelector();
@@ -598,11 +598,8 @@ async function openAddStudent() {
     
     // Set default values
     document.getElementById('st-location').value = 'Зал Break Wave';
-    document.getElementById('st-price').value = '150';
-    document.getElementById('st-count').value = '8';
     
     const today = new Date().toISOString().split('T')[0];
-    document.getElementById('st-sub-start').value = today;
     
     // Load locations
     await loadLocations();
@@ -725,7 +722,7 @@ async function openStudentDetail(id) {
                 ${renderStudentDetailLocations(student)}
                 <div class="info-row" style="margin-top: 12px;">
                     <span class="info-label">Стоимость</span>
-                    <span class="info-value">${student.lesson_price?.toLocaleString() || 0} Br / ${total} занятий</span>
+                    <span class="info-value">${student.lesson_price?.toLocaleString() || 0} Br / занятие</span>
                 </div>
             </div>
             
@@ -739,11 +736,11 @@ async function openStudentDetail(id) {
                         Занятия не считаются. Оплата по окончанию срока.
                     </div>
                 </div>
-                ` : `
+                ` : (total > 0 ? `
                 <div class="lessons-progress">
                     <div class="progress-bar">
                         <div class="progress-fill ${remaining <= 2 ? 'low' : remaining <= 0 ? 'empty' : ''}" 
-                             style="width: ${(used / total) * 100}%"></div>
+                             style="width: ${total > 0 ? (used / total) * 100 : 0}%"></div>
                     </div>
                     <div class="progress-text">
                         <span>Использовано: <b>${used}</b></span>
@@ -753,7 +750,11 @@ async function openStudentDetail(id) {
                 <div style="font-size: 12px; color: var(--text-muted); margin-top: 8px; padding: 8px; background: var(--bg-secondary); border-radius: 8px;">
                     💡 При отметке "Присутствовал" — занятие списывается автоматически
                 </div>
-                `}
+                ` : `
+                <div style="font-size: 14px; color: var(--text-muted); padding: 12px; background: var(--bg-secondary); border-radius: 8px;">
+                    Абонемент не оформлен. Нажмите "💰 Оплата" чтобы добавить.
+                </div>
+                `)}
                 <div class="info-row" style="margin-top: 12px;">
                     <span class="info-label">Статус</span>
                     <span class="info-value">${subStatus}</span>
@@ -818,21 +819,7 @@ async function editStudent(id) {
         document.getElementById('st-age').value = student.age || '';
         document.getElementById('st-notes').value = student.notes || '';
         
-        // Subscription
-        document.getElementById('st-price').value = student.lesson_price || 150;
-        document.getElementById('st-count').value = student.lessons_count || 8;
-        
-        // Handle unlimited subscription
-        const isUnlimited = student.is_unlimited || false;
-        document.getElementById('st-unlimited').checked = isUnlimited;
-        toggleUnlimited(isUnlimited);
-        
-        if (student.subscription_start) {
-            document.getElementById('st-sub-start').value = student.subscription_start;
-        }
-        if (student.subscription_end) {
-            document.getElementById('st-sub-end').value = student.subscription_end;
-        }
+        // Subscription info is now read-only (managed via Payments)
         
         // Location schedules - NEW SYSTEM
         if (student.schedules && student.schedules.length > 0) {
@@ -894,11 +881,6 @@ async function saveStudent() {
         phone: document.getElementById('st-phone').value,
         parent_phone: document.getElementById('st-parent-phone').value,
         age: document.getElementById('st-age').value,
-        lesson_price: parseInt(document.getElementById('st-price').value) || 150,
-        lessons_count: parseInt(document.getElementById('st-count').value) || 8,
-        is_unlimited: document.getElementById('st-unlimited').checked,
-        subscription_start: document.getElementById('st-sub-start').value,
-        subscription_end: document.getElementById('st-sub-end').value,
         notes: document.getElementById('st-notes').value,
         coach_id: coachId,
         schedules: schedules
@@ -1154,6 +1136,7 @@ function renderPayments(list) {
     container.innerHTML = list.map(p => {
         const statusClass = p.status;
         const statusText = {paid: 'Оплачено', pending: 'Ожидает', overdue: 'Просрочено'}[p.status];
+        const lessonsText = p.is_unlimited ? '♾️ Безлимит' : `${p.lessons_count || 0} занятий`;
         
         return `
             <div class="list-item">
@@ -1161,17 +1144,24 @@ function renderPayments(list) {
                     <span class="list-item-title">${escapeHtml(p.student_name)}</span>
                     <span class="payment-status ${statusClass}">${statusText}</span>
                 </div>
-                <div class="list-item-subtitle">${p.amount.toLocaleString()} Br • ${p.lessons_count} занятий</div>
+                <div class="list-item-subtitle">${p.amount.toLocaleString()} Br • ${lessonsText}</div>
                 <div class="list-item-meta">
                     ${p.period_start && p.period_end ? 
                         `<span>📅 ${formatDate(p.period_start)} — ${formatDate(p.period_end)}</span>` : ''}
                 </div>
-                ${p.status !== 'paid' ? `
-                    <button class="btn-primary" style="margin-top: 12px; width: 100%;" 
-                            onclick="markPaymentPaid(${p.id})">
-                        ✅ Отметить оплаченным
+                <div class="list-item-actions" style="display: flex; gap: 8px; margin-top: 12px;">
+                    ${p.status !== 'paid' ? `
+                        <button class="btn-primary" style="flex: 1;" onclick="markPaymentPaid(${p.id})">
+                            ✅ Оплачено
+                        </button>
+                    ` : ''}
+                    <button class="btn-secondary" style="flex: 1;" onclick="openEditPayment(${p.id})">
+                        ✏️ Редактировать
                     </button>
-                ` : ''}
+                    <button class="btn-danger" style="flex: 1;" onclick="deletePayment(${p.id})">
+                        🗑 Удалить
+                    </button>
+                </div>
             </div>
         `;
     }).join('');
@@ -1183,7 +1173,24 @@ function switchPaymentTab(status, btn) {
     loadPayments(status);
 }
 
+async function resetPaymentForm() {
+    editingPaymentId = null;
+    document.getElementById('pay-form-title').textContent = 'Новая оплата';
+    document.getElementById('payment-form').reset();
+    document.getElementById('pay-unlimited').checked = false;
+    togglePayUnlimited(false);
+    document.getElementById('pay-student').disabled = false;
+    
+    // Set default dates
+    const today = new Date();
+    const nextMonth = new Date(today.getFullYear(), today.getMonth() + 1, today.getDate());
+    document.getElementById('pay-start').value = today.toISOString().split('T')[0];
+    document.getElementById('pay-end').value = nextMonth.toISOString().split('T')[0];
+}
+
 async function openAddPayment() {
+    await resetPaymentForm();
+    
     // Load students for select
     const res = await fetch(`${API}/api/students`, {
         method: 'POST',
@@ -1196,13 +1203,78 @@ async function openAddPayment() {
     select.innerHTML = '<option value="">Выберите ученика</option>' + 
         studentsList.map(s => `<option value="${s.id}">${escapeHtml(s.name)}</option>`).join('');
     
-    // Set default dates
-    const today = new Date();
-    const nextMonth = new Date(today.getFullYear(), today.getMonth() + 1, today.getDate());
-    document.getElementById('pay-start').value = today.toISOString().split('T')[0];
-    document.getElementById('pay-end').value = nextMonth.toISOString().split('T')[0];
+    navigate('payment-form');
+}
+
+async function openEditPayment(paymentId) {
+    editingPaymentId = paymentId;
+    document.getElementById('pay-form-title').textContent = 'Редактировать оплату';
+    
+    // Load payment details from current list or fetch fresh
+    const paymentsRes = await fetch(`${API}/api/payments`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({initData})
+    });
+    const payments = await paymentsRes.json();
+    const payment = payments.find(p => p.id === paymentId);
+    
+    if (!payment) {
+        showNotification('Платёж не найден', 'error');
+        return;
+    }
+    
+    // Load students for select
+    const res = await fetch(`${API}/api/students`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({initData})
+    });
+    const studentsList = await res.json();
+    const select = document.getElementById('pay-student');
+    select.innerHTML = '<option value="">Выберите ученика</option>' + 
+        studentsList.map(s => `<option value="${s.id}">${escapeHtml(s.name)}</option>`).join('');
+    
+    // Fill form
+    select.value = payment.student_id;
+    select.disabled = true; // Don't allow changing student on edit
+    document.getElementById('pay-amount').value = payment.amount;
+    document.getElementById('pay-unlimited').checked = payment.is_unlimited || false;
+    togglePayUnlimited(payment.is_unlimited || false);
+    document.getElementById('pay-count').value = payment.lessons_count || 8;
+    document.getElementById('pay-start').value = payment.period_start || '';
+    document.getElementById('pay-end').value = payment.period_end || '';
+    document.getElementById('pay-status').value = payment.status || 'pending';
+    document.getElementById('pay-notes').value = payment.notes || '';
     
     navigate('payment-form');
+}
+
+async function deletePayment(paymentId) {
+    if (!confirm('Удалить платёж? Это пересчитает остаток занятий ученика.')) {
+        return;
+    }
+    
+    try {
+        const res = await fetch(`${API}/api/payments/${paymentId}/delete`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({initData})
+        });
+        
+        const result = await res.json();
+        
+        if (result.success) {
+            showNotification('Платёж удалён', 'success');
+            DataCache.clear();
+            loadPayments();
+        } else {
+            showNotification('Ошибка удаления', 'error');
+        }
+    } catch (e) {
+        console.error('Delete payment error:', e);
+        showNotification('Ошибка удаления', 'error');
+    }
 }
 
 function addPaymentForStudent(studentId) {
@@ -1212,13 +1284,15 @@ function addPaymentForStudent(studentId) {
 }
 
 async function savePayment() {
+    const isUnlimited = document.getElementById('pay-unlimited').checked;
     const data = {
         student_id: parseInt(document.getElementById('pay-student').value),
         amount: parseInt(document.getElementById('pay-amount').value),
-        lessons_count: parseInt(document.getElementById('pay-count').value),
+        lessons_count: isUnlimited ? 0 : (parseInt(document.getElementById('pay-count').value) || 0),
         period_start: document.getElementById('pay-start').value,
         period_end: document.getElementById('pay-end').value,
         status: document.getElementById('pay-status').value,
+        is_unlimited: isUnlimited,
         notes: document.getElementById('pay-notes').value,
     };
     
@@ -1228,7 +1302,11 @@ async function savePayment() {
     }
     
     try {
-        const res = await fetch(`${API}/api/payments/create`, {
+        const url = editingPaymentId 
+            ? `${API}/api/payments/${editingPaymentId}/update`
+            : `${API}/api/payments/create`;
+        
+        const res = await fetch(url, {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({initData, payment: data})
@@ -1237,10 +1315,12 @@ async function savePayment() {
         const result = await res.json();
         
         if (result.success) {
-            showNotification('Оплата добавлена', 'success');
-            // Clear cache to force refresh
+            showNotification(editingPaymentId ? 'Оплата обновлена' : 'Оплата добавлена', 'success');
             DataCache.clear();
             goBack();
+            if (currentScreen === 'payments') {
+                loadPayments();
+            }
         } else {
             showNotification('Ошибка сохранения', 'error');
         }
@@ -2082,10 +2162,6 @@ saveStudent = async function() {
         location_id: locationId,
         lesson_days: Array.from(selectedDays).join(','),
         lesson_times: times,
-        lesson_price: parseInt(document.getElementById('st-price').value) || 150,
-        lessons_count: parseInt(document.getElementById('st-count').value) || 8,
-        subscription_start: document.getElementById('st-sub-start').value,
-        subscription_end: document.getElementById('st-sub-end').value,
         notes: document.getElementById('st-notes').value,
         coach_id: coachId,
     };
@@ -2568,10 +2644,6 @@ openAddStudent = async function() {
     document.getElementById('student-form-title').textContent = 'Новый ученик';
     document.getElementById('student-form').reset();
     
-    // Reset unlimited checkbox
-    document.getElementById('st-unlimited').checked = false;
-    toggleUnlimited(false);
-    
     // Load locations first
     await loadLocationsForSelect();
     
@@ -2586,14 +2658,14 @@ openAddStudent = async function() {
 };
 
 // Toggle unlimited lessons
-function toggleUnlimited(checked) {
-    const lessonsGroup = document.getElementById('lessons-count-group');
+function togglePayUnlimited(checked) {
+    const countGroup = document.getElementById('pay-count-group');
     if (checked) {
-        lessonsGroup.classList.add('lessons-count-hidden');
-        document.getElementById('st-count').value = 999; // Set high number for unlimited
+        countGroup.style.display = 'none';
+        document.getElementById('pay-count').value = '';
     } else {
-        lessonsGroup.classList.remove('lessons-count-hidden');
-        document.getElementById('st-count').value = 8; // Default value
+        countGroup.style.display = 'block';
+        document.getElementById('pay-count').value = '8';
     }
 }
 
@@ -2620,20 +2692,7 @@ openEditStudent = async function(studentId) {
         document.getElementById('st-phone').value = student.phone || '';
         document.getElementById('st-parent-phone').value = student.parent_phone || '';
         document.getElementById('st-age').value = student.age || '';
-        document.getElementById('st-price').value = student.lesson_price || 150;
         document.getElementById('st-notes').value = student.notes || '';
-        document.getElementById('st-sub-start').value = student.subscription_start || '';
-        document.getElementById('st-sub-end').value = student.subscription_end || '';
-        
-        // Handle unlimited subscription
-        const isUnlimited = student.is_unlimited || false;
-        document.getElementById('st-unlimited').checked = isUnlimited;
-        toggleUnlimited(isUnlimited);
-        
-        // Set lessons count (only if not unlimited)
-        if (!isUnlimited) {
-            document.getElementById('st-count').value = student.lessons_count || 8;
-        }
         
         // Load coaches for admin
         await loadCoaches();
@@ -2670,20 +2729,13 @@ openEditStudent = async function(studentId) {
 
 // Override saveStudent to include schedules
 saveStudent = async function() {
-    const isUnlimited = document.getElementById('st-unlimited').checked;
-    
     const studentData = {
         name: document.getElementById('st-name').value,
         nickname: document.getElementById('st-nickname').value || null,
         phone: document.getElementById('st-phone').value || null,
         parent_phone: document.getElementById('st-parent-phone').value || null,
         age: document.getElementById('st-age').value ? parseInt(document.getElementById('st-age').value) : null,
-        lesson_price: parseInt(document.getElementById('st-price').value) || 150,
-        lessons_count: isUnlimited ? 999 : (parseInt(document.getElementById('st-count').value) || 8),
-        is_unlimited: isUnlimited,
         notes: document.getElementById('st-notes').value || null,
-        subscription_start: document.getElementById('st-sub-start').value || null,
-        subscription_end: document.getElementById('st-sub-end').value || null,
         schedules: collectLocationSchedules()
     };
     

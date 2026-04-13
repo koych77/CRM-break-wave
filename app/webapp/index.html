@@ -184,38 +184,6 @@
                         + Добавить зал
                     </button>
                     
-                    <h3 class="form-section-title">📅 Абонемент</h3>
-                    
-                    <div class="form-group checkbox-group">
-                        <label class="checkbox-label">
-                            <input type="checkbox" id="st-unlimited" onchange="toggleUnlimited(this.checked)">
-                            <span class="checkmark"></span>
-                            <span class="checkbox-text">Безлимитное количество занятий (по месяцам)</span>
-                        </label>
-                    </div>
-                    
-                    <div class="form-row">
-                        <div class="form-group">
-                            <label>Стоимость (Br)</label>
-                            <input type="number" id="st-price" value="150" min="0" placeholder="150">
-                        </div>
-                        <div class="form-group" id="lessons-count-group">
-                            <label>Кол-во занятий</label>
-                            <input type="number" id="st-count" value="8" min="1">
-                        </div>
-                    </div>
-                    
-                    <div class="form-row">
-                        <div class="form-group">
-                            <label>Начало</label>
-                            <input type="date" id="st-sub-start">
-                        </div>
-                        <div class="form-group">
-                            <label>Окончание</label>
-                            <input type="date" id="st-sub-end">
-                        </div>
-                    </div>
-                    
                     <div class="form-group">
                         <label>Заметки</label>
                         <textarea id="st-notes" rows="3" placeholder="Дополнительная информация..."></textarea>
@@ -272,7 +240,7 @@
                     <button class="back-btn" onclick="goBack()">
                         <svg width="24" height="24" viewBox="0 0 24 24" fill="none"><path d="M15 18L9 12L15 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
                     </button>
-                    <span class="screen-title">Новая оплата</span>
+                    <span class="screen-title" id="pay-form-title">Новая оплата</span>
                     <div style="width: 40px;"></div>
                 </div>
                 <form id="payment-form" class="form-container">
@@ -286,7 +254,14 @@
                         <label>Сумма (Br) *</label>
                         <input type="number" id="pay-amount" required min="0" placeholder="Например: 1200">
                     </div>
-                    <div class="form-group">
+                    <div class="form-group checkbox-group">
+                        <label class="checkbox-label">
+                            <input type="checkbox" id="pay-unlimited" onchange="togglePayUnlimited(this.checked)">
+                            <span class="checkmark"></span>
+                            <span class="checkbox-text">Безлимитное количество занятий (по месяцам)</span>
+                        </label>
+                    </div>
+                    <div class="form-group" id="pay-count-group">
                         <label>Количество занятий</label>
                         <input type="number" id="pay-count" value="8" min="1">
                     </div>

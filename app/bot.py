@@ -1063,15 +1063,16 @@ async def send_daily_summary(coach_id: int = None):
                 
                 # Check lessons remaining (only for non-unlimited subscriptions)
                 if not getattr(student, 'is_unlimited', False):
-                    if student.lessons_remaining <= 0:
+                    remaining = getattr(student, 'lessons_remaining', None)
+                    if remaining is not None and remaining <= 0:
                         depleted.append({
                             "name": student.name,
                             "remaining": 0
                         })
-                    elif student.lessons_remaining <= 2:
+                    elif remaining is not None and remaining <= 2:
                         low_lessons.append({
                             "name": student.name,
-                            "remaining": student.lessons_remaining
+                            "remaining": remaining
                         })
             
             # Only send if there are alerts
@@ -1123,7 +1124,7 @@ async def send_daily_summary(coach_id: int = None):
                         today_lessons.append({
                             "name": student.name,
                             "time": sched_info["time"],
-                            "remaining": student.lessons_remaining,
+                            "remaining": student.lessons_remaining if student.lessons_remaining is not None else 0,
                             "is_unlimited": getattr(student, 'is_unlimited', False)
                         })
                 

@@ -491,8 +491,6 @@ async def api_create_student(request: Request):
         if not target_coach:
             return JSONResponse({"error": "coach_not_found"}, 400)
         
-        lessons_count = int(data.get("lessons_count", 8))
-        
         # Handle lesson_times (JSON format: {"1": "18:00", "3": "19:30"})
         lesson_times = data.get("lesson_times")
         if not lesson_times:
@@ -512,10 +510,12 @@ async def api_create_student(request: Request):
             location_id=data.get("location_id"),
             lesson_days=data.get("lesson_days", "1,3"),
             lesson_times=lesson_times,
-            lesson_price=int(data.get("lesson_price", 150)),
-            lessons_count=lessons_count,
-            lessons_remaining=lessons_count,
-            is_unlimited=data.get("is_unlimited", False),
+            lesson_price=150,
+            lessons_count=0,
+            lessons_remaining=0,
+            is_unlimited=False,
+            subscription_start=None,
+            subscription_end=None,
             notes=data.get("notes") or None,
         )
         s.add(student)
@@ -598,10 +598,13 @@ async def api_get_student(student_id: int, request: Request):
         payments = [{
             "id": p.id,
             "amount": p.amount,
+            "lessons_count": p.lessons_count,
             "status": p.status,
             "period_start": p.period_start.isoformat() if p.period_start else None,
             "period_end": p.period_end.isoformat() if p.period_end else None,
             "paid_at": p.paid_at.isoformat() if p.paid_at else None,
+            "is_unlimited": p.is_unlimited,
+            "notes": p.notes,
         } for p in payments_result.scalars().all()]
         
         # Get location info (legacy)
@@ -718,14 +721,8 @@ async def api_update_student(student_id: int, request: Request):
             student.lesson_times = json.dumps(times)
         if "lesson_price" in data:
             student.lesson_price = int(data["lesson_price"])
-        if "lessons_count" in data:
-            student.lessons_count = int(data["lessons_count"])
-        if "is_unlimited" in data:
-            student.is_unlimited = bool(data["is_unlimited"])
-        if "subscription_start" in data:
-            student.subscription_start = date.fromisoformat(data["subscription_start"]) if data["subscription_start"] else None
-        if "subscription_end" in data:
-            student.subscription_end = date.fromisoformat(data["subscription_end"]) if data["subscription_end"] else None
+        # Note: subscription fields (lessons_count, lessons_remaining, is_unlimited,
+        # subscription_start, subscription_end) are managed via Payments API only
         if "notes" in data:
             student.notes = data["notes"] or None
         if "is_active" in data:
@@ -1016,6 +1013,54 @@ async def api_update_attendance(lesson_id: int, request: Request):
 
 # === Payments ===
 
+async def recalculate_student_subscription(student_id: int, session):
+    """Recalculate student's subscription based on all paid payments."""
+    from sqlalchemy import func
+    
+    student = await session.get(Student, student_id)
+    if not student:
+        return
+    
+    # Get all paid payments for this student
+    payments_result = await session.execute(
+        select(Payment).where(
+            Payment.student_id == student_id,
+            Payment.status == "paid"
+        ).order_by(Payment.created_at)
+    )
+    paid_payments = payments_result.scalars().all()
+    
+    # Count used lessons (only 'present' attendance)
+    used_result = await session.execute(
+        select(func.count(Attendance.id)).where(
+            Attendance.student_id == student_id,
+            Attendance.status == "present"
+        )
+    )
+    used_lessons = used_result.scalar() or 0
+    
+    if paid_payments:
+        last_payment = paid_payments[-1]
+        student.subscription_start = last_payment.period_start
+        student.subscription_end = last_payment.period_end
+        
+        if last_payment.is_unlimited:
+            student.is_unlimited = True
+            student.lessons_count = 0
+            student.lessons_remaining = 0
+        else:
+            total_lessons = sum(p.lessons_count or 0 for p in paid_payments)
+            student.is_unlimited = False
+            student.lessons_count = total_lessons
+            student.lessons_remaining = total_lessons - used_lessons
+    else:
+        student.is_unlimited = False
+        student.lessons_count = 0
+        student.lessons_remaining = 0
+        student.subscription_start = None
+        student.subscription_end = None
+
+
 @app.post("/api/payments")
 async def api_payments(request: Request):
     """Get all payments for coach."""
@@ -1050,6 +1095,7 @@ async def api_payments(request: Request):
                 "period_start": payment.period_start.isoformat() if payment.period_start else None,
                 "period_end": payment.period_end.isoformat() if payment.period_end else None,
                 "paid_at": payment.paid_at.isoformat() if payment.paid_at else None,
+                "is_unlimited": payment.is_unlimited,
                 "notes": payment.notes,
             })
         
@@ -1067,14 +1113,18 @@ async def api_create_payment(request: Request):
     data = body.get("payment", {})
     
     async with async_session() as s:
+        is_unlimited = bool(data.get("is_unlimited", False))
+        lessons_count = int(data.get("lessons_count", 0)) if not is_unlimited else 0
+        
         payment = Payment(
             coach_id=coach.id,
             student_id=data.get("student_id"),
             amount=int(data.get("amount", 0)),
-            lessons_count=int(data.get("lessons_count", 8)),
+            lessons_count=lessons_count,
             status=data.get("status", "pending"),
             period_start=date.fromisoformat(data["period_start"]) if data.get("period_start") else None,
             period_end=date.fromisoformat(data["period_end"]) if data.get("period_end") else None,
+            is_unlimited=is_unlimited,
             notes=data.get("notes"),
         )
         
@@ -1084,24 +1134,10 @@ async def api_create_payment(request: Request):
         s.add(payment)
         await s.commit()
         
-        # Update student subscription dates and lessons if paid
-        if payment.status == "paid":
-            student_result = await s.execute(
-                select(Student).where(Student.id == payment.student_id)
-            )
-            student = student_result.scalar_one_or_none()
-            if student:
-                if payment.period_end:
-                    student.subscription_end = payment.period_end
-                    if not student.subscription_start:
-                        student.subscription_start = payment.period_start
-                
-                # Add lessons to subscription
-                if payment.lessons_count:
-                    student.lessons_count += payment.lessons_count
-                    student.lessons_remaining += payment.lessons_count
-        
+        # Recalculate student subscription based on all paid payments
+        await recalculate_student_subscription(payment.student_id, s)
         await s.commit()
+        
         return {"success": True, "id": payment.id}
 
 
@@ -1124,17 +1160,86 @@ async def api_mark_payment_paid(payment_id: int, request: Request):
         payment.status = "paid"
         payment.paid_at = datetime.utcnow()
         
-        # Update student subscription
-        student_result = await s.execute(
-            select(Student).where(Student.id == payment.student_id)
-        )
-        student = student_result.scalar_one_or_none()
-        if student and payment.period_end:
-            student.subscription_end = payment.period_end
-            if not student.subscription_start:
-                student.subscription_start = payment.period_start
+        # Recalculate student subscription based on all paid payments
+        await recalculate_student_subscription(payment.student_id, s)
         
         await s.commit()
+        return {"success": True}
+
+
+@app.post("/api/payments/{payment_id}/update")
+async def api_update_payment(payment_id: int, request: Request):
+    """Update payment record."""
+    body = await request.json()
+    coach = await get_current_coach(body.get("initData", ""))
+    if not coach:
+        return JSONResponse({"error": "unauthorized"}, 403)
+    
+    data = body.get("payment", {})
+    
+    async with async_session() as s:
+        result = await s.execute(
+            select(Payment).where(Payment.id == payment_id, Payment.coach_id == coach.id)
+        )
+        payment = result.scalar_one_or_none()
+        if not payment:
+            return JSONResponse({"error": "not_found"}, 404)
+        
+        if "amount" in data:
+            payment.amount = int(data["amount"])
+        if "lessons_count" in data:
+            payment.lessons_count = int(data["lessons_count"])
+        if "status" in data:
+            old_status = payment.status
+            payment.status = data["status"]
+            if payment.status == "paid" and old_status != "paid":
+                payment.paid_at = datetime.utcnow()
+            elif payment.status != "paid" and old_status == "paid":
+                payment.paid_at = None
+        if "period_start" in data:
+            payment.period_start = date.fromisoformat(data["period_start"]) if data["period_start"] else None
+        if "period_end" in data:
+            payment.period_end = date.fromisoformat(data["period_end"]) if data["period_end"] else None
+        if "is_unlimited" in data:
+            payment.is_unlimited = bool(data["is_unlimited"])
+            if payment.is_unlimited:
+                payment.lessons_count = 0
+        if "notes" in data:
+            payment.notes = data["notes"] or None
+        
+        await s.commit()
+        
+        # Recalculate student subscription
+        await recalculate_student_subscription(payment.student_id, s)
+        await s.commit()
+        
+        return {"success": True}
+
+
+@app.post("/api/payments/{payment_id}/delete")
+async def api_delete_payment(payment_id: int, request: Request):
+    """Delete payment record."""
+    body = await request.json()
+    coach = await get_current_coach(body.get("initData", ""))
+    if not coach:
+        return JSONResponse({"error": "unauthorized"}, 403)
+    
+    async with async_session() as s:
+        result = await s.execute(
+            select(Payment).where(Payment.id == payment_id, Payment.coach_id == coach.id)
+        )
+        payment = result.scalar_one_or_none()
+        if not payment:
+            return JSONResponse({"error": "not_found"}, 404)
+        
+        student_id = payment.student_id
+        await s.delete(payment)
+        await s.commit()
+        
+        # Recalculate student subscription
+        await recalculate_student_subscription(student_id, s)
+        await s.commit()
+        
         return {"success": True}
 
 
@@ -1358,9 +1463,9 @@ async def api_bulk_attendance(request: Request):
                             "name": student.name,
                             "remaining": student.lessons_remaining
                         })
-            elif status != "present" and old_status == "present":
-                # Restore a lesson (changed from present to absent/sick)
-                student.lessons_remaining += 1
+                elif status != "present" and old_status == "present":
+                    # Restore a lesson (changed from present to absent/sick)
+                    student.lessons_remaining += 1
             
             marked_count += 1
         
