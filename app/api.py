@@ -731,6 +731,59 @@ async def api_update_student(student_id: int, request: Request):
         if "is_active" in data:
             student.is_active = bool(data["is_active"])
         
+        # Update schedules if provided (new multi-location system)
+        if "schedules" in data and data["schedules"]:
+            # Get existing schedules
+            existing_schedules_result = await s.execute(
+                select(StudentSchedule).where(StudentSchedule.student_id == student_id)
+            )
+            existing_schedules = {sch.id: sch for sch in existing_schedules_result.scalars().all()}
+            
+            # Process incoming schedules
+            for idx, sched_data in enumerate(data["schedules"]):
+                sched_id = sched_data.get("id")
+                
+                # Handle times JSON
+                times = sched_data.get("times")
+                if isinstance(times, dict):
+                    times = json.dumps(times)
+                elif not times and sched_data.get("time"):
+                    # Legacy format: create times from single time value
+                    days = sched_data.get("days", "1,3").split(",")
+                    times_dict = {d.strip(): sched_data["time"] for d in days}
+                    times = json.dumps(times_dict)
+                
+                if sched_id and sched_id in existing_schedules:
+                    # Update existing schedule
+                    sch = existing_schedules[sched_id]
+                    if "location_id" in sched_data:
+                        sch.location_id = sched_data["location_id"]
+                    if "days" in sched_data:
+                        sch.days = sched_data["days"]
+                    if times:
+                        sch.times = times
+                    if "duration" in sched_data:
+                        sch.duration = int(sched_data["duration"])
+                    if "is_primary" in sched_data:
+                        sch.is_primary = bool(sched_data["is_primary"])
+                    # Remove from dict to track which ones to keep
+                    del existing_schedules[sched_id]
+                else:
+                    # Create new schedule
+                    new_schedule = StudentSchedule(
+                        student_id=student_id,
+                        location_id=sched_data.get("location_id"),
+                        days=sched_data.get("days", "1,3"),
+                        times=times or '{"1": "18:00", "3": "18:00"}',
+                        duration=int(sched_data.get("duration", 90)),
+                        is_primary=sched_data.get("is_primary", idx == 0)
+                    )
+                    s.add(new_schedule)
+            
+            # Delete schedules that weren't in the update (optional - can be disabled if you want to keep orphans)
+            # for sch in existing_schedules.values():
+            #     await s.delete(sch)
+        
         await s.commit()
         return {"success": True}
 
@@ -1139,9 +1192,11 @@ async def api_bulk_attendance(request: Request):
             student_id = item.get("student_id")
             status = item.get("status", "present")
             
-            # Get student info
+            # Get student info with schedules eager-loaded
             student_result = await s.execute(
-                select(Student).where(Student.id == student_id, Student.coach_id == coach.id)
+                select(Student).options(
+                    selectinload(Student.schedules).selectinload(StudentSchedule.location)
+                ).where(Student.id == student_id, Student.coach_id == coach.id)
             )
             student = student_result.scalar_one_or_none()
             if not student:
@@ -1258,9 +1313,11 @@ async def api_skip_lesson(request: Request):
     lesson_date = body.get("date", datetime.now().date().isoformat())
     
     async with async_session() as s:
-        # Get all students for this coach
+        # Get all students for this coach with schedules eager-loaded
         result = await s.execute(
-            select(Student).where(
+            select(Student).options(
+                selectinload(Student.schedules).selectinload(StudentSchedule.location)
+            ).where(
                 Student.coach_id == coach.id,
                 Student.is_active == True
             )

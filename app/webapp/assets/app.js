@@ -5,7 +5,7 @@ const tg = window.Telegram?.WebApp;
 
 // Cache busting - force reload if version changed
 const APP_VERSION_KEY = 'crm_bw_version';
-const CURRENT_VERSION = '27'; // Version 27: API /api/students now returns schedules - fix for Quick Lesson
+const CURRENT_VERSION = '28'; // Version 28: Fixed ALL API endpoints - eager loading for schedules, update student now updates schedules table
 
 // Check version on load
 const savedVersion = localStorage.getItem(APP_VERSION_KEY);
