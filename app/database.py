@@ -330,7 +330,11 @@ async def run_migrations():
             await conn.execute(text("SELECT is_unlimited FROM payments LIMIT 1"))
         except:
             logger.info("Migrating: Adding is_unlimited to payments")
-            await conn.execute(text("ALTER TABLE payments ADD COLUMN is_unlimited BOOLEAN DEFAULT 0"))
+            try:
+                await conn.execute(text("ALTER TABLE payments ADD COLUMN is_unlimited BOOLEAN DEFAULT 0"))
+            except Exception:
+                # Column may have been added by another concurrent process
+                pass
         
         logger.info("Migrations completed")
 
