@@ -785,6 +785,8 @@ async function openStudentDetail(id) {
                 <button class="btn-secondary" onclick="addPaymentForStudent(${student.id})">💰 Оплата</button>
                 <button class="btn-secondary" onclick="markExtraAttendance(${student.id})">⭐ Внеплановое</button>
                 <button class="btn-secondary" onclick="viewAttendanceHistory(${student.id})">📋 История</button>
+                <button class="btn-secondary btn-danger" onclick="deactivateStudent(${student.id})">🚫 Деактивировать</button>
+                <button class="btn-danger" onclick="destroyStudent(${student.id}, '${escapeHtml(student.name)}')">🗑️ Удалить навсегда</button>
             </div>
         `;
         
@@ -1565,7 +1567,8 @@ async function saveQuickAttendance() {
         .filter(d => d.status !== null)
         .map(d => ({
             student_id: d.student_id,
-            status: d.status
+            status: d.status,
+            time: d.student?.schedule_time || null
         }));
     
     if (attendances.length === 0) {
@@ -1761,6 +1764,69 @@ async function saveExtraAttendance(studentId) {
     } catch (e) {
         console.error('Extra attendance error:', e);
         showNotification('Ошибка сохранения', 'error');
+    }
+}
+
+async function deactivateStudent(studentId) {
+    if (!confirm('Деактивировать ученика? Он будет скрыт из списков, но данные сохранятся.')) {
+        return;
+    }
+    
+    try {
+        const res = await fetch(`${API}/api/students/${studentId}/delete`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({initData})
+        });
+        
+        const result = await res.json();
+        
+        if (result.success) {
+            showNotification('Ученик деактивирован', 'success');
+            goBack();
+            loadStudents();
+        } else {
+            showNotification('Ошибка деактивации', 'error');
+        }
+    } catch (e) {
+        console.error('Deactivate error:', e);
+        showNotification('Ошибка сети', 'error');
+    }
+}
+
+async function destroyStudent(studentId, studentName) {
+    const confirmText = prompt(`ВНИМАНИЕ! Это действие НЕОБРАТИМО!\\n\\nДля подтверждения удаления ученика "${studentName}" введите его имя:`);
+    
+    if (confirmText !== studentName) {
+        showNotification('Удаление отменено - имя не совпадает', 'error');
+        return;
+    }
+    
+    if (!confirm(`УДАЛИТЬ УЧЕНИКА НАВСЕГДА?\\n\\nВсе занятия, оплаты и история будут безвозвратно удалены!`)) {
+        return;
+    }
+    
+    try {
+        const res = await fetch(`${API}/api/students/${studentId}/destroy`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({initData, confirm_destroy: true})
+        });
+        
+        const result = await res.json();
+        
+        if (result.success) {
+            showNotification(`Ученик ${studentName} удален навсегда`, 'success');
+            goBack();
+            loadStudents();
+        } else if (result.error === 'confirmation_required') {
+            showNotification('Требуется подтверждение', 'error');
+        } else {
+            showNotification('Ошибка удаления', 'error');
+        }
+    } catch (e) {
+        console.error('Destroy error:', e);
+        showNotification('Ошибка сети', 'error');
     }
 }
 

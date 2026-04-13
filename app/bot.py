@@ -9,6 +9,7 @@ from aiogram.types import (
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from sqlalchemy import select, func, and_, or_
+from sqlalchemy.orm import selectinload
 from datetime import datetime, date, timedelta
 from app.database import async_session
 from app.models import Coach, Student, Lesson, Attendance, Payment, AdminUser, StudentSchedule
@@ -179,7 +180,9 @@ async def cmd_start(message: Message):
     async with async_session() as s:
         # Get students grouped by time
         result = await s.execute(
-            select(Student).where(
+            select(Student).options(
+                selectinload(Student.schedules).selectinload(StudentSchedule.location)
+            ).where(
                 Student.coach_id == coach.id,
                 Student.is_active == True
             )
@@ -205,7 +208,8 @@ async def cmd_start(message: Message):
                     existing = await s.execute(
                         select(Lesson).where(
                             Lesson.student_id == st.id,
-                            Lesson.date == current_date
+                            Lesson.date == current_date,
+                            Lesson.time == time_key
                         )
                     )
                     is_marked = existing.scalar_one_or_none() is not None
@@ -383,7 +387,9 @@ async def cmd_now(message: Message):
     
     async with async_session() as s:
         result = await s.execute(
-            select(Student).where(
+            select(Student).options(
+                selectinload(Student.schedules).selectinload(StudentSchedule.location)
+            ).where(
                 Student.coach_id == coach.id,
                 Student.is_active == True
             )
@@ -404,7 +410,8 @@ async def cmd_now(message: Message):
                 existing = await s.execute(
                     select(Lesson).where(
                         Lesson.student_id == st.id,
-                        Lesson.date == current_date
+                        Lesson.date == current_date,
+                        Lesson.time == time_key
                     )
                 )
                 lesson_exists = existing.scalar_one_or_none()
@@ -470,7 +477,9 @@ async def cb_my_students(callback: CallbackQuery):
     
     async with async_session() as s:
         result = await s.execute(
-            select(Student).where(Student.coach_id == coach.id, Student.is_active == True)
+            select(Student).options(
+                selectinload(Student.schedules).selectinload(StudentSchedule.location)
+            ).where(Student.coach_id == coach.id, Student.is_active == True)
         )
         students = result.scalars().all()
     
@@ -482,19 +491,35 @@ async def cb_my_students(callback: CallbackQuery):
         return
     
     text = f"👥 <b>Ваши ученики ({len(students)}):</b>\n\n"
+    day_names = {"0":"Пн","1":"Вт","2":"Ср","3":"Чт","4":"Пт","5":"Сб","6":"Вс"}
     for st in students:
-        days = st.lesson_days or "1,3"
-        days_str = ",".join([{"0":"Пн","1":"Вт","2":"Ср","3":"Чт","4":"Пт","5":"Сб","6":"Вс"}[d] for d in days.split(",")])
-        # Show first time or indicate different times
-        try:
-            times = json.loads(st.lesson_times or '{}')
-            if len(times) <= 1:
+        schedules_info = []
+        if st.schedules:
+            for sched in st.schedules:
+                days = sched.days or ""
+                days_str = ",".join([day_names.get(d.strip(), d.strip()) for d in days.split(",") if d.strip()])
+                try:
+                    times = json.loads(sched.times or '{}')
+                    time_str = times.get('default', '18:00')
+                except:
+                    time_str = '18:00'
+                loc = sched.location.name if sched.location else (st.location or 'Зал')
+                schedules_info.append(f"🕐 {days_str} {time_str} 📍 {loc}")
+        else:
+            # Legacy fallback
+            days = st.lesson_days or "1,3"
+            days_str = ",".join([day_names.get(d.strip(), d.strip()) for d in days.split(",") if d.strip()])
+            try:
+                times = json.loads(st.lesson_times or '{}')
                 time_str = times.get('default', '18:00')
-            else:
-                time_str = "разное"
-        except:
-            time_str = "18:00"
-        text += f"• <b>{st.name}</b>\n  📍 {st.location} | 🕐 {days_str} {time_str}\n  💰 {st.lesson_price} Br/{st.lessons_count} занятий\n\n"
+            except:
+                time_str = '18:00'
+            schedules_info.append(f"🕐 {days_str} {time_str} 📍 {st.location or 'Зал'}")
+        
+        text += f"• <b>{st.name}</b>\n"
+        for info in schedules_info:
+            text += f"  {info}\n"
+        text += f"  💰 {st.lesson_price} Br/{st.lessons_count} занятий\n\n"
     
     await callback.message.edit_text(text, parse_mode="HTML")
 
@@ -570,7 +595,9 @@ async def cb_quick_attendance(callback: CallbackQuery):
     
     async with async_session() as s:
         result = await s.execute(
-            select(Student).where(
+            select(Student).options(
+                selectinload(Student.schedules).selectinload(StudentSchedule.location)
+            ).where(
                 Student.coach_id == coach.id,
                 Student.is_active == True
             )
@@ -594,7 +621,8 @@ async def cb_quick_attendance(callback: CallbackQuery):
                     existing = await s.execute(
                         select(Lesson).where(
                             Lesson.student_id == st.id,
-                            Lesson.date == current_date
+                            Lesson.date == current_date,
+                            Lesson.time == lesson_time
                         )
                     )
                     lesson_exists = existing.scalar_one_or_none()
@@ -684,7 +712,9 @@ async def cb_skip_reason(callback: CallbackQuery):
     async with async_session() as s:
         # Get all students for this coach
         result = await s.execute(
-            select(Student).where(
+            select(Student).options(
+                selectinload(Student.schedules).selectinload(StudentSchedule.location)
+            ).where(
                 Student.coach_id == coach.id,
                 Student.is_active == True
             )
@@ -694,17 +724,18 @@ async def cb_skip_reason(callback: CallbackQuery):
         skipped_count = 0
         for student in students:
             # Check if already marked
+            lesson_time = get_lesson_time_for_day(student, today.weekday())
             existing = await s.execute(
                 select(Lesson).where(
                     Lesson.student_id == student.id,
-                    Lesson.date == today
+                    Lesson.date == today,
+                    Lesson.time == lesson_time
                 )
             )
             if existing.scalar_one_or_none():
                 continue
             
             # Create skipped lesson
-            lesson_time = get_lesson_time_for_day(student, today.weekday())
             lesson = Lesson(
                 coach_id=coach.id,
                 student_id=student.id,
@@ -808,7 +839,9 @@ async def cb_skip_group_reason(callback: CallbackQuery):
     async with async_session() as s:
         # Get students for this specific time
         result = await s.execute(
-            select(Student).where(
+            select(Student).options(
+                selectinload(Student.schedules).selectinload(StudentSchedule.location)
+            ).where(
                 Student.coach_id == coach.id,
                 Student.is_active == True
             )
@@ -826,7 +859,8 @@ async def cb_skip_group_reason(callback: CallbackQuery):
                     existing = await s.execute(
                         select(Lesson).where(
                             Lesson.student_id == student.id,
-                            Lesson.date == today
+                            Lesson.date == today,
+                            Lesson.time == time_key
                         )
                     )
                     if existing.scalar_one_or_none():
@@ -997,7 +1031,9 @@ async def send_daily_summary(coach_id: int = None):
             
             # Get all active students
             students_result = await s.execute(
-                select(Student).where(
+                select(Student).options(
+                    selectinload(Student.schedules).selectinload(StudentSchedule.location)
+                ).where(
                     Student.coach_id == coach.id,
                     Student.is_active == True
                 )

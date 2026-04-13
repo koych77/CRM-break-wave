@@ -1271,13 +1271,15 @@ async def api_bulk_attendance(request: Request):
             if not student:
                 continue
             
-            # Check if lesson exists
-            lesson_result = await s.execute(
-                select(Lesson).where(
-                    Lesson.student_id == student_id,
-                    Lesson.date == date.fromisoformat(lesson_date)
-                )
+            # Check if lesson exists (with optional time filter)
+            lesson_time = item.get("time")
+            lesson_query = select(Lesson).where(
+                Lesson.student_id == student_id,
+                Lesson.date == date.fromisoformat(lesson_date)
             )
+            if lesson_time:
+                lesson_query = lesson_query.where(Lesson.time == lesson_time)
+            lesson_result = await s.execute(lesson_query)
             lesson = lesson_result.scalar_one_or_none()
             
             # Track old status for lesson counting
