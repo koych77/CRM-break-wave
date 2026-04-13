@@ -72,7 +72,9 @@ class StudentSchedule(Base):
         """Check if student has lesson at this location on given day."""
         if not self.days:
             return False
-        return str(day_of_week) in self.days.split(",")
+        # Strip spaces to handle "5, 6" format
+        day_list = [d.strip() for d in self.days.split(",")]
+        return str(day_of_week) in day_list
 
 
 class Student(Base):
@@ -145,7 +147,7 @@ class Student(Base):
         
         # Fallback to legacy fields if no schedules defined
         if not result and self.lesson_days:
-            days = self.lesson_days.split(",") if self.lesson_days else []
+            days = [d.strip() for d in self.lesson_days.split(",")] if self.lesson_days else []
             if str(day_of_week) in days:
                 time = self.get_lesson_time_for_day(day_of_week)
                 loc_name = self.location or "Зал"
