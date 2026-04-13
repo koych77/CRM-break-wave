@@ -20,7 +20,7 @@ if (savedVersion && savedVersion !== CURRENT_VERSION) {
     localStorage.setItem(APP_VERSION_KEY, CURRENT_VERSION);
 }
 
-// Data cache helpers
+// Data cache helpers — caching disabled to avoid stale data when bot makes changes
 const DataCache = {
     STUDENTS_KEY: 'crm_cached_students',
     PAYMENTS_KEY: 'crm_cached_payments',
@@ -28,38 +28,26 @@ const DataCache = {
     LAST_SYNC_KEY: 'crm_last_sync',
     
     save(key, data) {
-        try {
-            localStorage.setItem(key, JSON.stringify({
-                data,
-                timestamp: Date.now()
-            }));
-        } catch (e) {
-            console.warn('Cache save failed:', e);
-        }
+        // Caching disabled: data is always fetched fresh from server
     },
     
     load(key) {
-        try {
-            const item = localStorage.getItem(key);
-            if (!item) return null;
-            const parsed = JSON.parse(item);
-            // Cache valid for 1 hour
-            if (Date.now() - parsed.timestamp > 3600000) {
-                localStorage.removeItem(key);
-                return null;
-            }
-            return parsed.data;
-        } catch (e) {
-            return null;
-        }
+        // Caching disabled: data is always fetched fresh from server
+        return null;
     },
     
     clear() {
-        localStorage.removeItem(this.STUDENTS_KEY);
-        localStorage.removeItem(this.PAYMENTS_KEY);
-        localStorage.removeItem(this.DASHBOARD_KEY);
+        try {
+            localStorage.removeItem(this.STUDENTS_KEY);
+            localStorage.removeItem(this.PAYMENTS_KEY);
+            localStorage.removeItem(this.DASHBOARD_KEY);
+            localStorage.removeItem(this.LAST_SYNC_KEY);
+        } catch (e) {}
     }
 };
+
+// Clear any old cached data on startup
+DataCache.clear();
 
 let currentScreen = 'loading';
 let screenHistory = [];
