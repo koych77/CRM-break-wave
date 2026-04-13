@@ -1266,7 +1266,7 @@ async def api_skip_lesson(request: Request):
 
 @app.post("/api/calendar")
 async def api_calendar(request: Request):
-    """Get calendar data with lessons."""
+    """Get calendar data with scheduled lessons (not just marked ones)."""
     body = await request.json()
     coach = await get_current_coach(body.get("initData", ""))
     if not coach:
@@ -1283,25 +1283,43 @@ async def api_calendar(request: Request):
         month_end = date(year, month + 1, 1) - timedelta(days=1)
     
     async with async_session() as s:
+        # Get all active students with their schedules
         result = await s.execute(
-            select(Lesson, Student).join(Student).where(
-                Lesson.coach_id == coach.id,
-                Lesson.date >= month_start,
-                Lesson.date <= month_end
-            ).order_by(Lesson.date, Lesson.time)
+            select(Student).where(
+                Student.coach_id == coach.id,
+                Student.is_active == True
+            )
         )
+        students = result.scalars().all()
         
+        # Build schedule for each day
         days = {}
-        for lesson, student in result.all():
-            day = lesson.date.day
-            if day not in days:
-                days[day] = []
-            days[day].append({
-                "id": lesson.id,
-                "time": lesson.time,
-                "student_name": student.name,
-                "student_id": student.id,
-            })
+        current_date = month_start
+        while current_date <= month_end:
+            weekday = current_date.weekday()
+            day = current_date.day
+            
+            # Find all students with lessons on this day
+            day_lessons = []
+            for student in students:
+                # Use new schedule system
+                schedules = student.get_schedules_for_day(weekday)
+                for sched_info in schedules:
+                    day_lessons.append({
+                        "id": student.id,  # Use student id as reference
+                        "time": sched_info["time"],
+                        "student_name": student.name,
+                        "student_id": student.id,
+                        "location": sched_info.get("location_name", "Зал"),
+                        "is_scheduled": True
+                    })
+            
+            if day_lessons:
+                # Sort by time
+                day_lessons.sort(key=lambda x: x["time"])
+                days[day] = day_lessons
+            
+            current_date += timedelta(days=1)
         
         return {"days": days, "month_start": month_start.isoformat()}
 

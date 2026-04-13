@@ -5,7 +5,7 @@ const tg = window.Telegram?.WebApp;
 
 // Cache busting - force reload if version changed
 const APP_VERSION_KEY = 'crm_bw_version';
-const CURRENT_VERSION = '12'; // Version 12: Fixed editStudent, calendar, statistics loading
+const CURRENT_VERSION = '13'; // Version 13: Fixed calendar to show scheduled lessons, not just marked ones
 
 // Check version on load
 const savedVersion = localStorage.getItem(APP_VERSION_KEY);
