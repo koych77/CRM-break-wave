@@ -3,7 +3,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse, HTMLResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
-from sqlalchemy import select, func, and_, or_, desc
+from sqlalchemy import select, func, and_, or_, desc, delete
 from contextlib import asynccontextmanager
 from datetime import datetime, date, timedelta
 from typing import Optional
@@ -807,6 +807,75 @@ async def api_delete_student(student_id: int, request: Request):
         student.is_active = False
         await s.commit()
         return {"success": True}
+
+
+@app.post("/api/students/{student_id}/destroy")
+async def api_destroy_student(student_id: int, request: Request):
+    """Permanently delete student and all related data (lessons, attendance, payments, schedules).
+    
+    WARNING: This action cannot be undone! Use for students who left the school.
+    """
+    body = await request.json()
+    coach = await get_current_coach(body.get("initData", ""))
+    if not coach:
+        return JSONResponse({"error": "unauthorized"}, 403)
+    
+    # Optional: require confirmation
+    confirmed = body.get("confirm_destroy", False)
+    if not confirmed:
+        return JSONResponse({
+            "error": "confirmation_required",
+            "message": "Это действие необратимо! Для подтверждения отправьте confirm_destroy: true"
+        }, 400)
+    
+    async with async_session() as s:
+        # Verify student exists and belongs to coach
+        result = await s.execute(
+            select(Student).where(Student.id == student_id, Student.coach_id == coach.id)
+        )
+        student = result.scalar_one_or_none()
+        if not student:
+            return JSONResponse({"error": "not_found"}, 404)
+        
+        student_name = student.name
+        
+        # Delete all related data (cascade delete)
+        # 1. Delete attendance records
+        await s.execute(
+            delete(Attendance).where(Attendance.student_id == student_id)
+        )
+        
+        # 2. Delete lessons
+        await s.execute(
+            delete(Lesson).where(Lesson.student_id == student_id)
+        )
+        
+        # 3. Delete payments
+        await s.execute(
+            delete(Payment).where(Payment.student_id == student_id)
+        )
+        
+        # 4. Delete schedules
+        await s.execute(
+            delete(StudentSchedule).where(StudentSchedule.student_id == student_id)
+        )
+        
+        # 5. Delete notifications
+        await s.execute(
+            delete(Notification).where(Notification.student_id == student_id)
+        )
+        
+        # 6. Finally delete student
+        await s.delete(student)
+        await s.commit()
+        
+        logger.info(f"Student {student_name} (ID: {student_id}) permanently deleted by coach {coach.id}")
+        
+        return {
+            "success": True,
+            "message": f"Ученик {student_name} и все связанные данные полностью удалены",
+            "student_id": student_id
+        }
 
 
 # === Lessons & Attendance ===
