@@ -1603,21 +1603,12 @@ async def api_calendar(request: Request):
             weekday = current_date.weekday()
             day = current_date.day
             
-            # Debug logging for 21st (Tuesday)
-            if day == 21:
-                logger.info(f"Calendar debug: Building schedule for day {day}, weekday {weekday} (Tuesday=1)")
-            
             # Find all students with lessons on this day
             day_lessons = []
             for student in students:
                 # Use new schedule system
                 schedules = student.get_schedules_for_day(weekday)
                 
-                # Debug for Nazar Leonov
-                if day == 21 and 'леонов' in student.name.lower():
-                    logger.info(f"Calendar debug: Student {student.name} has {len(schedules)} schedules on weekday {weekday}")
-                    for sch in student.schedules:
-                        logger.info(f"  Schedule: days={sch.days}, time={sch.times}")
                 for sched_info in schedules:
                     # Check if already marked
                     att_key = (student.id, day)
@@ -2014,7 +2005,6 @@ async def api_daily_summary(request: Request):
             
             for idx, student in enumerate(students):
                 try:
-                    logger.debug(f"Processing student {idx}: {student.id} - {student.name}")
                     # Fix for old records without lessons_remaining
                     lessons_remaining = student.lessons_remaining if student.lessons_remaining is not None else student.lessons_count
                     
