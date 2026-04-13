@@ -16,6 +16,7 @@ import urllib.parse
 
 from app.database import async_session, init_db
 from app.models import Coach, Student, Lesson, Attendance, Payment, Notification, AdminUser, DailyNotificationLog, Location, StudentSchedule
+from sqlalchemy.orm import selectinload
 from app.config import WEBAPP_DIR, BOT_TOKEN, WEEKDAYS, ADMIN_IDS
 
 # Version for cache busting - auto-generated on server start (timestamp)
@@ -1283,9 +1284,11 @@ async def api_calendar(request: Request):
         month_end = date(year, month + 1, 1) - timedelta(days=1)
     
     async with async_session() as s:
-        # Get all active students with their schedules
+        # Get all active students with their schedules (eager loading)
         result = await s.execute(
-            select(Student).where(
+            select(Student).options(
+                selectinload(Student.schedules).selectinload(StudentSchedule.location)
+            ).where(
                 Student.coach_id == coach.id,
                 Student.is_active == True
             )
