@@ -5,7 +5,7 @@ const tg = window.Telegram?.WebApp;
 
 // Cache busting - force reload if version changed
 const APP_VERSION_KEY = 'crm_bw_version';
-const CURRENT_VERSION = '25'; // Version 25: Remove lesson_days fallback in quick lesson - use only schedules table
+const CURRENT_VERSION = '26'; // Version 26: Fix SQLAlchemy eager loading for get_schedules_for_day()
 
 // Check version on load
 const savedVersion = localStorage.getItem(APP_VERSION_KEY);

@@ -1011,9 +1011,12 @@ async def api_current_lesson(request: Request):
     current_date = now.date()
     
     async with async_session() as s:
-        # Get all active students for this coach
+        # Get all active students with schedules eager-loaded
+        from sqlalchemy.orm import selectinload
         result = await s.execute(
-            select(Student).where(
+            select(Student).options(
+                selectinload(Student.schedules).selectinload(StudentSchedule.location)
+            ).where(
                 Student.coach_id == coach.id,
                 Student.is_active == True
             )
@@ -1736,9 +1739,12 @@ async def api_daily_summary(request: Request):
         logger.info(f"Daily summary requested for coach {coach.id}")
         
         async with async_session() as s:
-            # Get all active students
+            # Get all active students with schedules eager-loaded
+            from sqlalchemy.orm import selectinload
             result = await s.execute(
-                select(Student).where(
+                select(Student).options(
+                    selectinload(Student.schedules).selectinload(StudentSchedule.location)
+                ).where(
                     Student.coach_id == coach.id,
                     Student.is_active == True
                 )
