@@ -134,11 +134,16 @@ class Student(Base):
         Student may have multiple lessons on same day at different locations.
         """
         result = []
+        import logging
+        logger = logging.getLogger(__name__)
         
         # First check new schedules table
         if self.schedules:
             for schedule in self.schedules:
-                if schedule.has_lesson_on_day(day_of_week):
+                has_lesson = schedule.has_lesson_on_day(day_of_week)
+                if 'леонов' in self.name.lower() and day_of_week == 1:
+                    logger.info(f"DEBUG get_schedules_for_day: student={self.name}, schedule_days={schedule.days}, weekday={day_of_week}, has_lesson={has_lesson}")
+                if has_lesson:
                     time = schedule.get_time_for_day(day_of_week)
                     loc_name = schedule.location.name if schedule.location else "Зал"
                     result.append({
@@ -162,6 +167,9 @@ class Student(Base):
                     "time": time,
                     "is_primary": True
                 })
+        
+        if 'леонов' in self.name.lower() and day_of_week == 1:
+            logger.info(f"DEBUG get_schedules_for_day: FINAL result count={len(result)} for {self.name}")
         
         return result
     
