@@ -5,7 +5,7 @@ const tg = window.Telegram?.WebApp;
 
 // Cache busting - force reload if version changed
 const APP_VERSION_KEY = 'crm_bw_version';
-const CURRENT_VERSION = '16'; // Version 16: Fixed SQLAlchemy eager loading for student schedules
+const CURRENT_VERSION = '17'; // Version 17: Improved calendar UI with day names and statistics
 
 // Check version on load
 const savedVersion = localStorage.getItem(APP_VERSION_KEY);
@@ -1002,10 +1002,23 @@ function selectCalendarDay(day, element) {
     const lessons = calendarData.days[day] || [];
     const container = document.getElementById('calendar-day-details');
     
+    // Get day of week name
+    const monthNames = ['Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь', 
+                        'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь'];
+    const dayNames = ['Воскресенье', 'Понедельник', 'Вторник', 'Среда', 'Четверг', 'Пятница', 'Суббота'];
+    const monthText = document.getElementById('calendar-month').textContent;
+    const [monthName, year] = monthText.split(' ');
+    const monthIndex = monthNames.indexOf(monthName);
+    const dateObj = new Date(parseInt(year), monthIndex, day);
+    const dayOfWeek = dayNames[dateObj.getDay()];
+    
     if (lessons.length === 0) {
         container.innerHTML = `
-            <h4>${day} ${document.getElementById('calendar-month').textContent}</h4>
-            <p style="color: var(--text-muted); margin-top: 8px;">Нет занятий</p>
+            <div style="text-align: center; padding: 20px;">
+                <div style="font-size: 24px; font-weight: 700; color: var(--accent); margin-bottom: 4px;">${day}</div>
+                <div style="font-size: 14px; color: var(--text-secondary); margin-bottom: 8px;">${dayOfWeek}</div>
+                <p style="color: var(--text-muted); margin-top: 16px;">Нет занятий</p>
+            </div>
         `;
     } else {
         // Group by time
@@ -1016,48 +1029,70 @@ function selectCalendarDay(day, element) {
             byTime[time].push(l);
         });
         
-        let html = `<h4>${day} ${document.getElementById('calendar-month').textContent}</h4>`;
+        // Calculate totals
+        const totalStudents = lessons.length;
+        const markedStudents = lessons.filter(s => s.is_marked).length;
+        const presentStudents = lessons.filter(s => s.status === 'present').length;
+        
+        let html = `
+            <div style="text-align: center; padding: 16px; background: var(--bg-secondary); border-radius: 12px; margin-bottom: 16px;">
+                <div style="font-size: 28px; font-weight: 700; color: var(--accent);">${day}</div>
+                <div style="font-size: 14px; color: var(--text-secondary); margin-bottom: 12px;">${dayOfWeek}</div>
+                <div style="display: flex; justify-content: center; gap: 16px; font-size: 13px;">
+                    <span style="color: var(--text-muted);">Всего: <b style="color: var(--text-primary);">${totalStudents}</b></span>
+                    <span style="color: var(--text-muted);">Отмечено: <b style="color: var(--success);">${markedStudents}</b></span>
+                    <span style="color: var(--text-muted);">Присутствовало: <b style="color: var(--accent);">${presentStudents}</b></span>
+                </div>
+            </div>
+        `;
         
         // Show lessons grouped by time
-        Object.keys(byTime).sort().forEach(time => {
+        Object.keys(byTime).sort().forEach((time, index) => {
             const students = byTime[time];
             const markedCount = students.filter(s => s.is_marked).length;
+            const presentCount = students.filter(s => s.status === 'present').length;
             
             html += `
-                <div style="margin-top: 16px; margin-bottom: 8px;">
-                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-                        <span style="font-weight: 600; color: var(--accent);">🕐 ${escapeHtml(time)}</span>
-                        <span style="font-size: 12px; color: var(--text-muted);">
-                            ${markedCount > 0 ? `✓ ${markedCount}/${students.length}` : `${students.length} уч.`}
-                        </span>
+                <div style="margin-bottom: 16px; background: var(--bg-card); border-radius: 12px; padding: 12px; border: 1px solid var(--border);">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; padding-bottom: 8px; border-bottom: 1px solid var(--border);">
+                        <div style="display: flex; align-items: center; gap: 8px;">
+                            <span style="font-size: 20px;">🕐</span>
+                            <span style="font-weight: 700; font-size: 18px; color: var(--accent);">${escapeHtml(time)}</span>
+                        </div>
+                        <div style="font-size: 12px; color: var(--text-muted);">
+                            ${markedCount > 0 ? `<span style="color: var(--success);">✓ ${markedCount}/${students.length}</span>` : `${students.length} уч.`}
+                        </div>
                     </div>
                     <div style="display: flex; flex-direction: column; gap: 8px;">
                         ${students.map(s => {
-                            let statusIcon = '⏳'; // Not marked
+                            let statusIcon = '⏳';
                             let statusColor = 'var(--text-muted)';
+                            let statusText = 'Не отмечен';
                             if (s.status === 'present') {
                                 statusIcon = '✅';
                                 statusColor = 'var(--success)';
+                                statusText = 'Присутствовал';
                             } else if (s.status === 'absent') {
                                 statusIcon = '❌';
                                 statusColor = 'var(--danger)';
+                                statusText = 'Отсутствовал';
                             } else if (s.status === 'sick') {
                                 statusIcon = '🤒';
                                 statusColor = 'var(--warning)';
+                                statusText = 'Болел';
                             }
                             
                             return `
-                                <div class="list-item" style="margin-bottom: 0; cursor: pointer;" 
+                                <div class="list-item" style="margin-bottom: 0; cursor: pointer; padding: 12px;" 
                                      onclick="openStudentDetail(${s.student_id})">
-                                    <div class="list-item-header">
-                                        <span class="list-item-title">${escapeHtml(s.student_name)}</span>
-                                        <span style="color: ${statusColor}; font-size: 16px;">${statusIcon}</span>
-                                    </div>
-                                    <div class="list-item-subtitle">
-                                        ${s.location || 'Зал'} 
-                                        ${s.status === 'present' ? '• Присутствовал' : 
-                                          s.status === 'absent' ? '• Отсутствовал' : 
-                                          s.status === 'sick' ? '• Болел' : '• Не отмечен'}
+                                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                                        <div style="flex: 1;">
+                                            <div style="font-weight: 600; font-size: 15px; margin-bottom: 2px;">${escapeHtml(s.student_name)}</div>
+                                            <div style="font-size: 12px; color: var(--text-muted);">
+                                                📍 ${s.location || 'Зал'} • <span style="color: ${statusColor};">${statusText}</span>
+                                            </div>
+                                        </div>
+                                        <div style="font-size: 20px; margin-left: 8px;">${statusIcon}</div>
                                     </div>
                                 </div>
                             `;
