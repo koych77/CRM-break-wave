@@ -154,8 +154,9 @@ class Student(Base):
                         "is_primary": schedule.is_primary
                     })
         
-        # Fallback to legacy fields if no schedules defined
-        if not result and self.lesson_days:
+        # Fallback to legacy fields ONLY if no schedules table exists at all
+        # Do NOT fallback if schedules exist but don't match this day
+        if not self.schedules and self.lesson_days:
             days = [d.strip() for d in self.lesson_days.split(",")] if self.lesson_days else []
             if str(day_of_week) in days:
                 time = self.get_lesson_time_for_day(day_of_week)
