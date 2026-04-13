@@ -767,6 +767,29 @@ async function openStudentDetail(id) {
                 ` : ''}
             </div>
             
+            ${student.payments && student.payments.length > 0 ? `
+            <div class="info-section">
+                <h3>💳 История оплат</h3>
+                ${student.payments.map(p => {
+                    const statusText = {paid: 'Оплачено', pending: 'Ожидает', overdue: 'Просрочено'}[p.status];
+                    const lessonsText = p.is_unlimited ? '♾️ Безлимит' : `${p.lessons_count || 0} занятий`;
+                    return `
+                    <div class="list-item" style="margin-bottom: 8px;">
+                        <div class="list-item-header">
+                            <span class="list-item-title">${p.amount.toLocaleString()} Br</span>
+                            <span class="payment-status ${p.status}">${statusText}</span>
+                        </div>
+                        <div class="list-item-subtitle">${lessonsText}${p.period_start && p.period_end ? ' • ' + formatDate(p.period_start) + ' — ' + formatDate(p.period_end) : ''}</div>
+                        <div style="display: flex; gap: 8px; margin-top: 8px;">
+                            <button class="btn-secondary" style="flex: 1; padding: 6px; font-size: 13px;" onclick="openEditPayment(${p.id})">✏️ Редактировать</button>
+                            <button class="btn-danger" style="flex: 1; padding: 6px; font-size: 13px;" onclick="deletePayment(${p.id})">🗑 Удалить</button>
+                        </div>
+                    </div>
+                    `;
+                }).join('')}
+            </div>
+            ` : ''}
+            
             ${attendanceSummary ? `
             <div class="info-section">
                 <h3>📊 Посещаемость</h3>
