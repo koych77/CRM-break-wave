@@ -5,7 +5,7 @@ const tg = window.Telegram?.WebApp;
 
 // Cache busting - force reload if version changed
 const APP_VERSION_KEY = 'crm_bw_version';
-const CURRENT_VERSION = '7'; // Version 7: Smart notifications, auto group switching
+const CURRENT_VERSION = '10'; // Version 10: Fixed location_id nullable constraint, full module integration
 
 // Check version on load
 const savedVersion = localStorage.getItem(APP_VERSION_KEY);
@@ -725,6 +725,15 @@ async function openStudentDetail(id) {
             
             <div class="info-section">
                 <h3>📅 Абонемент</h3>
+                ${student.is_unlimited ? `
+                <div style="background: var(--bg-secondary); border-radius: 8px; padding: 12px; margin-bottom: 12px; border-left: 3px solid var(--accent);">
+                    <div style="font-size: 13px; color: var(--text-secondary); margin-bottom: 4px;">Тип абонемента</div>
+                    <div style="font-weight: 600; color: var(--accent);">♾️ Безлимитный (по месяцам)</div>
+                    <div style="font-size: 12px; color: var(--text-muted); margin-top: 4px;">
+                        Занятия не считаются. Оплата по окончанию срока.
+                    </div>
+                </div>
+                ` : `
                 <div class="lessons-progress">
                     <div class="progress-bar">
                         <div class="progress-fill ${remaining <= 2 ? 'low' : remaining <= 0 ? 'empty' : ''}" 
@@ -735,6 +744,10 @@ async function openStudentDetail(id) {
                         <span class="${remaining <= 2 ? 'text-warning' : ''}">Осталось: <b>${remaining}</b></span>
                     </div>
                 </div>
+                <div style="font-size: 12px; color: var(--text-muted); margin-top: 8px; padding: 8px; background: var(--bg-secondary); border-radius: 8px;">
+                    💡 При отметке "Присутствовал" — занятие списывается автоматически
+                </div>
+                `}
                 <div class="info-row" style="margin-top: 12px;">
                     <span class="info-label">Статус</span>
                     <span class="info-value">${subStatus}</span>
@@ -788,17 +801,23 @@ async function editStudent(id) {
         
         const student = await res.json();
         
+        // Basic info
         document.getElementById('student-form-title').textContent = 'Редактировать ученика';
         document.getElementById('st-name').value = student.name || '';
         document.getElementById('st-nickname').value = student.nickname || '';
         document.getElementById('st-phone').value = student.phone || '';
         document.getElementById('st-parent-phone').value = student.parent_phone || '';
         document.getElementById('st-age').value = student.age || '';
-        document.getElementById('st-location').value = student.location || 'Зал Break Wave';
-        document.getElementById('st-time').value = student.lesson_time || '18:00';
-        document.getElementById('st-price').value = student.lesson_price || 5000;
-        document.getElementById('st-count').value = student.lessons_count || 8;
         document.getElementById('st-notes').value = student.notes || '';
+        
+        // Subscription
+        document.getElementById('st-price').value = student.lesson_price || 150;
+        document.getElementById('st-count').value = student.lessons_count || 8;
+        
+        // Handle unlimited subscription
+        const isUnlimited = student.is_unlimited || false;
+        document.getElementById('st-unlimited').checked = isUnlimited;
+        toggleUnlimited(isUnlimited);
         
         if (student.subscription_start) {
             document.getElementById('st-sub-start').value = student.subscription_start;
@@ -807,16 +826,45 @@ async function editStudent(id) {
             document.getElementById('st-sub-end').value = student.subscription_end;
         }
         
-        // Set weekdays
-        selectedDays = new Set((student.lesson_days || '1,3').split(',').map(Number));
-        document.querySelectorAll('#weekdays-selector button').forEach(btn => {
-            const day = parseInt(btn.dataset.day);
-            btn.classList.toggle('active', selectedDays.has(day));
-        });
+        // Location schedules - NEW SYSTEM
+        if (student.schedules && student.schedules.length > 0) {
+            currentLocationSchedules = student.schedules.map(s => ({
+                id: s.id,
+                location_id: s.location_id,
+                days: s.days ? s.days.split(',').map(Number) : [1, 3],
+                times: s.times ? JSON.parse(s.times) : {},
+                duration: s.duration || 90,
+                is_primary: s.is_primary
+            }));
+        } else {
+            // Fallback to legacy data
+            const legacyDays = student.lesson_days ? student.lesson_days.split(',').map(Number) : [1, 3];
+            const legacyTimes = {};
+            legacyDays.forEach(d => {
+                legacyTimes[d] = student.lesson_time || '18:00';
+            });
+            
+            currentLocationSchedules = [{
+                id: null,
+                location_id: null,
+                days: legacyDays,
+                times: legacyTimes,
+                duration: 90,
+                is_primary: true
+            }];
+        }
+        
+        // Ensure locations are loaded before rendering
+        if (availableLocations.length === 0) {
+            await loadLocationsForSelect();
+        } else {
+            renderLocationSchedules();
+        }
         
         navigate('student-form');
     } catch (e) {
         console.error('Edit student error:', e);
+        showNotification('Ошибка загрузки данных ученика', 'error');
     }
 }
 
@@ -825,21 +873,27 @@ async function saveStudent() {
     const coachSelect = document.getElementById('st-coach');
     const coachId = coachSelect && coachSelect.value ? parseInt(coachSelect.value) : null;
     
+    // Validate location schedules
+    const schedules = collectLocationSchedules();
+    if (schedules.length === 0 || !schedules.some(s => s.location_id)) {
+        showNotification('Выберите хотя бы один зал', 'error');
+        return;
+    }
+    
     const data = {
         name: document.getElementById('st-name').value,
         nickname: document.getElementById('st-nickname').value,
         phone: document.getElementById('st-phone').value,
         parent_phone: document.getElementById('st-parent-phone').value,
         age: document.getElementById('st-age').value,
-        location: document.getElementById('st-location').value,
-        lesson_days: Array.from(selectedDays).join(','),
-        lesson_time: document.getElementById('st-time').value,
-        lesson_price: parseInt(document.getElementById('st-price').value) || 5000,
+        lesson_price: parseInt(document.getElementById('st-price').value) || 150,
         lessons_count: parseInt(document.getElementById('st-count').value) || 8,
+        is_unlimited: document.getElementById('st-unlimited').checked,
         subscription_start: document.getElementById('st-sub-start').value,
         subscription_end: document.getElementById('st-sub-end').value,
         notes: document.getElementById('st-notes').value,
         coach_id: coachId,
+        schedules: schedules
     };
     
     try {
@@ -1551,8 +1605,9 @@ async function viewAttendanceHistory(studentId) {
         // Create modal
         const modal = document.createElement('div');
         modal.className = 'modal';
-        modal.style.alignItems = 'flex-start';
-        modal.style.paddingTop = '20px';
+        modal.onclick = (e) => {
+            if (e.target === modal) modal.remove();
+        };
         
         let attendanceHtml = '';
         if (attendance.length === 0) {
@@ -1593,7 +1648,7 @@ async function viewAttendanceHistory(studentId) {
         }
         
         modal.innerHTML = `
-            <div class="modal-content" style="max-height: 80vh; overflow-y: auto;">
+            <div class="modal-content" style="max-height: 85vh; overflow-y: auto; display: flex; flex-direction: column;">
                 <div class="modal-header">
                     <h3>📋 История посещений</h3>
                     <button class="close-btn" onclick="this.closest('.modal').remove()">✕</button>
@@ -1623,8 +1678,12 @@ async function viewAttendanceHistory(studentId) {
                     </div>
                 </div>
                 
-                <div class="attendance-history-list">
+                <div class="attendance-history-list" style="flex: 1; overflow-y: auto; max-height: 50vh;">
                     ${attendanceHtml}
+                </div>
+                
+                <div class="modal-actions" style="margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--border);">
+                    <button class="btn-secondary" onclick="this.closest('.modal').remove()">Закрыть</button>
                 </div>
             </div>
         `;

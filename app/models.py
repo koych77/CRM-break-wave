@@ -42,7 +42,7 @@ class StudentSchedule(Base):
     
     id = Column(Integer, primary_key=True)
     student_id = Column(Integer, ForeignKey("students.id"), nullable=False)
-    location_id = Column(Integer, ForeignKey("locations.id"), nullable=False)
+    location_id = Column(Integer, ForeignKey("locations.id"), nullable=True)  # Allow null until location is selected
     days = Column(String(100), default="1,3")  # Days of week (0=Mon, 6=Sun)
     times = Column(String(500), default='{"1": "18:00", "3": "18:00"}')  # JSON: {"day": "time"}
     duration = Column(Integer, default=90)  # Minutes

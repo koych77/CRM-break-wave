@@ -1043,7 +1043,7 @@ async def send_daily_summary(coach_id: int = None):
                 
                 # Low lessons
                 if low_lessons:
-                    text += f"⚠️ <b>Мало занятий осталось ({len(low_lessons)}):</b>\n"
+                    text += f"⚠️ <b>Осталось мало занятий ({len(low_lessons)}):</b>\n"
                     for item in low_lessons:
                         lesson_word = "занятие" if item['remaining'] == 1 else "занятия"
                         text += f"  • {item['name']} — {item['remaining']} {lesson_word}\n"
@@ -1089,7 +1089,7 @@ async def send_daily_summary(coach_id: int = None):
                                 status = ""
                             text += f"  • {lesson['name']}{status}\n"
                         if len(lessons) > 5:
-                            text += f"  ... и ещё {len(lessons) - 5}\n"
+                            text += f"  ... и ещё {len(lessons) - 5} учеников\n"
                 
                 # Add action button
                 kb = InlineKeyboardMarkup(inline_keyboard=[

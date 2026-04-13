@@ -775,6 +775,11 @@ body {
 }
 
 /* Student Detail */
+#student-detail-content {
+    padding: 16px;
+    padding-bottom: 100px; /* Space for bottom content */
+}
+
 .student-header {
     text-align: center;
     margin-bottom: 24px;
@@ -1303,10 +1308,26 @@ body {
     color: var(--success);
 }
 
-/* Attendance History List */
-.attendance-history-list {
-    max-height: 400px;
+/* Attendance History Modal */
+.modal .modal-content {
+    display: flex;
+    flex-direction: column;
+    max-height: 85vh;
+}
+
+.modal .attendance-history-list {
+    flex: 1;
     overflow-y: auto;
+    max-height: 50vh;
+    padding-right: 8px;
+    -webkit-overflow-scrolling: touch;
+}
+
+.modal .modal-actions {
+    margin-top: 16px;
+    padding-top: 16px;
+    border-top: 1px solid var(--border);
+    flex-shrink: 0;
 }
 
 .attendance-history-item {
