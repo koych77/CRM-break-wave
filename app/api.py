@@ -1177,17 +1177,19 @@ async def api_bulk_attendance(request: Request):
             
             # Update lessons_remaining based on status change
             # Only deduct for "present" status, restore if changed from present to absent/sick
-            if status == "present" and old_status != "present":
-                # Deduct a lesson
-                if student.lessons_remaining > 0:
-                    student.lessons_remaining -= 1
-                # Check if now low on lessons
-                if student.lessons_remaining <= 2:
-                    students_with_low_lessons.append({
-                        "id": student.id,
-                        "name": student.name,
-                        "remaining": student.lessons_remaining
-                    })
+            # Skip for unlimited subscriptions
+            if not getattr(student, 'is_unlimited', False):
+                if status == "present" and old_status != "present":
+                    # Deduct a lesson
+                    if student.lessons_remaining > 0:
+                        student.lessons_remaining -= 1
+                    # Check if now low on lessons
+                    if student.lessons_remaining <= 2:
+                        students_with_low_lessons.append({
+                            "id": student.id,
+                            "name": student.name,
+                            "remaining": student.lessons_remaining
+                        })
             elif status != "present" and old_status == "present":
                 # Restore a lesson (changed from present to absent/sick)
                 student.lessons_remaining += 1
@@ -1330,8 +1332,8 @@ async def api_extra_attendance(request: Request):
         if not student:
             return JSONResponse({"error": "student_not_found"}, 404)
         
-        # Check remaining lessons
-        if deduct_lesson and student.lessons_remaining <= 0:
+        # Check remaining lessons (skip for unlimited subscriptions)
+        if deduct_lesson and not getattr(student, 'is_unlimited', False) and student.lessons_remaining <= 0:
             return JSONResponse({
                 "error": "no_lessons_remaining",
                 "message": "У ученика не осталось занятий в абонементе"
@@ -1350,7 +1352,7 @@ async def api_extra_attendance(request: Request):
         s.add(att)
         
         # Deduct from remaining lessons if present
-        if deduct_lesson and status == "present":
+        if deduct_lesson and status == "present" and not getattr(student, 'is_unlimited', False):
             student.lessons_remaining = max(0, student.lessons_remaining - 1)
         
         await s.commit()
@@ -1574,8 +1576,8 @@ async def api_add_student_to_current_lesson(request: Request):
             )
             s.add(att)
             
-            # Deduct lesson if present
-            if student.lessons_remaining > 0:
+            # Deduct lesson if present (skip for unlimited)
+            if not getattr(student, 'is_unlimited', False) and student.lessons_remaining > 0:
                 student.lessons_remaining -= 1
             
             await s.commit()
