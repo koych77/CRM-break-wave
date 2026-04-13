@@ -410,8 +410,10 @@ async def api_students(request: Request):
     coach_filter = body.get("coach_id")  # Filter by specific coach
     
     async with async_session() as s:
-        # Build query
-        query = select(Student, Coach).join(Coach)
+        # Build query with eager loading for schedules
+        query = select(Student, Coach).join(Coach).options(
+            selectinload(Student.schedules).selectinload(StudentSchedule.location)
+        )
         
         if coach_filter:
             # Filter by specific coach
@@ -424,30 +426,50 @@ async def api_students(request: Request):
         query = query.where(Student.is_active == True).order_by(Student.name)
         result = await s.execute(query)
         rows = result.all()
-    
-    return [{
-        "id": st.id,
-        "coach_id": st.coach_id,
-        "coach_name": coach_obj.first_name if coach_obj else "Unknown",
-        "coach_username": coach_obj.username if coach_obj else None,
-        "is_my_student": st.coach_id == coach.id,
-        "name": st.name,
-        "nickname": st.nickname,
-        "phone": st.phone,
-        "parent_phone": st.parent_phone,
-        "age": st.age,
-        "location": st.location,
-        "location_id": st.location_id,
-        "lesson_days": st.lesson_days,
-        "lesson_times": st.lesson_times,
-        "lesson_price": st.lesson_price,
-        "lessons_count": st.lessons_count,
-        "lessons_remaining": st.lessons_remaining if st.lessons_remaining is not None else st.lessons_count,
-        "subscription_start": st.subscription_start.isoformat() if st.subscription_start else None,
-        "subscription_end": st.subscription_end.isoformat() if st.subscription_end else None,
-        "notes": st.notes,
-        "is_active": st.is_active,
-    } for st, coach_obj in rows]
+        
+        # Format response with schedules
+        result_list = []
+        for st, coach_obj in rows:
+            # Build schedules list
+            schedules_list = []
+            for sch in st.schedules:
+                loc_name = sch.location.name if sch.location else "Зал"
+                schedules_list.append({
+                    "id": sch.id,
+                    "location_id": sch.location_id,
+                    "location_name": loc_name,
+                    "days": sch.days,
+                    "times": sch.times,
+                    "duration": sch.duration,
+                    "is_primary": sch.is_primary
+                })
+            
+            result_list.append({
+                "id": st.id,
+                "coach_id": st.coach_id,
+                "coach_name": coach_obj.first_name if coach_obj else "Unknown",
+                "coach_username": coach_obj.username if coach_obj else None,
+                "is_my_student": st.coach_id == coach.id,
+                "name": st.name,
+                "nickname": st.nickname,
+                "phone": st.phone,
+                "parent_phone": st.parent_phone,
+                "age": st.age,
+                "location": st.location,
+                "location_id": st.location_id,
+                "lesson_days": st.lesson_days,
+                "lesson_times": st.lesson_times,
+                "lesson_price": st.lesson_price,
+                "lessons_count": st.lessons_count,
+                "lessons_remaining": st.lessons_remaining if st.lessons_remaining is not None else st.lessons_count,
+                "subscription_start": st.subscription_start.isoformat() if st.subscription_start else None,
+                "subscription_end": st.subscription_end.isoformat() if st.subscription_end else None,
+                "notes": st.notes,
+                "is_active": st.is_active,
+                "schedules": schedules_list  # Include schedules for frontend
+            })
+        
+        return result_list
 
 
 @app.post("/api/students/create")
