@@ -5,7 +5,7 @@ const tg = window.Telegram?.WebApp;
 
 // Cache busting - force reload if version changed
 const APP_VERSION_KEY = 'crm_bw_version';
-const CURRENT_VERSION = '21'; // Version 21: Fixed fallback logic - don't use lesson_days if schedules exist
+const CURRENT_VERSION = '25'; // Version 25: Remove lesson_days fallback in quick lesson - use only schedules table
 
 // Check version on load
 const savedVersion = localStorage.getItem(APP_VERSION_KEY);
@@ -1316,41 +1316,72 @@ async function loadQuickLesson() {
         });
         
         const studentsList = await res.json();
-        const dayOfWeek = new Date(date).getDay();
         
-        // Filter students who have lesson on this day (and optionally in this location)
-        let filteredStudents = studentsList.filter(s => {
-            // Check if student has schedule for this day
-            if (!s.schedules || s.schedules.length === 0) {
-                // Legacy check
-                if (!s.lesson_days) return false;
-                return s.lesson_days.split(',').includes(String(dayOfWeek));
+        // Convert JS day (0=Sun, 1=Mon) to Python weekday (0=Mon, 6=Sun)
+        const jsDay = new Date(date).getDay();
+        const pythonDay = jsDay === 0 ? 6 : jsDay - 1;
+        
+        // Filter students who have lesson on this day with their schedule info
+        // IMPORTANT: Use ONLY schedules table, ignore legacy lesson_days to avoid format confusion
+        let studentsWithSchedules = [];
+        
+        studentsList.forEach(s => {
+            // Use only new schedules table
+            if (s.schedules && s.schedules.length > 0) {
+                s.schedules.forEach(sch => {
+                    if (sch.days) {
+                        const days = sch.days.split(',').map(d => d.trim());
+                        if (days.includes(String(pythonDay))) {
+                            // Check location filter
+                            if (!locationId || sch.location_id == locationId) {
+                                // Parse times JSON to get time for this day
+                                let time = '18:00';
+                                try {
+                                    const times = JSON.parse(sch.times || '{}');
+                                    // Try to get time for specific day, fallback to first available
+                                    time = times[String(pythonDay)] || times[Object.keys(times)[0]] || '18:00';
+                                } catch (e) {
+                                    time = '18:00';
+                                }
+                                
+                                studentsWithSchedules.push({
+                                    ...s,
+                                    schedule_time: time,
+                                    schedule_location: sch.location_name || 'Зал',
+                                    schedule_location_id: sch.location_id
+                                });
+                            }
+                        }
+                    }
+                });
             }
-            return s.schedules.some(sch => sch.days && sch.days.split(',').includes(String(dayOfWeek)));
+            // Note: NO fallback to lesson_days - it can be in inconsistent format
+            // If student has no schedules, they won't appear (need to edit and save to create schedules)
         });
         
-        // Filter by location if selected
-        if (locationId) {
-            filteredStudents = filteredStudents.filter(s => 
-                s.schedules && s.schedules.some(sch => sch.location_id == locationId)
-            );
-        }
+        // Group by time
+        const byTime = {};
+        studentsWithSchedules.forEach(s => {
+            const time = s.schedule_time || '18:00';
+            if (!byTime[time]) byTime[time] = [];
+            byTime[time].push(s);
+        });
         
-        // Sort by name
-        filteredStudents.sort((a, b) => a.name.localeCompare(b.name));
+        // Sort times
+        const sortedTimes = Object.keys(byTime).sort();
         
         // Initialize attendance data
         quickAttendanceData = {};
-        filteredStudents.forEach(s => {
+        studentsWithSchedules.forEach(s => {
             quickAttendanceData[s.id] = {
                 student_id: s.id,
-                status: null, // null, present, absent, sick
+                status: null,
                 student: s
             };
         });
         
-        renderQuickLessonList(filteredStudents);
-        updateQuickStats();
+        renderQuickLessonListGrouped(byTime, sortedTimes);
+        updateQuickStats(studentsWithSchedules.length);
         
     } catch (e) {
         console.error('Quick lesson load error:', e);
@@ -1362,6 +1393,66 @@ async function loadQuickLesson() {
     }
 }
 
+function renderQuickLessonListGrouped(byTime, sortedTimes) {
+    const container = document.getElementById('quick-lesson-students');
+    
+    if (sortedTimes.length === 0) {
+        container.innerHTML = `
+            <div class="empty-state">
+                <div class="empty-state-icon">📅</div>
+                <p>Нет учеников на этот день</p>
+            </div>
+        `;
+        document.getElementById('ql-title').textContent = '✅ Отметка (0)';
+        return;
+    }
+    
+    let html = '';
+    const totalStudents = Object.values(byTime).reduce((sum, group) => sum + group.length, 0);
+    
+    sortedTimes.forEach(time => {
+        const students = byTime[time];
+        html += `
+            <div class="time-group">
+                <div class="time-group-header">
+                    <span class="time-badge">🕐 ${escapeHtml(time)}</span>
+                    <span class="count-badge">${students.length} уч.</span>
+                </div>
+                <div class="time-group-students">
+                    ${students.map((s, index) => {
+                        const remaining = s.lessons_remaining !== undefined ? s.lessons_remaining : s.lessons_count;
+                        let dotClass = 'ok';
+                        if (remaining <= 0) dotClass = 'none';
+                        else if (remaining <= 2) dotClass = 'low';
+                        
+                        const locationName = s.schedule_location || s.location || 'Зал';
+                        
+                        return `
+                            <div class="quick-student-item" data-student-id="${s.id}" onclick="toggleQuickStatus(${s.id})">
+                                <div class="quick-student-avatar">${s.name.charAt(0)}</div>
+                                <div class="quick-student-info">
+                                    <div class="quick-student-name">
+                                        ${index + 1}. ${escapeHtml(s.name)}
+                                        <span class="lessons-dot ${dotClass}"></span>
+                                    </div>
+                                    <div class="quick-student-meta">
+                                        ${remaining} занятий • 📍 ${escapeHtml(locationName)}
+                                    </div>
+                                </div>
+                                <div class="quick-student-status" id="status-${s.id}">⏳</div>
+                            </div>
+                        `;
+                    }).join('')}
+                </div>
+            </div>
+        `;
+    });
+    
+    container.innerHTML = html;
+    document.getElementById('ql-title').textContent = `✅ Отметка (${totalStudents})`;
+}
+
+// Legacy function - now calls the grouped version
 function renderQuickLessonList(students) {
     const container = document.getElementById('quick-lesson-students');
     
@@ -1447,8 +1538,8 @@ function selectAllQuick(status) {
     updateQuickStats();
 }
 
-function updateQuickStats() {
-    const total = Object.keys(quickAttendanceData).length;
+function updateQuickStats(totalOverride) {
+    const total = totalOverride || Object.keys(quickAttendanceData).length;
     const marked = Object.values(quickAttendanceData).filter(d => d.status !== null).length;
     const present = Object.values(quickAttendanceData).filter(d => d.status === 'present').length;
     

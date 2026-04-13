@@ -74,11 +74,7 @@ class StudentSchedule(Base):
             return False
         # Strip spaces to handle "5, 6" format
         day_list = [d.strip() for d in self.days.split(",")]
-        result = str(day_of_week) in day_list
-        # Debug logging
-        import logging
-        logging.getLogger(__name__).info(f"DEBUG has_lesson_on_day: days={self.days}, day_list={day_list}, checking={day_of_week}, result={result}")
-        return result
+        return str(day_of_week) in day_list
 
 
 class Student(Base):
@@ -134,16 +130,11 @@ class Student(Base):
         Student may have multiple lessons on same day at different locations.
         """
         result = []
-        import logging
-        logger = logging.getLogger(__name__)
         
         # First check new schedules table
         if self.schedules:
             for schedule in self.schedules:
-                has_lesson = schedule.has_lesson_on_day(day_of_week)
-                if 'леонов' in self.name.lower() and day_of_week == 1:
-                    logger.info(f"DEBUG get_schedules_for_day: student={self.name}, schedule_days={schedule.days}, weekday={day_of_week}, has_lesson={has_lesson}")
-                if has_lesson:
+                if schedule.has_lesson_on_day(day_of_week):
                     time = schedule.get_time_for_day(day_of_week)
                     loc_name = schedule.location.name if schedule.location else "Зал"
                     result.append({
@@ -168,9 +159,6 @@ class Student(Base):
                     "time": time,
                     "is_primary": True
                 })
-        
-        if 'леонов' in self.name.lower() and day_of_week == 1:
-            logger.info(f"DEBUG get_schedules_for_day: FINAL result count={len(result)} for {self.name}")
         
         return result
     

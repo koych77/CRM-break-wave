@@ -1021,12 +1021,14 @@ async def api_current_lesson(request: Request):
         all_students = result.scalars().all()
         
         # Find students who have lesson now (within time window)
+        # Use new multi-location schedule system
         current_lessons = []
         for student in all_students:
-            days = student.lesson_days.split(",") if student.lesson_days else []
-            if str(current_weekday) in days:
+            # Get schedules for today
+            schedules = student.get_schedules_for_day(current_weekday)
+            for sched_info in schedules:
                 # Check if within lesson time (±15 min window)
-                lesson_time = student.get_lesson_time_for_day(current_weekday)
+                lesson_time = sched_info["time"]
                 lesson_hour, lesson_min = map(int, lesson_time.split(":"))
                 lesson_start = lesson_hour * 60 + lesson_min
                 
@@ -1058,7 +1060,8 @@ async def api_current_lesson(request: Request):
                         "name": student.name,
                         "nickname": student.nickname,
                         "lesson_time": lesson_time,
-                        "lesson_duration": student.lesson_duration,
+                        "lesson_duration": sched_info.get("duration", 90),
+                        "location": sched_info.get("location_name", "Зал"),
                         "status": status,
                         "marked": lesson_exists is not None
                     })
@@ -1141,9 +1144,11 @@ async def api_bulk_attendance(request: Request):
                     old_status = att.status
                     att.status = status
                 else:
-                    # Get time for this day
+                    # Get time for this day (using new schedule system)
                     weekday = date.fromisoformat(lesson_date).weekday()
-                    lesson_time = student.get_lesson_time_for_day(weekday)
+                    schedules = student.get_schedules_for_day(weekday)
+                    lesson_time = schedules[0]["time"] if schedules else "18:00"
+                    
                     att = Attendance(
                         lesson_id=lesson.id,
                         student_id=student_id,
@@ -1153,15 +1158,26 @@ async def api_bulk_attendance(request: Request):
                     )
                     s.add(att)
             else:
-                # Create new lesson
+                # Create new lesson (using new schedule system)
                 weekday = date.fromisoformat(lesson_date).weekday()
-                lesson_time = student.get_lesson_time_for_day(weekday)
+                
+                # Get first schedule for this day (for time and location)
+                schedules = student.get_schedules_for_day(weekday)
+                if not schedules:
+                    continue  # Skip if no schedule for this day
+                
+                sched_info = schedules[0]  # Use first schedule
+                lesson_time = sched_info["time"]
+                location_name = sched_info.get("location_name", student.location or "Зал")
+                location_id = sched_info.get("location_id")
+                
                 lesson = Lesson(
                     coach_id=coach.id,
                     student_id=student_id,
                     date=date.fromisoformat(lesson_date),
                     time=lesson_time,
-                    location=student.location,
+                    location=location_name,
+                    location_id=location_id
                 )
                 s.add(lesson)
                 await s.flush()
@@ -1172,7 +1188,7 @@ async def api_bulk_attendance(request: Request):
                     student_id=student_id,
                     status=status,
                     attendance_date=date.fromisoformat(lesson_date),
-                    attendance_time=student.lesson_time
+                    attendance_time=lesson_time
                 )
                 s.add(att)
             
@@ -1227,37 +1243,42 @@ async def api_skip_lesson(request: Request):
         students = result.scalars().all()
         
         for student in students:
-            # Check if lesson already exists
-            existing = await s.execute(
-                select(Lesson).where(
-                    Lesson.student_id == student.id,
-                    Lesson.date == date.fromisoformat(lesson_date)
-                )
-            )
-            if existing.scalar_one_or_none():
-                continue  # Already marked
-            
-            # Create skipped lesson
+            # Use new schedule system
             weekday = date.fromisoformat(lesson_date).weekday()
-            lesson_time = student.get_lesson_time_for_day(weekday)
-            lesson = Lesson(
-                coach_id=coach.id,
-                student_id=student.id,
-                date=date.fromisoformat(lesson_date),
-                time=lesson_time,
-                location=student.location,
-                notes=f"Тренировка отменена: {reason}"
-            )
-            s.add(lesson)
-            await s.flush()
+            schedules = student.get_schedules_for_day(weekday)
             
-            # Mark as excused (не влияет на статистику)
-            att = Attendance(
-                lesson_id=lesson.id,
-                student_id=student.id,
-                status="excused"
-            )
-            s.add(att)
+            # Create skipped lesson for each schedule (if multiple locations)
+            for sched_info in schedules:
+                # Check if lesson already exists
+                existing = await s.execute(
+                    select(Lesson).where(
+                        Lesson.student_id == student.id,
+                        Lesson.date == date.fromisoformat(lesson_date),
+                        Lesson.time == sched_info["time"]
+                    )
+                )
+                if existing.scalar_one_or_none():
+                    continue  # Already marked
+                
+                lesson = Lesson(
+                    coach_id=coach.id,
+                    student_id=student.id,
+                    date=date.fromisoformat(lesson_date),
+                    time=sched_info["time"],
+                    location=sched_info.get("location_name", student.location or "Зал"),
+                    location_id=sched_info.get("location_id"),
+                    notes=f"Тренировка отменена: {reason}"
+                )
+                s.add(lesson)
+                await s.flush()
+                
+                # Mark as excused (не влияет на статистику)
+                att = Attendance(
+                    lesson_id=lesson.id,
+                    student_id=student.id,
+                    status="excused"
+                )
+                s.add(att)
         
         await s.commit()
         return {"success": True, "skipped": len(students)}
@@ -1771,20 +1792,20 @@ async def api_daily_summary(request: Request):
                     logger.error(f"Error processing student {student.id}: {e}")
                     continue
             
-            # Get today's lessons
+            # Get today's lessons (using new schedule system)
             weekday = today.weekday()
             today_lessons = []
             for student in students:
                 try:
-                    days = student.lesson_days.split(",") if student.lesson_days else []
-                    if str(weekday) in days:
-                        # Get time for this day
-                        lesson_time = student.get_lesson_time_for_day(weekday)
+                    # Use new multi-location schedule system
+                    schedules = student.get_schedules_for_day(weekday)
+                    for sched_info in schedules:
                         lessons_remaining = student.lessons_remaining if student.lessons_remaining is not None else student.lessons_count
                         today_lessons.append({
                             "id": student.id,
                             "name": student.name,
-                            "time": lesson_time,
+                            "time": sched_info["time"],
+                            "location": sched_info.get("location_name", "Зал"),
                             "lessons_remaining": lessons_remaining
                         })
                 except Exception as e:

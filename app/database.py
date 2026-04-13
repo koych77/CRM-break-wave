@@ -166,6 +166,9 @@ async def init_db():
     
     # Run migrations for existing databases
     await run_migrations()
+    
+    # Create indexes for performance
+    await create_indexes()
 
 
 async def run_migrations():
@@ -188,19 +191,35 @@ async def run_migrations():
         except:
             logger.info("Migrating: Adding lesson_times to students")
             await conn.execute(text('ALTER TABLE students ADD COLUMN lesson_times VARCHAR(500)'))
-            # Populate with default values
-            result = await conn.execute(text("SELECT id, lesson_days, lesson_time FROM students"))
-            rows = result.fetchall()
-            for row in rows:
-                student_id, days, time = row
-                if days:
-                    days_list = [d.strip() for d in days.split(',')]
-                    times_dict = {d: (time or '18:00') for d in days_list}
-                    times_json = json.dumps(times_dict)
-                    await conn.execute(
-                        text("UPDATE students SET lesson_times = :times WHERE id = :id"),
-                        {"times": times_json, "id": student_id}
-                    )
+            # Populate with default values from legacy data if available
+            try:
+                result = await conn.execute(text("SELECT id, lesson_days, lesson_time FROM students"))
+                rows = result.fetchall()
+                for row in rows:
+                    student_id, days, time = row
+                    if days:
+                        days_list = [d.strip() for d in days.split(',')]
+                        times_dict = {d: (time or '18:00') for d in days_list}
+                        times_json = json.dumps(times_dict)
+                        await conn.execute(
+                            text("UPDATE students SET lesson_times = :times WHERE id = :id"),
+                            {"times": times_json, "id": student_id}
+                        )
+            except:
+                # lesson_time column doesn't exist, use default values
+                logger.info("Migrating: lesson_time column not found, using defaults")
+                result = await conn.execute(text("SELECT id, lesson_days FROM students"))
+                rows = result.fetchall()
+                for row in rows:
+                    student_id, days = row
+                    if days:
+                        days_list = [d.strip() for d in days.split(',')]
+                        times_dict = {d: '18:00' for d in days_list}
+                        times_json = json.dumps(times_dict)
+                        await conn.execute(
+                            text("UPDATE students SET lesson_times = :times WHERE id = :id"),
+                            {"times": times_json, "id": student_id}
+                        )
         
         # 3. Check and add lessons_remaining to students
         try:
@@ -307,6 +326,51 @@ async def run_migrations():
             """))
         
         logger.info("Migrations completed")
+
+
+async def create_indexes():
+    """Create database indexes for better performance."""
+    async with engine.begin() as conn:
+        # Attendance indexes
+        try:
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS idx_attendance_date ON attendance(attendance_date)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS idx_attendance_student ON attendance(student_id)"))
+            logger.info("Created attendance indexes")
+        except Exception as e:
+            logger.warning(f"Could not create attendance indexes: {e}")
+        
+        # Lessons indexes
+        try:
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS idx_lessons_date ON lessons(date)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS idx_lessons_student ON lessons(student_id)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS idx_lessons_coach ON lessons(coach_id)"))
+            logger.info("Created lessons indexes")
+        except Exception as e:
+            logger.warning(f"Could not create lessons indexes: {e}")
+        
+        # Payments indexes
+        try:
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS idx_payments_status ON payments(status)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS idx_payments_student ON payments(student_id)"))
+            logger.info("Created payments indexes")
+        except Exception as e:
+            logger.warning(f"Could not create payments indexes: {e}")
+        
+        # Student schedules indexes
+        try:
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS idx_schedules_student ON student_schedules(student_id)"))
+            logger.info("Created schedules indexes")
+        except Exception as e:
+            logger.warning(f"Could not create schedules indexes: {e}")
+        
+        # Notification logs indexes
+        try:
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS idx_notif_logs_coach_date ON daily_notification_logs(coach_id, date)"))
+            logger.info("Created notification logs indexes")
+        except Exception as e:
+            logger.warning(f"Could not create notification logs indexes: {e}")
+        
+        logger.info("Indexes creation completed")
 
 
 async def get_session() -> AsyncSession:

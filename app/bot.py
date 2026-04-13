@@ -11,18 +11,39 @@ from aiogram.fsm.state import State, StatesGroup
 from sqlalchemy import select, func, and_, or_
 from datetime import datetime, date, timedelta
 from app.database import async_session
-from app.models import Coach, Student, Lesson, Attendance, Payment, AdminUser
+from app.models import Coach, Student, Lesson, Attendance, Payment, AdminUser, StudentSchedule
 from app.config import BOT_TOKEN, ADMIN_IDS, ADMIN_SECRET, WEBAPP_URL
 
 
-# Helper function to get lesson time for a specific day
+# Helper function to get lesson time for a specific day (using new schedule system)
 def get_lesson_time_for_day(student: Student, day_of_week: int) -> str:
-    """Get lesson time for specific day from lesson_times JSON."""
+    """Get lesson time for specific day from student schedules."""
+    # First check new schedules table
+    if student.schedules:
+        for schedule in student.schedules:
+            if schedule.has_lesson_on_day(day_of_week):
+                return schedule.get_time_for_day(day_of_week)
+    
+    # Fallback to legacy lesson_times
     try:
         times = json.loads(student.lesson_times or '{}')
         return times.get(str(day_of_week), times.get('default', '18:00'))
     except:
         return '18:00'
+
+
+def student_has_lesson_on_day(student: Student, day_of_week: int) -> bool:
+    """Check if student has lesson on given day using new schedule system."""
+    # First check new schedules table
+    if student.schedules:
+        return any(schedule.has_lesson_on_day(day_of_week) for schedule in student.schedules)
+    
+    # Fallback to legacy lesson_days
+    if student.lesson_days:
+        days = [d.strip() for d in student.lesson_days.split(",")]
+        return str(day_of_week) in days
+    
+    return False
 
 logger = logging.getLogger(__name__)
 
@@ -165,12 +186,13 @@ async def cmd_start(message: Message):
         )
         students = result.scalars().all()
         
-        # Group by time and check for unmarked
+        # Group by time and check for unmarked (using new schedule system)
         groups = {}
         for st in students:
-            days = st.lesson_days.split(",") if st.lesson_days else []
-            if str(current_weekday) in days:
-                time_key = get_lesson_time_for_day(st, current_weekday)
+            # Use new schedule system
+            schedules = st.get_schedules_for_day(current_weekday)
+            for sched_info in schedules:
+                time_key = sched_info["time"]
                 lesson_hour, lesson_min = map(int, time_key.split(":"))
                 lesson_start = lesson_hour * 60 + lesson_min
                 now_total = now.hour * 60 + now.minute
@@ -368,12 +390,13 @@ async def cmd_now(message: Message):
         )
         students = result.scalars().all()
         
-        # Group by time
+        # Group by time (using new schedule system)
         groups = {}
         for st in students:
-            days = st.lesson_days.split(",") if st.lesson_days else []
-            if str(current_weekday) in days:
-                time_key = get_lesson_time_for_day(st, current_weekday)
+            # Use new schedule system
+            schedules = st.get_schedules_for_day(current_weekday)
+            for sched_info in schedules:
+                time_key = sched_info["time"]
                 if time_key not in groups:
                     groups[time_key] = []
                 
@@ -554,12 +577,13 @@ async def cb_quick_attendance(callback: CallbackQuery):
         )
         students = result.scalars().all()
         
-        # Filter students for current time
+        # Filter students for current time (using new schedule system)
         current_students = []
         for st in students:
-            days = st.lesson_days.split(",") if st.lesson_days else []
-            if str(current_weekday) in days:
-                lesson_time = get_lesson_time_for_day(st, current_weekday)
+            # Use new schedule system
+            schedules = st.get_schedules_for_day(current_weekday)
+            for sched_info in schedules:
+                lesson_time = sched_info["time"]
                 lesson_hour, lesson_min = map(int, lesson_time.split(":"))
                 lesson_start = lesson_hour * 60 + lesson_min
                 now_total = now.hour * 60 + now.minute
@@ -793,9 +817,10 @@ async def cb_skip_group_reason(callback: CallbackQuery):
         
         skipped_count = 0
         for student in students:
-            days = student.lesson_days.split(",") if student.lesson_days else []
-            if str(current_weekday) in days:
-                student_time = get_lesson_time_for_day(student, current_weekday)
+            # Use new schedule system
+            schedules = student.get_schedules_for_day(current_weekday)
+            for sched_info in schedules:
+                student_time = sched_info["time"]
                 if student_time == time_key:
                     # Check if already marked
                     existing = await s.execute(
@@ -813,7 +838,7 @@ async def cb_skip_group_reason(callback: CallbackQuery):
                         student_id=student.id,
                         date=today,
                         time=time_key,
-                        location=student.location,
+                        location=sched_info.get("location_name", student.location),
                         notes=f"Отмена: {reason_text}"
                     )
                     s.add(lesson)
