@@ -5,7 +5,7 @@ const tg = window.Telegram?.WebApp;
 
 // Cache busting - force reload if version changed
 const APP_VERSION_KEY = 'crm_bw_version';
-const CURRENT_VERSION = '13'; // Version 13: Fixed calendar to show scheduled lessons, not just marked ones
+const CURRENT_VERSION = '14'; // Version 14: Calendar shows schedule + attendance status (present/absent/sick)
 
 // Check version on load
 const savedVersion = localStorage.getItem(APP_VERSION_KEY);
@@ -1008,19 +1008,66 @@ function selectCalendarDay(day, element) {
             <p style="color: var(--text-muted); margin-top: 8px;">Нет занятий</p>
         `;
     } else {
-        container.innerHTML = `
-            <h4>${day} ${document.getElementById('calendar-month').textContent}</h4>
-            <div style="margin-top: 12px;">
-                ${lessons.map(l => `
-                    <div class="list-item" style="margin-bottom: 8px;" onclick="openLessonDetail(${l.id})">
-                        <div class="list-item-header">
-                            <span class="list-item-title">${escapeHtml(l.time || '—')}</span>
-                        </div>
-                        <div class="list-item-subtitle">${escapeHtml(l.student_name)}</div>
+        // Group by time
+        const byTime = {};
+        lessons.forEach(l => {
+            const time = l.time || '—';
+            if (!byTime[time]) byTime[time] = [];
+            byTime[time].push(l);
+        });
+        
+        let html = `<h4>${day} ${document.getElementById('calendar-month').textContent}</h4>`;
+        
+        // Show lessons grouped by time
+        Object.keys(byTime).sort().forEach(time => {
+            const students = byTime[time];
+            const markedCount = students.filter(s => s.is_marked).length;
+            
+            html += `
+                <div style="margin-top: 16px; margin-bottom: 8px;">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                        <span style="font-weight: 600; color: var(--accent);">🕐 ${escapeHtml(time)}</span>
+                        <span style="font-size: 12px; color: var(--text-muted);">
+                            ${markedCount > 0 ? `✓ ${markedCount}/${students.length}` : `${students.length} уч.`}
+                        </span>
                     </div>
-                `).join('')}
-            </div>
-        `;
+                    <div style="display: flex; flex-direction: column; gap: 8px;">
+                        ${students.map(s => {
+                            let statusIcon = '⏳'; // Not marked
+                            let statusColor = 'var(--text-muted)';
+                            if (s.status === 'present') {
+                                statusIcon = '✅';
+                                statusColor = 'var(--success)';
+                            } else if (s.status === 'absent') {
+                                statusIcon = '❌';
+                                statusColor = 'var(--danger)';
+                            } else if (s.status === 'sick') {
+                                statusIcon = '🤒';
+                                statusColor = 'var(--warning)';
+                            }
+                            
+                            return `
+                                <div class="list-item" style="margin-bottom: 0; cursor: pointer;" 
+                                     onclick="openStudentDetail(${s.student_id})">
+                                    <div class="list-item-header">
+                                        <span class="list-item-title">${escapeHtml(s.student_name)}</span>
+                                        <span style="color: ${statusColor}; font-size: 16px;">${statusIcon}</span>
+                                    </div>
+                                    <div class="list-item-subtitle">
+                                        ${s.location || 'Зал'} 
+                                        ${s.status === 'present' ? '• Присутствовал' : 
+                                          s.status === 'absent' ? '• Отсутствовал' : 
+                                          s.status === 'sick' ? '• Болел' : '• Не отмечен'}
+                                    </div>
+                                </div>
+                            `;
+                        }).join('')}
+                    </div>
+                </div>
+            `;
+        });
+        
+        container.innerHTML = html;
     }
     
     // Highlight selected day

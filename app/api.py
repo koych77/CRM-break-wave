@@ -1266,7 +1266,7 @@ async def api_skip_lesson(request: Request):
 
 @app.post("/api/calendar")
 async def api_calendar(request: Request):
-    """Get calendar data with scheduled lessons (not just marked ones)."""
+    """Get calendar data with scheduled lessons and attendance status."""
     body = await request.json()
     coach = await get_current_coach(body.get("initData", ""))
     if not coach:
@@ -1292,6 +1292,29 @@ async def api_calendar(request: Request):
         )
         students = result.scalars().all()
         
+        # Get marked lessons for this period (for attendance status)
+        lessons_result = await s.execute(
+            select(Lesson, Attendance).outerjoin(
+                Attendance, 
+                and_(Lesson.id == Attendance.lesson_id, Lesson.student_id == Attendance.student_id)
+            ).where(
+                Lesson.coach_id == coach.id,
+                Lesson.date >= month_start,
+                Lesson.date <= month_end
+            )
+        )
+        
+        # Build attendance lookup: {(student_id, date): status}
+        attendance_lookup = {}
+        for lesson, att in lessons_result.all():
+            key = (lesson.student_id, lesson.date.day)
+            status = att.status if att else None
+            attendance_lookup[key] = {
+                "status": status,
+                "lesson_id": lesson.id,
+                "time": lesson.time
+            }
+        
         # Build schedule for each day
         days = {}
         current_date = month_start
@@ -1305,13 +1328,19 @@ async def api_calendar(request: Request):
                 # Use new schedule system
                 schedules = student.get_schedules_for_day(weekday)
                 for sched_info in schedules:
+                    # Check if already marked
+                    att_key = (student.id, day)
+                    att_info = attendance_lookup.get(att_key, {})
+                    
                     day_lessons.append({
-                        "id": student.id,  # Use student id as reference
+                        "id": student.id,
                         "time": sched_info["time"],
                         "student_name": student.name,
                         "student_id": student.id,
                         "location": sched_info.get("location_name", "Зал"),
-                        "is_scheduled": True
+                        "status": att_info.get("status"),  # present, absent, sick, or None
+                        "lesson_id": att_info.get("lesson_id"),
+                        "is_marked": att_info.get("status") is not None
                     })
             
             if day_lessons:
