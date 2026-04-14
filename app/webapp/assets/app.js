@@ -5,7 +5,7 @@ const tg = window.Telegram?.WebApp;
 
 // Cache busting - force reload if version changed
 const APP_VERSION_KEY = 'crm_bw_version';
-const CURRENT_VERSION = '33'; // Version 33: Fixed unlimited subscription display and bot reminder scheduler
+const CURRENT_VERSION = '34'; // Version 34: Fix 500 error on students list, fix bot reminder scheduler greenlet_spawn
 
 // Check version on load
 const savedVersion = localStorage.getItem(APP_VERSION_KEY);

@@ -444,14 +444,15 @@ async def api_students(request: Request):
             await recalculate_student_subscription(st.id, s)
         await s.commit()
         
-        # Force reload student objects from DB after commit to ensure we return updated values
-        reloaded_rows = []
-        for st, coach_obj in rows:
-            s.expire(st)
-            result = await s.execute(select(Student).where(Student.id == st.id))
-            fresh_st = result.scalar_one()
-            reloaded_rows.append((fresh_st, coach_obj))
-        rows = reloaded_rows
+        # Reload all students with fresh data after commit
+        student_ids = [st.id for st, _ in rows]
+        if student_ids:
+            result = await s.execute(
+                select(Student, Coach).join(Coach).options(
+                    selectinload(Student.schedules).selectinload(StudentSchedule.location)
+                ).where(Student.id.in_(student_ids)).order_by(Student.name)
+            )
+            rows = result.all()
         
         # Format response with schedules
         result_list = []
@@ -678,9 +679,12 @@ async def api_get_student(student_id: int, request: Request):
         
         await s.commit()
         
-        # Force reload student from DB to guarantee fresh subscription fields
-        s.expire(st)
-        result = await s.execute(select(Student).where(Student.id == student_id))
+        # Reload fresh student data with schedules after commit
+        result = await s.execute(
+            select(Student).options(
+                selectinload(Student.schedules).selectinload(StudentSchedule.location)
+            ).where(Student.id == student_id)
+        )
         st = result.scalar_one()
         
         return {

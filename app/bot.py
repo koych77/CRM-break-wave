@@ -13,7 +13,7 @@ from sqlalchemy import select, func, and_, or_
 from sqlalchemy.orm import selectinload
 from datetime import datetime, date, timedelta
 from app.database import async_session
-from app.models import Coach, Student, Lesson, Attendance, Payment, AdminUser, StudentSchedule
+from app.models import Coach, Student, Lesson, Attendance, Payment, AdminUser, StudentSchedule, Notification
 from app.config import BOT_TOKEN, ADMIN_IDS, ADMIN_SECRET, WEBAPP_URL
 
 
@@ -1219,8 +1219,6 @@ async def cmd_summary(message: Message):
 
 async def lesson_reminder_scheduler():
     """Background task: check for unmarked lessons every 5 minutes."""
-    from app.models import Notification
-    
     while True:
         try:
             await asyncio.sleep(300)  # 5 minutes
@@ -1230,8 +1228,10 @@ async def lesson_reminder_scheduler():
             current_date = now.date()
             
             async with async_session() as s:
-                # Get all coaches
-                coaches_result = await s.execute(select(Coach).where(Coach.is_active == True))
+                # Get all coaches with notifications eager-loaded to avoid greenlet_spawn on cascade
+                coaches_result = await s.execute(
+                    select(Coach).options(selectinload(Coach.notifications)).where(Coach.is_active == True)
+                )
                 coaches = coaches_result.scalars().all()
                 
                 for coach in coaches:
