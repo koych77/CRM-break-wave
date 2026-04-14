@@ -439,6 +439,11 @@ async def api_students(request: Request):
         result = await s.execute(query)
         rows = result.all()
         
+        # Recalculate subscriptions for all students to ensure consistency
+        for st, _ in rows:
+            await recalculate_student_subscription(st.id, s)
+        await s.commit()
+        
         # Format response with schedules
         result_list = []
         for st, coach_obj in rows:
@@ -605,7 +610,7 @@ async def api_get_student(student_id: int, request: Request):
         
         # Recalculate subscription to ensure consistency before returning
         await recalculate_student_subscription(student_id, s)
-        await s.refresh(st)
+        # Note: do NOT refresh(st) here — it would overwrite in-memory changes with stale DB data before commit
         
         # Get payments
         payments_result = await s.execute(
