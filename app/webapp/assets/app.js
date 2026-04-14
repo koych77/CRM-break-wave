@@ -5,7 +5,7 @@ const tg = window.Telegram?.WebApp;
 
 // Cache busting - force reload if version changed
 const APP_VERSION_KEY = 'crm_bw_version';
-const CURRENT_VERSION = '35'; // Version 35: All notifications use Belarus time (UTC+3), daily summary at 10:00
+const CURRENT_VERSION = '36'; // Version 36: Raw SQL UPDATE for subscription recalculation, fix unlimited display
 
 // Check version on load
 const savedVersion = localStorage.getItem(APP_VERSION_KEY);

@@ -3,7 +3,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse, HTMLResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
-from sqlalchemy import select, func, and_, or_, desc, delete
+from sqlalchemy import select, func, and_, or_, desc, delete, update
 from contextlib import asynccontextmanager
 from datetime import datetime, date, timedelta
 from zoneinfo import ZoneInfo
@@ -441,21 +441,6 @@ async def api_students(request: Request):
         query = query.where(Student.is_active == True).order_by(Student.name)
         result = await s.execute(query)
         rows = result.all()
-        
-        # Recalculate subscriptions for all students to ensure consistency
-        for st, _ in rows:
-            await recalculate_student_subscription(st.id, s)
-        await s.commit()
-        
-        # Reload all students with fresh data after commit
-        student_ids = [st.id for st, _ in rows]
-        if student_ids:
-            result = await s.execute(
-                select(Student, Coach).join(Coach).options(
-                    selectinload(Student.schedules).selectinload(StudentSchedule.location)
-                ).where(Student.id.in_(student_ids)).order_by(Student.name)
-            )
-            rows = result.all()
         
         # Format response with schedules
         result_list = []
@@ -1061,12 +1046,8 @@ async def api_update_attendance(lesson_id: int, request: Request):
 # === Payments ===
 
 async def recalculate_student_subscription(student_id: int, session):
-    """Recalculate student's subscription based on all paid payments."""
+    """Recalculate student's subscription based on all paid payments using raw UPDATE."""
     from sqlalchemy import func
-    
-    student = await session.get(Student, student_id)
-    if not student:
-        return
     
     # Get all paid payments for this student (newest first by created_at, then by id)
     payments_result = await session.execute(
@@ -1077,35 +1058,53 @@ async def recalculate_student_subscription(student_id: int, session):
     )
     paid_payments = payments_result.scalars().all()
     
-    # Count used lessons (only 'present' attendance)
-    used_result = await session.execute(
-        select(func.count(Attendance.id)).where(
-            Attendance.student_id == student_id,
-            Attendance.status == "present"
-        )
-    )
-    used_lessons = used_result.scalar() or 0
+    logger.info(f"Recalculate subscription for student {student_id}: found {len(paid_payments)} paid payments")
     
     if paid_payments:
         last_payment = paid_payments[0]
-        student.subscription_start = last_payment.period_start
-        student.subscription_end = last_payment.period_end
+        logger.info(f"Last payment id={last_payment.id}, is_unlimited={last_payment.is_unlimited}, status={last_payment.status}")
         
         if last_payment.is_unlimited:
-            student.is_unlimited = True
-            student.lessons_count = 0
-            student.lessons_remaining = 0
+            await session.execute(
+                update(Student).where(Student.id == student_id).values(
+                    is_unlimited=True,
+                    lessons_count=0,
+                    lessons_remaining=0,
+                    subscription_start=last_payment.period_start,
+                    subscription_end=last_payment.period_end
+                )
+            )
+            logger.info(f"Student {student_id} set to UNLIMITED")
         else:
+            used_result = await session.execute(
+                select(func.count(Attendance.id)).where(
+                    Attendance.student_id == student_id,
+                    Attendance.status == "present"
+                )
+            )
+            used_lessons = used_result.scalar() or 0
             total_lessons = sum(p.lessons_count or 0 for p in paid_payments)
-            student.is_unlimited = False
-            student.lessons_count = total_lessons
-            student.lessons_remaining = total_lessons - used_lessons
+            await session.execute(
+                update(Student).where(Student.id == student_id).values(
+                    is_unlimited=False,
+                    lessons_count=total_lessons,
+                    lessons_remaining=total_lessons - used_lessons,
+                    subscription_start=last_payment.period_start,
+                    subscription_end=last_payment.period_end
+                )
+            )
+            logger.info(f"Student {student_id} set to regular: {total_lessons - used_lessons} remaining")
     else:
-        student.is_unlimited = False
-        student.lessons_count = 0
-        student.lessons_remaining = 0
-        student.subscription_start = None
-        student.subscription_end = None
+        await session.execute(
+            update(Student).where(Student.id == student_id).values(
+                is_unlimited=False,
+                lessons_count=0,
+                lessons_remaining=0,
+                subscription_start=None,
+                subscription_end=None
+            )
+        )
+        logger.info(f"Student {student_id} reset to no subscription")
     
     await session.flush()
 
