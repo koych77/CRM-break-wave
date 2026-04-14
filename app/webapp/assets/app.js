@@ -1318,7 +1318,7 @@ async function savePayment() {
         notes: document.getElementById('pay-notes').value,
     };
     
-    console.log('savePayment payload data:', data, 'editingPaymentId:', editingPaymentId);
+    console.log('savePayment payload JSON:', JSON.stringify(data), 'editingPaymentId:', editingPaymentId);
     
     if (!data.student_id || !data.amount) {
         showNotification('Заполните обязательные поля', 'error');
@@ -1345,11 +1345,13 @@ async function savePayment() {
             ? `${API}/api/payments/${editingPaymentId}/update`
             : `${API}/api/payments/create`;
         
+        console.log('savePayment fetching url:', url);
         const res = await fetch(url, {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({initData, payment: data})
         });
+        console.log('savePayment response status:', res.status);
         
         const result = await res.json();
         
