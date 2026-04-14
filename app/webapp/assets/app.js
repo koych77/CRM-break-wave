@@ -516,11 +516,13 @@ function renderStudentsList(list) {
         
         // Check lessons remaining
         let lessonsBadge = '';
-        const remaining = s.lessons_remaining !== undefined ? s.lessons_remaining : s.lessons_count;
-        if (remaining <= 0) {
+        const remaining = getStudentRemainingLessons(s);
+        if (!s.is_unlimited && remaining <= 0) {
             lessonsBadge = '<span class="list-item-badge danger">Нет занятий</span>';
-        } else if (remaining <= 2) {
+        } else if (!s.is_unlimited && remaining <= 2) {
             lessonsBadge = `<span class="list-item-badge warning">${remaining} занятия</span>`;
+        } else if (s.is_unlimited) {
+            lessonsBadge = '<span class="list-item-badge" style="background: rgba(123, 92, 255, 0.15); color: var(--accent);">♾️ Безлимит</span>';
         }
         
         // Get coach badge (my vs other)
@@ -543,7 +545,8 @@ function renderStudentsList(list) {
         }
         
         // Lessons indicator
-        const lessonsIndicator = `<span class="lessons-indicator ${remaining <= 2 ? 'low' : remaining <= 0 ? 'none' : ''}">${remaining}/${s.lessons_count || 8}</span>`;
+        const indicatorClass = s.is_unlimited ? '' : (remaining <= 2 ? 'low' : remaining <= 0 ? 'none' : '');
+        const lessonsIndicator = `<span class="lessons-indicator ${indicatorClass}">${getStudentLessonsDisplay(s)}</span>`;
         
         return `
             <div class="list-item" onclick="openStudentDetail(${s.id})">
@@ -641,14 +644,14 @@ async function openStudentDetail(id) {
         }
         
         // Lessons remaining
-        const remaining = student.lessons_remaining !== undefined ? student.lessons_remaining : student.lessons_count;
-        const total = student.lessons_count || 8;
-        const used = total - remaining;
+        const remaining = getStudentRemainingLessons(student);
+        const total = student.lessons_count || 0;
+        const used = Math.max(0, total - (Number.isFinite(remaining) ? remaining : 0));
         let lessonsAlert = '';
         
-        if (remaining <= 0) {
+        if (!student.is_unlimited && remaining <= 0) {
             lessonsAlert = '<div class="alert-danger">Занятия закончились! Требуется оплата.</div>';
-        } else if (remaining <= 2) {
+        } else if (!student.is_unlimited && remaining <= 2) {
             lessonsAlert = `<div class="alert-warning">Осталось ${remaining} занятия. Пора оплачивать!</div>`;
         }
         
@@ -1303,10 +1306,11 @@ function addPaymentForStudent(studentId) {
 
 async function savePayment() {
     const isUnlimited = document.getElementById('pay-unlimited').checked;
+    const lessonsCount = parseInt(document.getElementById('pay-count').value, 10) || 0;
     const data = {
         student_id: parseInt(document.getElementById('pay-student').value),
         amount: parseInt(document.getElementById('pay-amount').value),
-        lessons_count: isUnlimited ? 0 : (parseInt(document.getElementById('pay-count').value) || 0),
+        lessons_count: isUnlimited ? 0 : lessonsCount,
         period_start: document.getElementById('pay-start').value,
         period_end: document.getElementById('pay-end').value,
         status: document.getElementById('pay-status').value,
@@ -1316,6 +1320,21 @@ async function savePayment() {
     
     if (!data.student_id || !data.amount) {
         showNotification('Заполните обязательные поля', 'error');
+        return;
+    }
+
+    if (!isUnlimited && data.lessons_count <= 0) {
+        showNotification('Укажите количество занятий', 'error');
+        return;
+    }
+
+    if (!data.period_start || !data.period_end) {
+        showNotification('Укажите период действия абонемента', 'error');
+        return;
+    }
+
+    if (data.period_end < data.period_start) {
+        showNotification('Дата окончания не может быть раньше даты начала', 'error');
         return;
     }
     
@@ -1518,10 +1537,10 @@ function renderQuickLessonListGrouped(byTime, sortedTimes) {
                 </div>
                 <div class="time-group-students">
                     ${students.map((s, index) => {
-                        const remaining = s.lessons_remaining !== undefined ? s.lessons_remaining : s.lessons_count;
+                        const remaining = getStudentRemainingLessons(s);
                         let dotClass = 'ok';
-                        if (remaining <= 0) dotClass = 'none';
-                        else if (remaining <= 2) dotClass = 'low';
+                        if (!s.is_unlimited && remaining <= 0) dotClass = 'none';
+                        else if (!s.is_unlimited && remaining <= 2) dotClass = 'low';
                         
                         const locationName = s.schedule_location || s.location || 'Зал';
                         
@@ -1534,7 +1553,7 @@ function renderQuickLessonListGrouped(byTime, sortedTimes) {
                                         <span class="lessons-dot ${dotClass}"></span>
                                     </div>
                                     <div class="quick-student-meta">
-                                        ${remaining} занятий • 📍 ${escapeHtml(locationName)}
+                                        ${getStudentLessonsMeta(s)} • 📍 ${escapeHtml(locationName)}
                                     </div>
                                 </div>
                                 <div class="quick-student-status" id="status-${s.id}">⏳</div>
@@ -1565,10 +1584,10 @@ function renderQuickLessonList(students) {
     }
     
     container.innerHTML = students.map((s, index) => {
-        const remaining = s.lessons_remaining !== undefined ? s.lessons_remaining : s.lessons_count;
+        const remaining = getStudentRemainingLessons(s);
         let dotClass = 'ok';
-        if (remaining <= 0) dotClass = 'none';
-        else if (remaining <= 2) dotClass = 'low';
+        if (!s.is_unlimited && remaining <= 0) dotClass = 'none';
+        else if (!s.is_unlimited && remaining <= 2) dotClass = 'low';
         
         return `
             <div class="quick-student-item" data-student-id="${s.id}" onclick="toggleQuickStatus(${s.id})">
@@ -1578,7 +1597,7 @@ function renderQuickLessonList(students) {
                         ${index + 1}. ${escapeHtml(s.name)}
                         <span class="lessons-dot ${dotClass}"></span>
                     </div>
-                    <div class="quick-student-meta">${remaining} занятий</div>
+                    <div class="quick-student-meta">${getStudentLessonsMeta(s)}</div>
                 </div>
                 <div class="quick-student-status" id="status-${s.id}">⏳</div>
             </div>
@@ -2000,8 +2019,8 @@ async function viewAttendanceHistory(studentId) {
                 <div class="student-summary">
                     <div class="summary-row">
                         <span class="summary-name">${escapeHtml(student.name)}</span>
-                        <span class="summary-lessons ${student.lessons_remaining <= 2 ? 'warning' : ''}">
-                            ${student.lessons_remaining}/${student.lessons_count} занятий
+                        <span class="summary-lessons ${!student.is_unlimited && student.lessons_remaining <= 2 ? 'warning' : ''}">
+                            ${student.is_unlimited ? '♾️ Безлимитный абонемент' : `${student.lessons_remaining}/${student.lessons_count} занятий`}
                         </span>
                     </div>
                 </div>
@@ -2382,7 +2401,7 @@ function renderSearchResults(results) {
         <div class="list-item" onclick="openStudentDetail(${r.id}); goBack();">
             <div class="list-item-header">
                 <span class="list-item-title">${escapeHtml(r.name)}</span>
-                <span class="lessons-indicator ${r.lessons_remaining <= 2 ? 'low' : ''}">${r.lessons_remaining}</span>
+                <span class="lessons-indicator ${!r.is_unlimited && r.lessons_remaining <= 2 ? 'low' : ''}">${getStudentLessonsDisplay(r)}</span>
             </div>
             <div class="list-item-subtitle">${escapeHtml(r.nickname || '')}</div>
             <div class="list-item-meta">
@@ -2674,12 +2693,20 @@ openAddStudent = async function() {
 // Toggle unlimited lessons
 function togglePayUnlimited(checked) {
     const countGroup = document.getElementById('pay-count-group');
+    const countInput = document.getElementById('pay-count');
+    const hint = document.getElementById('pay-unlimited-hint');
     if (checked) {
         countGroup.style.display = 'none';
-        document.getElementById('pay-count').value = '';
+        countInput.value = '';
+        countInput.disabled = true;
+        countInput.required = false;
+        if (hint) hint.style.display = 'block';
     } else {
         countGroup.style.display = 'block';
-        document.getElementById('pay-count').value = '8';
+        countInput.disabled = false;
+        countInput.required = true;
+        countInput.value = countInput.value || '8';
+        if (hint) hint.style.display = 'none';
     }
 }
 
@@ -2851,6 +2878,37 @@ function formatTimes(timesStr) {
     } catch {
         return '';
     }
+}
+
+function getStudentRemainingLessons(student) {
+    if (student.is_unlimited) {
+        return Infinity;
+    }
+    if (student.lessons_remaining !== undefined && student.lessons_remaining !== null) {
+        return student.lessons_remaining;
+    }
+    return student.lessons_count || 0;
+}
+
+function getStudentLessonsDisplay(student) {
+    if (student.is_unlimited) {
+        return '♾️ Безлимит';
+    }
+
+    const remaining = getStudentRemainingLessons(student);
+    const total = student.lessons_count || 0;
+    return total > 0 ? `${remaining}/${total}` : `${remaining}`;
+}
+
+function getStudentLessonsMeta(student) {
+    if (student.is_unlimited) {
+        return '♾️ Безлимитный абонемент';
+    }
+
+    const remaining = getStudentRemainingLessons(student);
+    if (remaining <= 0) return 'Нет занятий';
+    if (remaining === 1) return '1 занятие';
+    return `${remaining} занятия`;
 }
 
 window.editStudent = openEditStudent;
