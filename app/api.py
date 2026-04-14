@@ -444,15 +444,14 @@ async def api_students(request: Request):
             await recalculate_student_subscription(st.id, s)
         await s.commit()
         
-        # Refresh student objects from DB after commit to ensure we return updated values
-        refreshed_rows = []
+        # Force reload student objects from DB after commit to ensure we return updated values
+        reloaded_rows = []
         for st, coach_obj in rows:
-            fresh_st = await s.get(Student, st.id)
-            if fresh_st:
-                refreshed_rows.append((fresh_st, coach_obj))
-            else:
-                refreshed_rows.append((st, coach_obj))
-        rows = refreshed_rows
+            s.expire(st)
+            result = await s.execute(select(Student).where(Student.id == st.id))
+            fresh_st = result.scalar_one()
+            reloaded_rows.append((fresh_st, coach_obj))
+        rows = reloaded_rows
         
         # Format response with schedules
         result_list = []
@@ -678,7 +677,11 @@ async def api_get_student(student_id: int, request: Request):
             }]
         
         await s.commit()
-        await s.refresh(st)
+        
+        # Force reload student from DB to guarantee fresh subscription fields
+        s.expire(st)
+        result = await s.execute(select(Student).where(Student.id == student_id))
+        st = result.scalar_one()
         
         return {
             "id": st.id,
@@ -1058,12 +1061,12 @@ async def recalculate_student_subscription(student_id: int, session):
     if not student:
         return
     
-    # Get all paid payments for this student
+    # Get all paid payments for this student (newest first by created_at, then by id)
     payments_result = await session.execute(
         select(Payment).where(
             Payment.student_id == student_id,
             Payment.status == "paid"
-        ).order_by(Payment.created_at)
+        ).order_by(desc(Payment.created_at), desc(Payment.id))
     )
     paid_payments = payments_result.scalars().all()
     
@@ -1077,7 +1080,7 @@ async def recalculate_student_subscription(student_id: int, session):
     used_lessons = used_result.scalar() or 0
     
     if paid_payments:
-        last_payment = paid_payments[-1]
+        last_payment = paid_payments[0]
         student.subscription_start = last_payment.period_start
         student.subscription_end = last_payment.period_end
         
@@ -1096,6 +1099,8 @@ async def recalculate_student_subscription(student_id: int, session):
         student.lessons_remaining = 0
         student.subscription_start = None
         student.subscription_end = None
+    
+    await session.flush()
 
 
 @app.post("/api/payments")
