@@ -6,7 +6,10 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from sqlalchemy import select, func, and_, or_, desc, delete
 from contextlib import asynccontextmanager
 from datetime import datetime, date, timedelta
+from zoneinfo import ZoneInfo
 from typing import Optional
+
+BELARUS_TZ = ZoneInfo('Europe/Minsk')
 import hmac
 import hashlib
 import json
