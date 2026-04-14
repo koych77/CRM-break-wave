@@ -605,6 +605,7 @@ async def api_get_student(student_id: int, request: Request):
         
         # Recalculate subscription to ensure consistency before returning
         await recalculate_student_subscription(student_id, s)
+        await s.refresh(st)
         
         # Get payments
         payments_result = await s.execute(
