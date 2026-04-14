@@ -1318,6 +1318,8 @@ async function savePayment() {
         notes: document.getElementById('pay-notes').value,
     };
     
+    console.log('savePayment payload data:', data, 'editingPaymentId:', editingPaymentId);
+    
     if (!data.student_id || !data.amount) {
         showNotification('Заполните обязательные поля', 'error');
         return;

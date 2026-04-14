@@ -1252,6 +1252,8 @@ async def api_update_payment(payment_id: int, request: Request):
         if not payment:
             return JSONResponse({"error": "not_found"}, 404)
         
+        logger.info(f"api_update_payment id={payment_id} received data: {data}")
+        
         if "amount" in data:
             payment.amount = int(data["amount"])
         if "lessons_count" in data:
