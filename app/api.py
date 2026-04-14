@@ -603,6 +603,9 @@ async def api_get_student(student_id: int, request: Request):
                 "status": att.status,
             })
         
+        # Recalculate subscription to ensure consistency before returning
+        await recalculate_student_subscription(student_id, s)
+        
         # Get payments
         payments_result = await s.execute(
             select(Payment).where(Payment.student_id == student_id).order_by(desc(Payment.created_at))
@@ -658,6 +661,8 @@ async def api_get_student(student_id: int, request: Request):
                 "is_primary": True,
                 "is_legacy": True
             }]
+        
+        await s.commit()
         
         return {
             "id": st.id,
