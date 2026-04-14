@@ -5,7 +5,7 @@ const tg = window.Telegram?.WebApp;
 
 // Cache busting - force reload if version changed
 const APP_VERSION_KEY = 'crm_bw_version';
-const CURRENT_VERSION = '29'; // Version 29: Added API for permanent student deletion (/api/students/{id}/destroy)
+const CURRENT_VERSION = '32'; // Version 32: Subscription managed via payments, unlimited plan support
 
 // Check version on load
 const savedVersion = localStorage.getItem(APP_VERSION_KEY);
