@@ -37,6 +37,18 @@ class NoCacheMiddleware(BaseHTTPMiddleware):
 logger = logging.getLogger(__name__)
 
 
+def get_student_schedule_for_time(student: Student, day_of_week: int, target_time: str | None = None) -> dict | None:
+    """Return matching schedule info for a day/time, or the primary schedule for that day."""
+    schedules = student.get_schedules_for_day(day_of_week)
+    if not schedules:
+        return None
+    if target_time:
+        for sched in schedules:
+            if sched["time"] == target_time:
+                return sched
+    return schedules[0]
+
+
 @asynccontextmanager
 async def lifespan(application: FastAPI):
     await init_db()
@@ -951,7 +963,7 @@ async def api_create_lesson(request: Request):
             coach_id=coach.id,
             student_id=student_id,
             date=date.fromisoformat(data.get("date")),
-            time=data.get("time", student.lesson_time),
+            time=data.get("time") or student.lesson_time,
             location=data.get("location", student.location),
             topic=data.get("topic"),
             notes=data.get("notes"),
@@ -964,6 +976,8 @@ async def api_create_lesson(request: Request):
             lesson_id=lesson.id,
             student_id=student_id,
             status=data.get("status", "present"),
+            attendance_date=lesson.date,
+            attendance_time=lesson.time,
             notes=data.get("attendance_notes"),
         )
         s.add(attendance)
@@ -1003,6 +1017,8 @@ async def api_update_attendance(lesson_id: int, request: Request):
                 lesson_id=lesson_id,
                 student_id=lesson.student_id,
                 status=body.get("status", "present"),
+                attendance_date=lesson.date,
+                attendance_time=lesson.time,
                 notes=body.get("notes"),
             )
             s.add(att)
@@ -1402,8 +1418,8 @@ async def api_bulk_attendance(request: Request):
                 else:
                     # Get time for this day (using new schedule system)
                     weekday = date.fromisoformat(lesson_date).weekday()
-                    schedules = student.get_schedules_for_day(weekday)
-                    lesson_time = schedules[0]["time"] if schedules else "18:00"
+                    sched_info = get_student_schedule_for_time(student, weekday, lesson.time)
+                    lesson_time = lesson.time or (sched_info["time"] if sched_info else "18:00")
                     
                     att = Attendance(
                         lesson_id=lesson.id,
@@ -1422,7 +1438,9 @@ async def api_bulk_attendance(request: Request):
                 if not schedules:
                     continue  # Skip if no schedule for this day
                 
-                sched_info = schedules[0]  # Use first schedule
+                sched_info = get_student_schedule_for_time(student, weekday, item.get("time"))
+                if not sched_info:
+                    continue
                 lesson_time = sched_info["time"]
                 location_name = sched_info.get("location_name", student.location or "Зал")
                 location_id = sched_info.get("location_id")
@@ -1534,7 +1552,9 @@ async def api_skip_lesson(request: Request):
                 att = Attendance(
                     lesson_id=lesson.id,
                     student_id=student.id,
-                    status="excused"
+                    status="excused",
+                    attendance_date=date.fromisoformat(lesson_date),
+                    attendance_time=sched_info["time"]
                 )
                 s.add(att)
         
@@ -1585,10 +1605,10 @@ async def api_calendar(request: Request):
             )
         )
         
-        # Build attendance lookup: {(student_id, date): status}
+        # Build attendance lookup: {(student_id, day, time): status}
         attendance_lookup = {}
         for lesson, att in lessons_result.all():
-            key = (lesson.student_id, lesson.date.day)
+            key = (lesson.student_id, lesson.date.day, lesson.time or "")
             status = att.status if att else None
             attendance_lookup[key] = {
                 "status": status,
@@ -1611,7 +1631,7 @@ async def api_calendar(request: Request):
                 
                 for sched_info in schedules:
                     # Check if already marked
-                    att_key = (student.id, day)
+                    att_key = (student.id, day, sched_info["time"] or "")
                     att_info = attendance_lookup.get(att_key, {})
                     
                     day_lessons.append({
@@ -1838,9 +1858,10 @@ async def api_subscription_status(student_id: int, request: Request):
         
         # Check lessons remaining
         lessons_status = "ok"
-        if student.lessons_remaining <= 0:
+        remaining = student.lessons_remaining or 0
+        if remaining <= 0:
             lessons_status = "depleted"
-        elif student.lessons_remaining <= 2:
+        elif remaining <= 2:
             lessons_status = "low"
         
         return {
@@ -1848,8 +1869,8 @@ async def api_subscription_status(student_id: int, request: Request):
             "name": student.name,
             "subscription": {
                 "total_lessons": student.lessons_count,
-                "remaining": student.lessons_remaining,
-                "used": student.lessons_count - student.lessons_remaining,
+                "remaining": remaining,
+                "used": max(0, student.lessons_count - remaining),
                 "start_date": student.subscription_start.isoformat() if student.subscription_start else None,
                 "end_date": student.subscription_end.isoformat() if student.subscription_end else None,
                 "days_until_expiry": days_until_expiry,
@@ -1931,35 +1952,43 @@ async def api_get_groups(request: Request):
     
     async with async_session() as s:
         result = await s.execute(
-            select(Student).where(
+            select(Student).options(
+                selectinload(Student.schedules).selectinload(StudentSchedule.location)
+            ).where(
                 Student.coach_id == coach.id,
                 Student.is_active == True
-            ).order_by(Student.lesson_time, Student.name)
+            ).order_by(Student.name)
         )
         students = result.scalars().all()
         
         # Group by time
         groups = {}
         for student in students:
-            time_key = student.lesson_time or "18:00"
-            if time_key not in groups:
-                groups[time_key] = {
-                    "time": time_key,
-                    "students": [],
-                    "count": 0,
-                    "low_lessons": 0
-                }
-            
-            groups[time_key]["students"].append({
-                "id": student.id,
-                "name": student.name,
-                "lessons_remaining": student.lessons_remaining,
-                "subscription_end": student.subscription_end.isoformat() if student.subscription_end else None
-            })
-            groups[time_key]["count"] += 1
-            
-            if student.lessons_remaining <= 2:
-                groups[time_key]["low_lessons"] += 1
+            weekday_times = set()
+            for day in range(7):
+                for sched_info in student.get_schedules_for_day(day):
+                    weekday_times.add(sched_info["time"])
+
+            for time_key in sorted(weekday_times or {student.lesson_time or "18:00"}):
+                if time_key not in groups:
+                    groups[time_key] = {
+                        "time": time_key,
+                        "students": [],
+                        "count": 0,
+                        "low_lessons": 0
+                    }
+
+                remaining = student.lessons_remaining if student.lessons_remaining is not None else student.lessons_count
+                groups[time_key]["students"].append({
+                    "id": student.id,
+                    "name": student.name,
+                    "lessons_remaining": remaining,
+                    "subscription_end": student.subscription_end.isoformat() if student.subscription_end else None
+                })
+                groups[time_key]["count"] += 1
+
+                if not getattr(student, "is_unlimited", False) and remaining <= 2:
+                    groups[time_key]["low_lessons"] += 1
         
         # Sort by time
         sorted_groups = sorted(groups.values(), key=lambda g: g["time"])
@@ -2623,9 +2652,7 @@ async def api_finance_summary(request: Request):
     
     async with async_session() as s:
         # Base query
-        base_query = select(Payment).where(
-            Payment.paid_at >= start_date
-        )
+        base_query = select(Payment).where(Payment.coach_id == coach.id)
         
         if location_id:
             # Join with students to filter by location
@@ -2634,6 +2661,7 @@ async def api_finance_summary(request: Request):
         # Total revenue
         revenue_result = await s.execute(
             select(func.sum(Payment.amount)).where(
+                Payment.coach_id == coach.id,
                 Payment.status == "paid",
                 Payment.paid_at >= start_date
             )
@@ -2688,6 +2716,7 @@ async def api_finance_summary(request: Request):
         # Pending payments (overdue + pending)
         pending_result = await s.execute(
             select(func.sum(Payment.amount)).where(
+                Payment.coach_id == coach.id,
                 Payment.status.in_(["pending", "overdue"]),
                 Payment.created_at >= start_date
             )
@@ -2697,6 +2726,7 @@ async def api_finance_summary(request: Request):
         # Overdue breakdown
         overdue_result = await s.execute(
             select(Payment, Student).join(Student).where(
+                Payment.coach_id == coach.id,
                 Payment.status == "overdue"
             ).order_by(desc(Payment.created_at))
         )
@@ -2766,7 +2796,10 @@ async def api_finance_debtors(request: Request):
     async with async_session() as s:
         # Get all active students with subscription info
         result = await s.execute(
-            select(Student).where(Student.is_active == True).order_by(Student.name)
+            select(Student).where(
+                Student.coach_id == coach.id,
+                Student.is_active == True
+            ).order_by(Student.name)
         )
         students = result.scalars().all()
         

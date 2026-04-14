@@ -114,6 +114,26 @@ class Student(Base):
     attendance_records = relationship("Attendance", back_populates="student", cascade="all, delete-orphan")
     payments = relationship("Payment", back_populates="student", cascade="all, delete-orphan")
     schedules = relationship("StudentSchedule", back_populates="student", cascade="all, delete-orphan")
+
+    @property
+    def lesson_time(self):
+        """Legacy compatibility accessor for code paths expecting a single lesson time."""
+        primary = self.get_primary_schedule()
+        if primary and primary.days:
+            try:
+                first_day = int(primary.days.split(",")[0].strip())
+                return primary.get_time_for_day(first_day)
+            except Exception:
+                pass
+
+        if self.lesson_days:
+            try:
+                first_day = int(self.lesson_days.split(",")[0].strip())
+                return self.get_lesson_time_for_day(first_day)
+            except Exception:
+                pass
+
+        return "18:00"
     
     def get_attendance_stats(self):
         """Calculate attendance statistics."""

@@ -48,7 +48,18 @@ def student_has_lesson_on_day(student: Student, day_of_week: int) -> bool:
 
 logger = logging.getLogger(__name__)
 
-bot = Bot(token=BOT_TOKEN)
+
+def create_bot() -> Bot:
+    """Create bot instance lazily so module import does not crash without env."""
+    if not BOT_TOKEN:
+        raise RuntimeError("BOT_TOKEN is not configured")
+    try:
+        return Bot(token=BOT_TOKEN)
+    except Exception as exc:
+        raise RuntimeError(f"Invalid BOT_TOKEN: {exc}") from exc
+
+
+bot = None
 dp = Dispatcher()
 router = Router()
 dp.include_router(router)
@@ -751,7 +762,9 @@ async def cb_skip_reason(callback: CallbackQuery):
             att = Attendance(
                 lesson_id=lesson.id,
                 student_id=student.id,
-                status="excused"
+                status="excused",
+                attendance_date=today,
+                attendance_time=lesson_time
             )
             s.add(att)
             skipped_count += 1
@@ -882,7 +895,9 @@ async def cb_skip_group_reason(callback: CallbackQuery):
                     att = Attendance(
                         lesson_id=lesson.id,
                         student_id=student.id,
-                        status="excused"
+                        status="excused",
+                        attendance_date=today,
+                        attendance_time=time_key
                     )
                     s.add(att)
                     skipped_count += 1
@@ -950,6 +965,9 @@ async def cmd_stats(message: Message):
 
 async def notify_coach_payment_due(coach_id: int, student_name: str, days_left: int):
     """Send notification to coach about ending subscription."""
+    if bot is None:
+        logger.warning("Bot is not initialized; skipping payment due notification")
+        return
     async with async_session() as s:
         coach = await s.get(Coach, coach_id)
         if not coach:
@@ -1001,6 +1019,9 @@ async def mark_notification_sent(coach_id: int, notification_type: str):
 
 async def send_daily_summary(coach_id: int = None):
     """Send daily summary to coach(es). If coach_id is None, send to all coaches."""
+    if bot is None:
+        logger.warning("Bot is not initialized; skipping daily summary")
+        return
     from app.models import DailyNotificationLog
     
     today = date.today()
@@ -1078,105 +1099,100 @@ async def send_daily_summary(coach_id: int = None):
             # Only send if there are alerts
             total_alerts = len(expired) + len(ending_soon) + len(low_lessons) + len(depleted)
             
-            if total_alerts > 0 or True:  # Send even if no alerts (for testing)
-                text = f"📊 <b>Ежедневная сводка ({today.strftime('%d.%m.%Y')})</b>\n\n"
-                
-                # Urgent: expired subscriptions
-                if expired:
-                    text += f"🚨 <b>Просрочена оплата ({len(expired)}):</b>\n"
-                    for item in expired:
-                        text += f"  • {item['name']} — {item['days']} дн. назад\n"
-                    text += "\n"
-                
-                # Ending soon
-                if ending_soon:
-                    text += f"⏰ <b>Заканчивается абонемент ({len(ending_soon)}):</b>\n"
-                    for item in ending_soon:
-                        day_word = "день" if item['days'] == 1 else "дня" if item['days'] < 5 else "дней"
-                        text += f"  • {item['name']} — {item['days']} {day_word}\n"
-                    text += "\n"
-                
-                # Depleted lessons
-                if depleted:
-                    text += f"❌ <b>Закончились занятия ({len(depleted)}):</b>\n"
-                    for item in depleted:
-                        text += f"  • {item['name']}\n"
-                    text += "\n"
-                
-                # Low lessons
-                if low_lessons:
-                    text += f"⚠️ <b>Осталось мало занятий ({len(low_lessons)}):</b>\n"
-                    for item in low_lessons:
-                        lesson_word = "занятие" if item['remaining'] == 1 else "занятия"
-                        text += f"  • {item['name']} — {item['remaining']} {lesson_word}\n"
-                    text += "\n"
-                
-                if total_alerts == 0:
-                    text += "✅ Все абонементы в порядке!\n\n"
-                
-                # Add today's schedule (using new schedule system)
-                weekday = today.weekday()
-                today_lessons = []
-                for student in students:
-                    # Use new multi-location schedule system
-                    schedules = student.get_schedules_for_day(weekday)
-                    for sched_info in schedules:
-                        today_lessons.append({
-                            "name": student.name,
-                            "time": sched_info["time"],
-                            "remaining": student.lessons_remaining if student.lessons_remaining is not None else 0,
-                            "is_unlimited": getattr(student, 'is_unlimited', False)
-                        })
-                
-                if today_lessons:
-                    # Group by time
-                    by_time = {}
-                    for lesson in today_lessons:
-                        time_key = lesson["time"]
-                        if time_key not in by_time:
-                            by_time[time_key] = []
-                        by_time[time_key].append(lesson)
-                    
-                    text += f"📅 <b>Сегодняшние тренировки ({len(today_lessons)}):</b>\n"
-                    for time_key in sorted(by_time.keys()):
-                        lessons = by_time[time_key]
-                        text += f"\n🕐 {time_key} ({len(lessons)} учеников)\n"
-                        for lesson in lessons[:5]:  # Show max 5 per group
-                            if lesson.get("is_unlimited"):
-                                status = " ♾️"  # Unlimited symbol
-                            elif lesson["remaining"] <= 0:
-                                status = " ❌"
-                            elif lesson["remaining"] <= 2:
-                                status = " ⚠️"
-                            else:
-                                status = ""
-                            text += f"  • {lesson['name']}{status}\n"
-                        if len(lessons) > 5:
-                            text += f"  ... и ещё {len(lessons) - 5} учеников\n"
-                
-                # Add action button
-                kb = InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(
-                        text="📱 Открыть CRM",
-                        web_app=WebAppInfo(url=f"{WEBAPP_URL or 'https://your-app.up.railway.app'}/")
-                    )]
-                ])
-                
-                try:
-                    await bot.send_message(coach.telegram_id, text, parse_mode="HTML", reply_markup=kb)
-                    
-                    # Mark as sent
-                    log = DailyNotificationLog(
-                        coach_id=coach.id,
-                        notification_type="daily_summary",
-                        date=today
-                    )
-                    s.add(log)
-                    await s.commit()
-                    
-                    logger.info(f"Daily summary sent to coach {coach.id}")
-                except Exception as e:
-                    logger.error(f"Failed to send daily summary to coach {coach.id}: {e}")
+            if total_alerts <= 0:
+                continue
+
+            text = f"📊 <b>Ежедневная сводка ({today.strftime('%d.%m.%Y')})</b>\n\n"
+
+            # Urgent: expired subscriptions
+            if expired:
+                text += f"🚨 <b>Просрочена оплата ({len(expired)}):</b>\n"
+                for item in expired:
+                    text += f"  • {item['name']} — {item['days']} дн. назад\n"
+                text += "\n"
+
+            # Ending soon
+            if ending_soon:
+                text += f"⏰ <b>Заканчивается абонемент ({len(ending_soon)}):</b>\n"
+                for item in ending_soon:
+                    day_word = "день" if item['days'] == 1 else "дня" if item['days'] < 5 else "дней"
+                    text += f"  • {item['name']} — {item['days']} {day_word}\n"
+                text += "\n"
+
+            # Depleted lessons
+            if depleted:
+                text += f"❌ <b>Закончились занятия ({len(depleted)}):</b>\n"
+                for item in depleted:
+                    text += f"  • {item['name']}\n"
+                text += "\n"
+
+            # Low lessons
+            if low_lessons:
+                text += f"⚠️ <b>Осталось мало занятий ({len(low_lessons)}):</b>\n"
+                for item in low_lessons:
+                    lesson_word = "занятие" if item['remaining'] == 1 else "занятия"
+                    text += f"  • {item['name']} — {item['remaining']} {lesson_word}\n"
+                text += "\n"
+
+            # Add today's schedule (using new schedule system)
+            weekday = today.weekday()
+            today_lessons = []
+            for student in students:
+                schedules = student.get_schedules_for_day(weekday)
+                for sched_info in schedules:
+                    today_lessons.append({
+                        "name": student.name,
+                        "time": sched_info["time"],
+                        "remaining": student.lessons_remaining if student.lessons_remaining is not None else 0,
+                        "is_unlimited": getattr(student, 'is_unlimited', False)
+                    })
+
+            if today_lessons:
+                by_time = {}
+                for lesson in today_lessons:
+                    time_key = lesson["time"]
+                    if time_key not in by_time:
+                        by_time[time_key] = []
+                    by_time[time_key].append(lesson)
+
+                text += f"📅 <b>Сегодняшние тренировки ({len(today_lessons)}):</b>\n"
+                for time_key in sorted(by_time.keys()):
+                    lessons = by_time[time_key]
+                    text += f"\n🕐 {time_key} ({len(lessons)} учеников)\n"
+                    for lesson in lessons[:5]:
+                        if lesson.get("is_unlimited"):
+                            status = " ♾️"
+                        elif lesson["remaining"] <= 0:
+                            status = " ❌"
+                        elif lesson["remaining"] <= 2:
+                            status = " ⚠️"
+                        else:
+                            status = ""
+                        text += f"  • {lesson['name']}{status}\n"
+                    if len(lessons) > 5:
+                        text += f"  ... и ещё {len(lessons) - 5} учеников\n"
+
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(
+                    text="📱 Открыть CRM",
+                    web_app=WebAppInfo(url=f"{WEBAPP_URL or 'https://your-app.up.railway.app'}/")
+                )]
+            ])
+
+            try:
+                await bot.send_message(coach.telegram_id, text, parse_mode="HTML", reply_markup=kb)
+
+                log = DailyNotificationLog(
+                    coach_id=coach.id,
+                    notification_type="daily_summary",
+                    date=today
+                )
+                s.add(log)
+                await s.commit()
+
+                logger.info(f"Daily summary sent to coach {coach.id}")
+            except Exception as e:
+                logger.error(f"Failed to send daily summary to coach {coach.id}: {e}")
 
 
 @router.message(Command("summary"))
@@ -1295,6 +1311,9 @@ async def lesson_reminder_scheduler():
 
 async def send_lesson_reminder(coach: Coach, students: list, time_str: str):
     """Send lesson reminder notification to coach."""
+    if bot is None:
+        logger.warning("Bot is not initialized; skipping lesson reminder")
+        return
     student_names = ", ".join([s.name for s in students[:3]])
     if len(students) > 3:
         student_names += f" и ещё {len(students) - 3}"

@@ -793,7 +793,7 @@ async function openStudentDetail(id) {
             ` : ''}
             
             <div class="action-buttons-grid">
-                <button class="btn-primary" onclick="editStudent(${student.id})">✏️ Редактировать</button>
+                <button class="btn-primary" onclick="openEditStudent(${student.id})">✏️ Редактировать</button>
                 <button class="btn-secondary" onclick="addPaymentForStudent(${student.id})">💰 Оплата</button>
                 <button class="btn-secondary" onclick="markExtraAttendance(${student.id})">⭐ Внеплановое</button>
                 <button class="btn-secondary" onclick="viewAttendanceHistory(${student.id})">📋 История</button>
@@ -847,7 +847,16 @@ async function editStudent(id) {
             const legacyDays = student.lesson_days ? student.lesson_days.split(',').map(Number) : [1, 3];
             const legacyTimes = {};
             legacyDays.forEach(d => {
-                legacyTimes[d] = student.lesson_time || '18:00';
+                if (student.lesson_times) {
+                    try {
+                        const parsedTimes = JSON.parse(student.lesson_times);
+                        legacyTimes[d] = parsedTimes[String(d)] || parsedTimes[Object.keys(parsedTimes)[0]] || '18:00';
+                    } catch (e) {
+                        legacyTimes[d] = '18:00';
+                    }
+                } else {
+                    legacyTimes[d] = '18:00';
+                }
             });
             
             currentLocationSchedules = [{
@@ -915,9 +924,7 @@ async function saveStudent() {
             // Clear cache to force refresh
             DataCache.clear();
             goBack();
-            if (currentScreen === 'students') {
-                loadStudents();
-            }
+            loadStudents();
         } else {
             showNotification('Ошибка сохранения', 'error');
         }
@@ -1329,9 +1336,7 @@ async function savePayment() {
             showNotification(editingPaymentId ? 'Оплата обновлена' : 'Оплата добавлена', 'success');
             DataCache.clear();
             goBack();
-            if (currentScreen === 'payments') {
-                loadPayments();
-            }
+            loadPayments();
         } else {
             showNotification('Ошибка сохранения', 'error');
         }
@@ -2194,9 +2199,7 @@ saveStudent = async function() {
             showNotification(editingStudentId ? 'Ученик обновлен' : 'Ученик добавлен', 'success');
             DataCache.clear();
             goBack();
-            if (currentScreen === 'students') {
-                loadStudents();
-            }
+            loadStudents();
         } else {
             showNotification('Ошибка сохранения', 'error');
         }
@@ -2740,14 +2743,26 @@ openEditStudent = async function(studentId) {
 
 // Override saveStudent to include schedules
 saveStudent = async function() {
+    const schedules = collectLocationSchedules().filter(s => s.location_id && s.days);
+    if (schedules.length === 0) {
+        showNotification('Добавьте хотя бы одно расписание с залом и днями', 'error');
+        return;
+    }
+
+    const studentName = document.getElementById('st-name').value.trim();
+    if (!studentName) {
+        showNotification('Введите имя ученика', 'error');
+        return;
+    }
+
     const studentData = {
-        name: document.getElementById('st-name').value,
+        name: studentName,
         nickname: document.getElementById('st-nickname').value || null,
         phone: document.getElementById('st-phone').value || null,
         parent_phone: document.getElementById('st-parent-phone').value || null,
         age: document.getElementById('st-age').value ? parseInt(document.getElementById('st-age').value) : null,
         notes: document.getElementById('st-notes').value || null,
-        schedules: collectLocationSchedules()
+        schedules: schedules
     };
     
     // Add coach_id for admin
@@ -2837,6 +2852,8 @@ function formatTimes(timesStr) {
         return '';
     }
 }
+
+window.editStudent = openEditStudent;
 
 
 // === Finance ===

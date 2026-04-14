@@ -18,7 +18,7 @@ if env_path.exists():
 from aiogram.types import BotCommand
 from aiogram import Bot
 from app.api import app as fastapi_app
-from app.bot import bot, dp
+from app.bot import create_bot, dp, lesson_reminder_scheduler, daily_notification_scheduler
 from app.database import init_db
 from app.config import DATA_DIR
 
@@ -33,6 +33,7 @@ async def on_startup():
     """Initialize database and bot commands."""
     await init_db()
     logger.info("Database initialized")
+    bot = create_bot()
     
     # Set bot commands
     await bot.set_my_commands([
@@ -41,6 +42,7 @@ async def on_startup():
         BotCommand(command="summary", description="Ежедневная сводка"),
         BotCommand(command="help", description="Помощь"),
     ])
+    return bot
 
 
 def run_api():
@@ -50,9 +52,12 @@ def run_api():
 
 async def run_bot():
     """Run Telegram bot with all schedulers."""
-    await on_startup()
+    bot = await on_startup()
+    asyncio.create_task(lesson_reminder_scheduler())
+    asyncio.create_task(daily_notification_scheduler())
     logger.info("Starting bot polling...")
     await dp.start_polling(bot)
+    return bot
 
 
 def main():
