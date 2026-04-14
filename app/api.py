@@ -442,6 +442,22 @@ async def api_students(request: Request):
         result = await s.execute(query)
         rows = result.all()
         
+        # Recalculate subscriptions for all students to ensure consistency
+        for st, _ in rows:
+            await recalculate_student_subscription(st.id, s)
+        await s.commit()
+        
+        # Clear identity map and reload all students fresh from DB
+        s.expunge_all()
+        student_ids = [st.id for st, _ in rows]
+        if student_ids:
+            result = await s.execute(
+                select(Student, Coach).join(Coach).options(
+                    selectinload(Student.schedules).selectinload(StudentSchedule.location)
+                ).where(Student.id.in_(student_ids)).order_by(Student.name)
+            )
+            rows = result.all()
+        
         # Format response with schedules
         result_list = []
         for st, coach_obj in rows:
@@ -666,6 +682,9 @@ async def api_get_student(student_id: int, request: Request):
             }]
         
         await s.commit()
+        
+        # Clear SQLAlchemy identity map to force fresh DB read
+        s.expunge_all()
         
         # Reload fresh student data with schedules after commit
         result = await s.execute(
