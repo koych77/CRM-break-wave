@@ -12,7 +12,10 @@ from aiogram.fsm.state import State, StatesGroup
 from sqlalchemy import select, func, and_, or_
 from sqlalchemy.orm import selectinload
 from datetime import datetime, date, timedelta
+from zoneinfo import ZoneInfo
 from app.database import async_session
+
+BELARUS_TZ = ZoneInfo('Europe/Minsk')
 from app.models import Coach, Student, Lesson, Attendance, Payment, AdminUser, StudentSchedule, Notification
 from app.config import BOT_TOKEN, ADMIN_IDS, ADMIN_SECRET, WEBAPP_URL
 
@@ -185,7 +188,7 @@ async def cmd_start(message: Message):
         return
     
     # Coach registered - check for current lessons first
-    now = datetime.now()
+    now = datetime.now(BELARUS_TZ)
     current_weekday = now.weekday()
     current_date = now.date()
     
@@ -393,7 +396,7 @@ async def cmd_now(message: Message):
         return
     
     from datetime import datetime
-    now = datetime.now()
+    now = datetime.now(BELARUS_TZ)
     current_weekday = now.weekday()
     current_date = now.date()
     
@@ -543,7 +546,7 @@ async def cb_check_payments(callback: CallbackQuery):
         await callback.answer("Нет доступа")
         return
     
-    today = date.today()
+    today = datetime.now(BELARUS_TZ).date()
     
     async with async_session() as s:
         # Find students with ending or overdue subscriptions
@@ -601,7 +604,7 @@ async def cb_quick_attendance(callback: CallbackQuery):
         return
     
     from datetime import datetime
-    now = datetime.now()
+    now = datetime.now(BELARUS_TZ)
     current_weekday = now.weekday()
     current_date = now.date()
     
@@ -719,7 +722,7 @@ async def cb_skip_reason(callback: CallbackQuery):
     from datetime import date
     from app.models import Lesson, Attendance, Student
     
-    today = date.today()
+    today = datetime.now(BELARUS_TZ).date()
     
     async with async_session() as s:
         # Get all students for this coach
@@ -847,7 +850,7 @@ async def cb_skip_group_reason(callback: CallbackQuery):
     reason_text = {"holiday": "Праздник", "sick": "Тренер болеет", "other": "Другое"}.get(reason, "Другое")
     
     from datetime import date
-    today = date.today()
+    today = datetime.now(BELARUS_TZ).date()
     current_weekday = today.weekday()
     
     async with async_session() as s:
@@ -991,7 +994,7 @@ async def should_send_daily_notification(coach_id: int, notification_type: str) 
     """Check if daily notification was already sent today."""
     from app.models import DailyNotificationLog
     
-    today = date.today()
+    today = datetime.now(BELARUS_TZ).date()
     
     async with async_session() as s:
         result = await s.execute(
@@ -1011,7 +1014,7 @@ async def mark_notification_sent(coach_id: int, notification_type: str):
     log = DailyNotificationLog(
         coach_id=coach_id,
         notification_type=notification_type,
-        date=date.today()
+        date=datetime.now(BELARUS_TZ).date()
     )
     async with async_session() as s:
         s.add(log)
@@ -1025,7 +1028,7 @@ async def send_daily_summary(coach_id: int = None):
         return
     from app.models import DailyNotificationLog
     
-    today = date.today()
+    today = datetime.now(BELARUS_TZ).date()
     
     async with async_session() as s:
         if coach_id:
@@ -1223,7 +1226,7 @@ async def lesson_reminder_scheduler():
         try:
             await asyncio.sleep(300)  # 5 minutes
             
-            now = datetime.now()
+            now = datetime.now(BELARUS_TZ)
             current_weekday = now.weekday()
             current_date = now.date()
             
@@ -1358,15 +1361,15 @@ async def daily_notification_scheduler():
     """Background task: send daily summaries at 9:00 AM."""
     while True:
         try:
-            now = datetime.now()
+            now = datetime.now(BELARUS_TZ)
             
-            # Calculate time until 9:00 AM
-            target_time = now.replace(hour=9, minute=0, second=0, microsecond=0)
+            # Calculate time until 10:00 AM (Belarus time)
+            target_time = now.replace(hour=10, minute=0, second=0, microsecond=0)
             if target_time <= now:
                 target_time += timedelta(days=1)
             
             wait_seconds = (target_time - now).total_seconds()
-            logger.info(f"Daily notification scheduler: waiting {wait_seconds/3600:.1f} hours until 9:00 AM")
+            logger.info(f"Daily notification scheduler: waiting {wait_seconds/3600:.1f} hours until 10:00 AM (Belarus time)")
             
             await asyncio.sleep(wait_seconds)
             

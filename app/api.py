@@ -173,7 +173,7 @@ async def api_dashboard(request: Request):
     if not coach:
         return JSONResponse({"error": "unauthorized"}, 403)
     
-    today = date.today()
+    today = datetime.now(BELARUS_TZ).date()
     month_start = today.replace(day=1)
     
     async with async_session() as s:
@@ -264,7 +264,7 @@ async def api_sync(request: Request):
     if not coach:
         return JSONResponse({"error": "unauthorized"}, 403)
     
-    today = date.today()
+    today = datetime.now(BELARUS_TZ).date()
     month_start = today.replace(day=1)
     
     async with async_session() as s:
@@ -1300,7 +1300,7 @@ async def api_current_lesson(request: Request):
         return JSONResponse({"error": "unauthorized"}, 403)
     
     from datetime import datetime, timedelta
-    now = datetime.now()
+    now = datetime.now(BELARUS_TZ)
     current_weekday = now.weekday()
     current_time = now.strftime("%H:%M")
     current_date = now.date()
@@ -1399,7 +1399,7 @@ async def api_bulk_attendance(request: Request):
         return JSONResponse({"error": "unauthorized"}, 403)
     
     data = body.get("attendance", [])
-    lesson_date = body.get("date", datetime.now().date().isoformat())
+    lesson_date = body.get("date", datetime.now(BELARUS_TZ).date().isoformat())
     
     if not data:
         return JSONResponse({"error": "no_data"}, 400)
@@ -1534,7 +1534,7 @@ async def api_skip_lesson(request: Request):
         return JSONResponse({"error": "unauthorized"}, 403)
     
     reason = body.get("reason", "no_training")
-    lesson_date = body.get("date", datetime.now().date().isoformat())
+    lesson_date = body.get("date", datetime.now(BELARUS_TZ).date().isoformat())
     
     async with async_session() as s:
         # Get all students for this coach with schedules eager-loaded
@@ -1602,8 +1602,8 @@ async def api_calendar(request: Request):
     if not coach:
         return JSONResponse({"error": "unauthorized"}, 403)
     
-    year = body.get("year", date.today().year)
-    month = body.get("month", date.today().month)
+    year = body.get("year", datetime.now(BELARUS_TZ).date().year)
+    month = body.get("month", datetime.now(BELARUS_TZ).date().month)
     
     # Calculate date range
     month_start = date(year, month, 1)
@@ -1696,8 +1696,8 @@ async def api_extra_attendance(request: Request):
         return JSONResponse({"error": "unauthorized"}, 403)
     
     student_id = body.get("student_id")
-    attendance_date = body.get("date", datetime.now().date().isoformat())
-    attendance_time = body.get("time", datetime.now().strftime("%H:%M"))
+    attendance_date = body.get("date", datetime.now(BELARUS_TZ).date().isoformat())
+    attendance_time = body.get("time", datetime.now(BELARUS_TZ).strftime("%H:%M"))
     status = body.get("status", "present")
     notes = body.get("notes", "")
     deduct_lesson = body.get("deduct_lesson", True)  # Whether to deduct from subscription
@@ -1873,7 +1873,7 @@ async def api_subscription_status(student_id: int, request: Request):
         if not student:
             return JSONResponse({"error": "not_found"}, 404)
         
-        today = date.today()
+        today = datetime.now(BELARUS_TZ).date()
         
         # Check subscription status
         days_until_expiry = None
@@ -1928,7 +1928,7 @@ async def api_add_student_to_current_lesson(request: Request):
     
     student_id = body.get("student_id")
     target_time = body.get("target_time")  # If None, use current time
-    lesson_date = body.get("date", datetime.now().date().isoformat())
+    lesson_date = body.get("date", datetime.now(BELARUS_TZ).date().isoformat())
     
     async with async_session() as s:
         # Verify student belongs to coach
@@ -2040,7 +2040,7 @@ async def api_daily_summary(request: Request):
         if not coach:
             return JSONResponse({"error": "unauthorized"}, 403)
         
-        today = date.today()
+        today = datetime.now(BELARUS_TZ).date()
         logger.info(f"Daily summary requested for coach {coach.id}")
         
         async with async_session() as s:
@@ -2263,7 +2263,7 @@ async def api_statistics(request: Request):
     period = body.get("period", "month")  # week, month, year, all
     location_id = body.get("location_id")
     
-    today = date.today()
+    today = datetime.now(BELARUS_TZ).date()
     
     if period == "week":
         start_date = today - timedelta(days=today.weekday())
@@ -2671,7 +2671,7 @@ async def api_finance_summary(request: Request):
     period = body.get("period", "month")  # month, year, all
     location_id = body.get("location_id")  # Filter by location
     
-    today = date.today()
+    today = datetime.now(BELARUS_TZ).date()
     
     if period == "month":
         start_date = today.replace(day=1)
@@ -2821,7 +2821,7 @@ async def api_finance_debtors(request: Request):
     if not coach:
         return JSONResponse({"error": "unauthorized"}, 403)
     
-    today = date.today()
+    today = datetime.now(BELARUS_TZ).date()
     
     async with async_session() as s:
         # Get all active students with subscription info
