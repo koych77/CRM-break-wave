@@ -1239,7 +1239,9 @@ async def lesson_reminder_scheduler():
                     time_groups = {}
                     
                     students_result = await s.execute(
-                        select(Student).where(
+                        select(Student).options(
+                            selectinload(Student.schedules).selectinload(StudentSchedule.location)
+                        ).where(
                             Student.coach_id == coach.id,
                             Student.is_active == True
                         )
