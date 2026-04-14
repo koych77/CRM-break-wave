@@ -1304,43 +1304,51 @@ function addPaymentForStudent(studentId) {
     });
 }
 
+let paymentSubmitting = false;
+
 async function savePayment() {
-    const isUnlimited = document.getElementById('pay-unlimited').checked;
-    const lessonsCount = parseInt(document.getElementById('pay-count').value, 10) || 0;
-    const data = {
-        student_id: parseInt(document.getElementById('pay-student').value),
-        amount: parseInt(document.getElementById('pay-amount').value),
-        lessons_count: isUnlimited ? 0 : lessonsCount,
-        period_start: document.getElementById('pay-start').value,
-        period_end: document.getElementById('pay-end').value,
-        status: document.getElementById('pay-status').value,
-        is_unlimited: isUnlimited,
-        notes: document.getElementById('pay-notes').value,
-    };
-    
-    console.log('savePayment payload JSON:', JSON.stringify(data), 'editingPaymentId:', editingPaymentId);
-    
-    if (!data.student_id || !data.amount) {
-        showNotification('Заполните обязательные поля', 'error');
+    if (paymentSubmitting) {
+        console.log('savePayment blocked: already submitting');
         return;
     }
-
-    if (!isUnlimited && data.lessons_count <= 0) {
-        showNotification('Укажите количество занятий', 'error');
-        return;
-    }
-
-    if (!data.period_start || !data.period_end) {
-        showNotification('Укажите период действия абонемента', 'error');
-        return;
-    }
-
-    if (data.period_end < data.period_start) {
-        showNotification('Дата окончания не может быть раньше даты начала', 'error');
-        return;
-    }
+    paymentSubmitting = true;
     
     try {
+        const isUnlimited = document.getElementById('pay-unlimited').checked;
+        const lessonsCount = parseInt(document.getElementById('pay-count').value, 10) || 0;
+        const data = {
+            student_id: parseInt(document.getElementById('pay-student').value),
+            amount: parseInt(document.getElementById('pay-amount').value),
+            lessons_count: isUnlimited ? 0 : lessonsCount,
+            period_start: document.getElementById('pay-start').value,
+            period_end: document.getElementById('pay-end').value,
+            status: document.getElementById('pay-status').value,
+            is_unlimited: isUnlimited,
+            notes: document.getElementById('pay-notes').value,
+        };
+        
+        console.log('savePayment payload JSON:', JSON.stringify(data), 'editingPaymentId:', editingPaymentId);
+        
+        if (!data.student_id || !data.amount) {
+            showNotification('Заполните обязательные поля', 'error');
+            return;
+        }
+
+        if (!isUnlimited && data.lessons_count <= 0) {
+            showNotification('Укажите количество занятий', 'error');
+            return;
+        }
+
+        if (!data.period_start || !data.period_end) {
+            showNotification('Укажите период действия абонемента', 'error');
+            return;
+        }
+
+        if (data.period_end < data.period_start) {
+            showNotification('Дата окончания не может быть раньше даты начала', 'error');
+            return;
+        }
+        
         const url = editingPaymentId 
             ? `${API}/api/payments/${editingPaymentId}/update`
             : `${API}/api/payments/create`;
@@ -1366,6 +1374,8 @@ async function savePayment() {
     } catch (e) {
         console.error('Save payment error:', e);
         showNotification('Ошибка сохранения', 'error');
+    } finally {
+        paymentSubmitting = false;
     }
 }
 

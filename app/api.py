@@ -1278,6 +1278,11 @@ async def api_update_payment(payment_id: int, request: Request):
         
         await s.commit()
         
+        logger.info(f"api_update_payment id={payment_id} after commit: is_unlimited={payment.is_unlimited}, lessons_count={payment.lessons_count}")
+        
+        # Clear SQLAlchemy identity map to force fresh DB read
+        s.expunge_all()
+        
         # Recalculate student subscription
         await recalculate_student_subscription(payment.student_id, s)
         await s.commit()
