@@ -7,6 +7,7 @@ from sqlalchemy import select, func, and_, or_, desc
 from contextlib import asynccontextmanager
 from datetime import datetime, date, timedelta
 from typing import Optional
+from dateutil.relativedelta import relativedelta
 import hmac
 import hashlib
 import json
@@ -96,6 +97,91 @@ async def get_current_coach(init_data: str):
     async with async_session() as s:
         result = await s.execute(select(Coach).where(Coach.telegram_id == user.get("id")))
         return result.scalar_one_or_none()
+
+
+async def is_admin_user(user_id: int | None) -> bool:
+    """Check whether the current Telegram user has admin access."""
+    if user_id is None:
+        return False
+    if ADMIN_IDS and user_id in ADMIN_IDS:
+        return True
+
+    async with async_session() as s:
+        result = await s.execute(select(AdminUser).where(AdminUser.telegram_id == user_id))
+        return result.scalar_one_or_none() is not None
+
+
+def get_remaining_lessons(student: Student) -> int:
+    """Return a normalized remaining lessons value for old and new records."""
+    if student.lessons_remaining is None:
+        return student.lessons_count or 0
+    return student.lessons_remaining
+
+
+def get_student_lesson_time(student: Student, lesson_date: date | None = None, day_of_week: int | None = None) -> str:
+    """Return the configured lesson time for a student on a given day."""
+    if day_of_week is None:
+        day_of_week = lesson_date.weekday() if lesson_date else date.today().weekday()
+    return student.get_lesson_time_for_day(day_of_week)
+
+
+def get_student_schedule_slots(student: Student) -> list[tuple[int, str]]:
+    """Expand student's weekly schedule into (day, time) pairs."""
+    if not student.lesson_days:
+        return []
+
+    slots: list[tuple[int, str]] = []
+    for raw_day in student.lesson_days.split(","):
+        raw_day = raw_day.strip()
+        if not raw_day:
+            continue
+        try:
+            day = int(raw_day)
+        except ValueError:
+            continue
+        slots.append((day, get_student_lesson_time(student, day_of_week=day)))
+
+    return slots
+
+
+def normalize_lesson_times_payload(lesson_times, lesson_days: str, fallback_time: str = "18:00") -> str:
+    """Normalize lesson time payloads to JSON stored in the database."""
+    if isinstance(lesson_times, str) and lesson_times.strip():
+        return lesson_times
+
+    if isinstance(lesson_times, dict):
+        return json.dumps({str(day): value for day, value in lesson_times.items() if value})
+
+    days = [day.strip() for day in (lesson_days or "1,3").split(",") if day.strip()]
+    normalized = {day: fallback_time for day in days} or {"1": fallback_time}
+    return json.dumps(normalized)
+
+
+def apply_attendance_to_balance(student: Student, old_status: str | None, new_status: str) -> None:
+    """Keep lessons_remaining consistent when attendance changes."""
+    current_remaining = get_remaining_lessons(student)
+    student.lessons_remaining = current_remaining
+
+    if new_status == "present" and old_status != "present":
+        if current_remaining > 0:
+            student.lessons_remaining = current_remaining - 1
+    elif new_status != "present" and old_status == "present":
+        student.lessons_remaining = current_remaining + 1
+
+
+def apply_paid_payment_to_student(student: Student, payment: Payment) -> None:
+    """Update subscription counters when a payment becomes paid."""
+    current_total = student.lessons_count or 0
+    current_remaining = get_remaining_lessons(student)
+
+    if payment.period_start and not student.subscription_start:
+        student.subscription_start = payment.period_start
+    if payment.period_end:
+        student.subscription_end = payment.period_end
+
+    if payment.lessons_count:
+        student.lessons_count = current_total + payment.lessons_count
+        student.lessons_remaining = current_remaining + payment.lessons_count
 
 
 # === Routes ===
@@ -195,7 +281,8 @@ async def api_dashboard(request: Request):
         total_attendance_result = await s.execute(
             select(func.count(Attendance.id)).join(Lesson).where(
                 Lesson.coach_id == coach.id,
-                Lesson.date >= month_start
+                Lesson.date >= month_start,
+                Attendance.status != "excused"
             )
         )
         total_attendance = total_attendance_result.scalar()
@@ -271,7 +358,7 @@ async def api_sync(request: Request):
             "lesson_times": st.lesson_times,
             "lesson_price": st.lesson_price,
             "lessons_count": st.lessons_count,
-            "lessons_remaining": st.lessons_remaining if st.lessons_remaining is not None else st.lessons_count,
+            "lessons_remaining": get_remaining_lessons(st),
             "subscription_start": st.subscription_start.isoformat() if st.subscription_start else None,
             "subscription_end": st.subscription_end.isoformat() if st.subscription_end else None,
             "notes": st.notes,
@@ -430,7 +517,7 @@ async def api_students(request: Request):
         "lesson_times": st.lesson_times,
         "lesson_price": st.lesson_price,
         "lessons_count": st.lessons_count,
-        "lessons_remaining": st.lessons_remaining if st.lessons_remaining is not None else st.lessons_count,
+        "lessons_remaining": get_remaining_lessons(st),
         "subscription_start": st.subscription_start.isoformat() if st.subscription_start else None,
         "subscription_end": st.subscription_end.isoformat() if st.subscription_end else None,
         "notes": st.notes,
@@ -447,9 +534,14 @@ async def api_create_student(request: Request):
         return JSONResponse({"error": "unauthorized"}, 403)
     
     data = body.get("student", {})
+    user = verify_telegram_init_data(body.get("initData", ""))
+    is_admin_actor = await is_admin_user(user.get("id") if user else None)
     
-    # Determine coach_id (admin can assign to any coach)
-    coach_id = data.get("coach_id", coach.id)
+    # Determine coach_id (only admins can assign students to another coach)
+    requested_coach_id = data.get("coach_id")
+    coach_id = requested_coach_id or coach.id
+    if coach_id != coach.id and not is_admin_actor:
+        return JSONResponse({"error": "forbidden"}, 403)
     
     # Verify coach exists
     async with async_session() as s:
@@ -458,14 +550,12 @@ async def api_create_student(request: Request):
             return JSONResponse({"error": "coach_not_found"}, 400)
         
         lessons_count = int(data.get("lessons_count", 8))
-        
-        # Handle lesson_times (JSON format: {"1": "18:00", "3": "19:30"})
-        lesson_times = data.get("lesson_times")
-        if not lesson_times:
-            # Convert from old format or use default
-            days = data.get("lesson_days", "1,3").split(",")
-            time = data.get("lesson_time", "18:00")
-            lesson_times = json.dumps({day.strip(): time for day in days})
+        lesson_days = data.get("lesson_days", "1,3")
+        lesson_times = normalize_lesson_times_payload(
+            data.get("lesson_times"),
+            lesson_days,
+            data.get("lesson_time", "18:00")
+        )
         
         student = Student(
             coach_id=coach_id,
@@ -476,11 +566,13 @@ async def api_create_student(request: Request):
             age=int(data.get("age")) if data.get("age") else None,
             location=data.get("location", "Зал Break Wave"),
             location_id=data.get("location_id"),
-            lesson_days=data.get("lesson_days", "1,3"),
+            lesson_days=lesson_days,
             lesson_times=lesson_times,
             lesson_price=int(data.get("lesson_price", 150)),
             lessons_count=lessons_count,
             lessons_remaining=lessons_count,
+            subscription_start=date.fromisoformat(data["subscription_start"]) if data.get("subscription_start") else None,
+            subscription_end=date.fromisoformat(data["subscription_end"]) if data.get("subscription_end") else None,
             notes=data.get("notes") or None,
         )
         s.add(student)
@@ -553,7 +645,7 @@ async def api_get_student(student_id: int, request: Request):
             "lesson_times": st.lesson_times,
             "lesson_price": st.lesson_price,
             "lessons_count": st.lessons_count,
-            "lessons_remaining": st.lessons_remaining if st.lessons_remaining is not None else st.lessons_count,
+            "lessons_remaining": get_remaining_lessons(st),
             "subscription_start": st.subscription_start.isoformat() if st.subscription_start else None,
             "subscription_end": st.subscription_end.isoformat() if st.subscription_end else None,
             "notes": st.notes,
@@ -599,18 +691,17 @@ async def api_update_student(student_id: int, request: Request):
         if "lesson_days" in data:
             student.lesson_days = data["lesson_days"]
         if "lesson_times" in data:
-            student.lesson_times = json.dumps(data["lesson_times"]) if isinstance(data["lesson_times"], dict) else data["lesson_times"]
+            student.lesson_times = normalize_lesson_times_payload(data["lesson_times"], student.lesson_days)
         elif "lesson_time" in data:
-            # Backward compatibility: update times for all days
-            days = student.lesson_days.split(",") if student.lesson_days else ["1"]
-            times = {}
-            for day in days:
-                times[day.strip()] = data["lesson_time"]
-            student.lesson_times = json.dumps(times)
+            student.lesson_times = normalize_lesson_times_payload(None, student.lesson_days, data["lesson_time"])
         if "lesson_price" in data:
             student.lesson_price = int(data["lesson_price"])
         if "lessons_count" in data:
             student.lessons_count = int(data["lessons_count"])
+            if student.lessons_remaining is None:
+                student.lessons_remaining = student.lessons_count
+        if "lessons_remaining" in data:
+            student.lessons_remaining = int(data["lessons_remaining"])
         if "subscription_start" in data:
             student.subscription_start = date.fromisoformat(data["subscription_start"]) if data["subscription_start"] else None
         if "subscription_end" in data:
@@ -697,6 +788,46 @@ async def api_lessons(request: Request):
         return lessons
 
 
+@app.post("/api/lessons/{lesson_id}")
+async def api_lesson_detail(lesson_id: int, request: Request):
+    """Get detailed lesson info by id."""
+    body = await request.json()
+    coach = await get_current_coach(body.get("initData", ""))
+    if not coach:
+        return JSONResponse({"error": "unauthorized"}, 403)
+
+    async with async_session() as s:
+        result = await s.execute(
+            select(Lesson, Student).join(Student).where(
+                Lesson.id == lesson_id,
+                Lesson.coach_id == coach.id
+            )
+        )
+        row = result.one_or_none()
+        if not row:
+            return JSONResponse({"error": "not_found"}, 404)
+
+        lesson, student = row
+        attendance_result = await s.execute(
+            select(Attendance).where(Attendance.lesson_id == lesson.id)
+        )
+        attendance = attendance_result.scalar_one_or_none()
+
+        return {
+            "id": lesson.id,
+            "student_id": student.id,
+            "student_name": student.name,
+            "date": lesson.date.isoformat(),
+            "time": lesson.time,
+            "location": lesson.location,
+            "location_id": lesson.location_id,
+            "topic": lesson.topic,
+            "notes": lesson.notes,
+            "attendance": attendance.status if attendance else None,
+            "attendance_notes": attendance.notes if attendance else None,
+        }
+
+
 @app.post("/api/lessons/create")
 async def api_create_lesson(request: Request):
     """Create new lesson with attendance."""
@@ -717,26 +848,62 @@ async def api_create_lesson(request: Request):
         if not student:
             return JSONResponse({"error": "student_not_found"}, 404)
         
-        lesson = Lesson(
-            coach_id=coach.id,
-            student_id=student_id,
-            date=date.fromisoformat(data.get("date")),
-            time=data.get("time", student.lesson_time),
-            location=data.get("location", student.location),
-            topic=data.get("topic"),
-            notes=data.get("notes"),
+        lesson_date = date.fromisoformat(data.get("date"))
+        lesson_time = data.get("time") or get_student_lesson_time(student, lesson_date=lesson_date)
+        status = data.get("status", "present")
+
+        lesson_result = await s.execute(
+            select(Lesson).where(
+                Lesson.student_id == student_id,
+                Lesson.coach_id == coach.id,
+                Lesson.date == lesson_date
+            )
         )
-        s.add(lesson)
-        await s.flush()
+        lesson = lesson_result.scalar_one_or_none()
+        if lesson:
+            lesson.time = lesson_time
+            lesson.location = data.get("location", lesson.location or student.location)
+            lesson.location_id = student.location_id
+            lesson.topic = data.get("topic")
+            lesson.notes = data.get("notes")
+        else:
+            lesson = Lesson(
+                coach_id=coach.id,
+                student_id=student_id,
+                date=lesson_date,
+                time=lesson_time,
+                location=data.get("location", student.location),
+                location_id=student.location_id,
+                topic=data.get("topic"),
+                notes=data.get("notes"),
+            )
+            s.add(lesson)
+            await s.flush()
         
-        # Create attendance record
-        attendance = Attendance(
-            lesson_id=lesson.id,
-            student_id=student_id,
-            status=data.get("status", "present"),
-            notes=data.get("attendance_notes"),
+        attendance_result = await s.execute(
+            select(Attendance).where(Attendance.lesson_id == lesson.id)
         )
-        s.add(attendance)
+        attendance = attendance_result.scalar_one_or_none()
+        old_status = attendance.status if attendance else None
+        if attendance:
+            attendance.status = status
+            attendance.notes = data.get("attendance_notes")
+            attendance.attendance_date = lesson_date
+            attendance.attendance_time = lesson_time
+            attendance.location_id = student.location_id
+        else:
+            attendance = Attendance(
+                lesson_id=lesson.id,
+                student_id=student_id,
+                location_id=student.location_id,
+                status=status,
+                attendance_date=lesson_date,
+                attendance_time=lesson_time,
+                notes=data.get("attendance_notes"),
+            )
+            s.add(attendance)
+
+        apply_attendance_to_balance(student, old_status, status)
         await s.commit()
         
         return {"success": True, "id": lesson.id}
@@ -766,16 +933,28 @@ async def api_update_attendance(lesson_id: int, request: Request):
         att = att_result.scalar_one_or_none()
         
         if att:
+            old_status = att.status
             att.status = body.get("status", "present")
             att.notes = body.get("notes")
+            att.attendance_date = lesson.date
+            att.attendance_time = lesson.time
+            att.location_id = lesson.location_id
         else:
+            old_status = None
             att = Attendance(
                 lesson_id=lesson_id,
                 student_id=lesson.student_id,
+                location_id=lesson.location_id,
                 status=body.get("status", "present"),
+                attendance_date=lesson.date,
+                attendance_time=lesson.time,
                 notes=body.get("notes"),
             )
             s.add(att)
+
+        student = await s.get(Student, lesson.student_id)
+        if student:
+            apply_attendance_to_balance(student, old_status, att.status)
         
         await s.commit()
         return {"success": True}
@@ -834,6 +1013,13 @@ async def api_create_payment(request: Request):
     data = body.get("payment", {})
     
     async with async_session() as s:
+        student_result = await s.execute(
+            select(Student).where(Student.id == data.get("student_id"), Student.coach_id == coach.id)
+        )
+        student = student_result.scalar_one_or_none()
+        if not student:
+            return JSONResponse({"error": "student_not_found"}, 404)
+
         payment = Payment(
             coach_id=coach.id,
             student_id=data.get("student_id"),
@@ -847,27 +1033,9 @@ async def api_create_payment(request: Request):
         
         if payment.status == "paid":
             payment.paid_at = datetime.utcnow()
+            apply_paid_payment_to_student(student, payment)
         
         s.add(payment)
-        await s.commit()
-        
-        # Update student subscription dates and lessons if paid
-        if payment.status == "paid":
-            student_result = await s.execute(
-                select(Student).where(Student.id == payment.student_id)
-            )
-            student = student_result.scalar_one_or_none()
-            if student:
-                if payment.period_end:
-                    student.subscription_end = payment.period_end
-                    if not student.subscription_start:
-                        student.subscription_start = payment.period_start
-                
-                # Add lessons to subscription
-                if payment.lessons_count:
-                    student.lessons_count += payment.lessons_count
-                    student.lessons_remaining += payment.lessons_count
-        
         await s.commit()
         return {"success": True, "id": payment.id}
 
@@ -888,18 +1056,17 @@ async def api_mark_payment_paid(payment_id: int, request: Request):
         if not payment:
             return JSONResponse({"error": "not_found"}, 404)
         
+        was_paid = payment.status == "paid"
         payment.status = "paid"
-        payment.paid_at = datetime.utcnow()
+        payment.paid_at = payment.paid_at or datetime.utcnow()
         
         # Update student subscription
         student_result = await s.execute(
             select(Student).where(Student.id == payment.student_id)
         )
         student = student_result.scalar_one_or_none()
-        if student and payment.period_end:
-            student.subscription_end = payment.period_end
-            if not student.subscription_start:
-                student.subscription_start = payment.period_start
+        if student and not was_paid:
+            apply_paid_payment_to_student(student, payment)
         
         await s.commit()
         return {"success": True}
@@ -1051,13 +1218,17 @@ async def api_bulk_attendance(request: Request):
                 if att:
                     old_status = att.status
                     att.status = status
+                    att.attendance_date = date.fromisoformat(lesson_date)
+                    att.attendance_time = lesson.time
+                    att.location_id = student.location_id
                 else:
                     # Get time for this day
                     weekday = date.fromisoformat(lesson_date).weekday()
-                    lesson_time = student.get_lesson_time_for_day(weekday)
+                    lesson_time = get_student_lesson_time(student, day_of_week=weekday)
                     att = Attendance(
                         lesson_id=lesson.id,
                         student_id=student_id,
+                        location_id=student.location_id,
                         status=status,
                         attendance_date=date.fromisoformat(lesson_date),
                         attendance_time=lesson_time
@@ -1066,13 +1237,14 @@ async def api_bulk_attendance(request: Request):
             else:
                 # Create new lesson
                 weekday = date.fromisoformat(lesson_date).weekday()
-                lesson_time = student.get_lesson_time_for_day(weekday)
+                lesson_time = get_student_lesson_time(student, day_of_week=weekday)
                 lesson = Lesson(
                     coach_id=coach.id,
                     student_id=student_id,
                     date=date.fromisoformat(lesson_date),
                     time=lesson_time,
                     location=student.location,
+                    location_id=student.location_id,
                 )
                 s.add(lesson)
                 await s.flush()
@@ -1081,28 +1253,21 @@ async def api_bulk_attendance(request: Request):
                 att = Attendance(
                     lesson_id=lesson.id,
                     student_id=student_id,
+                    location_id=student.location_id,
                     status=status,
                     attendance_date=date.fromisoformat(lesson_date),
-                    attendance_time=student.lesson_time
+                    attendance_time=lesson_time
                 )
                 s.add(att)
             
             # Update lessons_remaining based on status change
-            # Only deduct for "present" status, restore if changed from present to absent/sick
-            if status == "present" and old_status != "present":
-                # Deduct a lesson
-                if student.lessons_remaining > 0:
-                    student.lessons_remaining -= 1
-                # Check if now low on lessons
-                if student.lessons_remaining <= 2:
-                    students_with_low_lessons.append({
-                        "id": student.id,
-                        "name": student.name,
-                        "remaining": student.lessons_remaining
-                    })
-            elif status != "present" and old_status == "present":
-                # Restore a lesson (changed from present to absent/sick)
-                student.lessons_remaining += 1
+            apply_attendance_to_balance(student, old_status, status)
+            if get_remaining_lessons(student) <= 2:
+                students_with_low_lessons.append({
+                    "id": student.id,
+                    "name": student.name,
+                    "remaining": get_remaining_lessons(student)
+                })
             
             marked_count += 1
         
@@ -1124,6 +1289,8 @@ async def api_skip_lesson(request: Request):
     
     reason = body.get("reason", "no_training")
     lesson_date = body.get("date", datetime.now().date().isoformat())
+    target_date = date.fromisoformat(lesson_date)
+    target_weekday = target_date.weekday()
     
     async with async_session() as s:
         # Get all students for this coach
@@ -1134,27 +1301,32 @@ async def api_skip_lesson(request: Request):
             )
         )
         students = result.scalars().all()
+        skipped_count = 0
         
         for student in students:
+            days = student.lesson_days.split(",") if student.lesson_days else []
+            if str(target_weekday) not in days:
+                continue
+
             # Check if lesson already exists
             existing = await s.execute(
                 select(Lesson).where(
                     Lesson.student_id == student.id,
-                    Lesson.date == date.fromisoformat(lesson_date)
+                    Lesson.date == target_date
                 )
             )
             if existing.scalar_one_or_none():
                 continue  # Already marked
             
             # Create skipped lesson
-            weekday = date.fromisoformat(lesson_date).weekday()
-            lesson_time = student.get_lesson_time_for_day(weekday)
+            lesson_time = get_student_lesson_time(student, lesson_date=target_date)
             lesson = Lesson(
                 coach_id=coach.id,
                 student_id=student.id,
-                date=date.fromisoformat(lesson_date),
+                date=target_date,
                 time=lesson_time,
                 location=student.location,
+                location_id=student.location_id,
                 notes=f"Тренировка отменена: {reason}"
             )
             s.add(lesson)
@@ -1164,12 +1336,16 @@ async def api_skip_lesson(request: Request):
             att = Attendance(
                 lesson_id=lesson.id,
                 student_id=student.id,
-                status="excused"
+                location_id=student.location_id,
+                status="excused",
+                attendance_date=target_date,
+                attendance_time=lesson_time
             )
             s.add(att)
+            skipped_count += 1
         
         await s.commit()
-        return {"success": True, "skipped": len(students)}
+        return {"success": True, "skipped": skipped_count}
 
 
 # === Calendar ===
@@ -1243,16 +1419,30 @@ async def api_extra_attendance(request: Request):
             return JSONResponse({"error": "student_not_found"}, 404)
         
         # Check remaining lessons
-        if deduct_lesson and student.lessons_remaining <= 0:
+        remaining_lessons = get_remaining_lessons(student)
+        student.lessons_remaining = remaining_lessons
+        if deduct_lesson and remaining_lessons <= 0:
             return JSONResponse({
                 "error": "no_lessons_remaining",
                 "message": "У ученика не осталось занятий в абонементе"
             }, 400)
         
+        duplicate_result = await s.execute(
+            select(Attendance).where(
+                Attendance.student_id == student_id,
+                Attendance.is_extra == True,
+                Attendance.attendance_date == date.fromisoformat(attendance_date),
+                Attendance.attendance_time == attendance_time
+            )
+        )
+        if duplicate_result.scalar_one_or_none():
+            return JSONResponse({"error": "already_marked"}, 409)
+
         # Create extra attendance record (no lesson entry - this is out-of-schedule)
         att = Attendance(
             lesson_id=None,  # No scheduled lesson
             student_id=student_id,
+            location_id=student.location_id,
             status=status,
             is_extra=True,
             attendance_date=date.fromisoformat(attendance_date),
@@ -1263,7 +1453,7 @@ async def api_extra_attendance(request: Request):
         
         # Deduct from remaining lessons if present
         if deduct_lesson and status == "present":
-            student.lessons_remaining = max(0, student.lessons_remaining - 1)
+            student.lessons_remaining = max(0, remaining_lessons - 1)
         
         await s.commit()
         
@@ -1322,23 +1512,24 @@ async def api_student_attendance_history(student_id: int, request: Request):
             attendance.append(record)
         
         # Calculate stats
-        total_lessons = len([a for a in attendance if not a["is_extra"]])
+        total_lessons = len([a for a in attendance if not a["is_extra"] and a["status"] != "excused"])
         extra_lessons = len([a for a in attendance if a["is_extra"]])
         present_count = len([a for a in attendance if a["status"] == "present"])
+        counted_attendance = [a for a in attendance if a["status"] != "excused"]
         
         return {
             "student": {
                 "id": student.id,
                 "name": student.name,
                 "lessons_count": student.lessons_count,
-                "lessons_remaining": student.lessons_remaining,
+                "lessons_remaining": get_remaining_lessons(student),
             },
             "attendance": attendance,
             "stats": {
                 "total_scheduled": total_lessons,
                 "extra_lessons": extra_lessons,
                 "total_present": present_count,
-                "attendance_rate": round(present_count / len(attendance) * 100) if attendance else 0
+                "attendance_rate": round(present_count / len(counted_attendance) * 100) if counted_attendance else 0
             }
         }
 
@@ -1370,8 +1561,9 @@ async def api_update_subscription(student_id: int, request: Request):
             student.lessons_remaining = int(data["lessons_remaining"])
         elif "add_lessons" in data:
             # Add lessons to existing count
-            student.lessons_remaining += int(data["add_lessons"])
-            student.lessons_count += int(data["add_lessons"])
+            add_lessons = int(data["add_lessons"])
+            student.lessons_remaining = get_remaining_lessons(student) + add_lessons
+            student.lessons_count = (student.lessons_count or 0) + add_lessons
         
         if "subscription_start" in data:
             student.subscription_start = date.fromisoformat(data["subscription_start"]) if data["subscription_start"] else None
@@ -1383,7 +1575,7 @@ async def api_update_subscription(student_id: int, request: Request):
         return {
             "success": True,
             "lessons_count": student.lessons_count,
-            "lessons_remaining": student.lessons_remaining,
+            "lessons_remaining": get_remaining_lessons(student),
             "subscription_end": student.subscription_end.isoformat() if student.subscription_end else None
         }
 
@@ -1419,9 +1611,11 @@ async def api_subscription_status(student_id: int, request: Request):
         
         # Check lessons remaining
         lessons_status = "ok"
-        if student.lessons_remaining <= 0:
+        remaining_lessons = get_remaining_lessons(student)
+
+        if remaining_lessons <= 0:
             lessons_status = "depleted"
-        elif student.lessons_remaining <= 2:
+        elif remaining_lessons <= 2:
             lessons_status = "low"
         
         return {
@@ -1429,8 +1623,8 @@ async def api_subscription_status(student_id: int, request: Request):
             "name": student.name,
             "subscription": {
                 "total_lessons": student.lessons_count,
-                "remaining": student.lessons_remaining,
-                "used": student.lessons_count - student.lessons_remaining,
+                "remaining": remaining_lessons,
+                "used": (student.lessons_count or 0) - remaining_lessons,
                 "start_date": student.subscription_start.isoformat() if student.subscription_start else None,
                 "end_date": student.subscription_end.isoformat() if student.subscription_end else None,
                 "days_until_expiry": days_until_expiry,
@@ -1469,33 +1663,47 @@ async def api_add_student_to_current_lesson(request: Request):
         if not student:
             return JSONResponse({"error": "student_not_found"}, 404)
         
+        lesson_day = date.fromisoformat(lesson_date)
+        original_time = get_student_lesson_time(student, lesson_date=lesson_day)
+
         # If target_time specified, temporarily update student's schedule
-        if target_time and target_time != student.lesson_time:
-            # Store original time for reference
-            original_time = student.lesson_time
+        if target_time and target_time != original_time:
+            duplicate_result = await s.execute(
+                select(Attendance).where(
+                    Attendance.student_id == student_id,
+                    Attendance.is_extra == True,
+                    Attendance.attendance_date == lesson_day,
+                    Attendance.attendance_time == target_time
+                )
+            )
+            if duplicate_result.scalar_one_or_none():
+                return JSONResponse({"error": "already_marked"}, 409)
             
             # Create extra attendance for this specific session
             att = Attendance(
                 lesson_id=None,
                 student_id=student_id,
+                location_id=student.location_id,
                 status="present",
                 is_extra=True,
-                attendance_date=date.fromisoformat(lesson_date),
+                attendance_date=lesson_day,
                 attendance_time=target_time,
                 notes=f"Добавлен к группе {target_time} (обычное время: {original_time})"
             )
             s.add(att)
             
             # Deduct lesson if present
-            if student.lessons_remaining > 0:
-                student.lessons_remaining -= 1
+            remaining_lessons = get_remaining_lessons(student)
+            student.lessons_remaining = remaining_lessons
+            if remaining_lessons > 0:
+                student.lessons_remaining = remaining_lessons - 1
             
             await s.commit()
             
             return {
                 "success": True,
                 "message": f"{student.name} добавлен к группе {target_time}",
-                "lessons_remaining": student.lessons_remaining
+                "lessons_remaining": get_remaining_lessons(student)
             }
         else:
             # Regular attendance at student's scheduled time
@@ -1515,35 +1723,38 @@ async def api_get_groups(request: Request):
             select(Student).where(
                 Student.coach_id == coach.id,
                 Student.is_active == True
-            ).order_by(Student.lesson_time, Student.name)
+            ).order_by(Student.name)
         )
         students = result.scalars().all()
         
-        # Group by time
+        # Group by day/time slots from the student's schedule
         groups = {}
         for student in students:
-            time_key = student.lesson_time or "18:00"
-            if time_key not in groups:
-                groups[time_key] = {
-                    "time": time_key,
-                    "students": [],
-                    "count": 0,
-                    "low_lessons": 0
-                }
-            
-            groups[time_key]["students"].append({
-                "id": student.id,
-                "name": student.name,
-                "lessons_remaining": student.lessons_remaining,
-                "subscription_end": student.subscription_end.isoformat() if student.subscription_end else None
-            })
-            groups[time_key]["count"] += 1
-            
-            if student.lessons_remaining <= 2:
-                groups[time_key]["low_lessons"] += 1
+            for day, time_key in get_student_schedule_slots(student):
+                group_key = f"{day}:{time_key}"
+                if group_key not in groups:
+                    groups[group_key] = {
+                        "day": day,
+                        "day_name": WEEKDAYS.get(day, str(day)),
+                        "time": time_key,
+                        "students": [],
+                        "count": 0,
+                        "low_lessons": 0
+                    }
+                
+                groups[group_key]["students"].append({
+                    "id": student.id,
+                    "name": student.name,
+                    "lessons_remaining": get_remaining_lessons(student),
+                    "subscription_end": student.subscription_end.isoformat() if student.subscription_end else None
+                })
+                groups[group_key]["count"] += 1
+                
+                if get_remaining_lessons(student) <= 2:
+                    groups[group_key]["low_lessons"] += 1
         
         # Sort by time
-        sorted_groups = sorted(groups.values(), key=lambda g: g["time"])
+        sorted_groups = sorted(groups.values(), key=lambda g: (g["day"], g["time"]))
         
         return {
             "groups": sorted_groups,
@@ -1585,7 +1796,7 @@ async def api_daily_summary(request: Request):
                 try:
                     logger.debug(f"Processing student {idx}: {student.id} - {student.name}")
                     # Fix for old records without lessons_remaining
-                    lessons_remaining = student.lessons_remaining if student.lessons_remaining is not None else student.lessons_count
+                    lessons_remaining = get_remaining_lessons(student)
                     
                     # Check subscription expiry
                     if student.subscription_end:
@@ -1631,7 +1842,7 @@ async def api_daily_summary(request: Request):
                     if str(weekday) in days:
                         # Get time for this day
                         lesson_time = student.get_lesson_time_for_day(weekday)
-                        lessons_remaining = student.lessons_remaining if student.lessons_remaining is not None else student.lessons_count
+                        lessons_remaining = get_remaining_lessons(student)
                         today_lessons.append({
                             "id": student.id,
                             "name": student.name,
@@ -1809,7 +2020,8 @@ async def api_statistics(request: Request):
         # Attendance statistics
         attendance_query = select(Attendance, Student).join(Student).where(
             Student.coach_id == coach.id,
-            Attendance.attendance_date >= start_date
+            Attendance.attendance_date >= start_date,
+            Attendance.status != "excused"
         )
         if location_id:
             attendance_query = attendance_query.where(Attendance.location_id == location_id)
@@ -1866,12 +2078,8 @@ async def api_statistics(request: Request):
         # Monthly trend (last 6 months)
         monthly_trend = []
         for i in range(5, -1, -1):
-            month_date = today.replace(day=1) - timedelta(days=i*30)
-            month_start = month_date.replace(day=1)
-            if month_date.month == 12:
-                month_end = month_date.replace(year=month_date.year + 1, month=1, day=1)
-            else:
-                month_end = month_date.replace(month=month_date.month + 1, day=1)
+            month_start = today.replace(day=1) - relativedelta(months=i)
+            month_end = month_start + relativedelta(months=1)
             
             month_attendance = await s.execute(
                 select(func.count(Attendance.id)).join(Student).where(
@@ -1882,7 +2090,7 @@ async def api_statistics(request: Request):
                 )
             )
             monthly_trend.append({
-                "month": month_date.strftime("%b"),
+                "month": month_start.strftime("%b"),
                 "count": month_attendance.scalar() or 0
             })
         

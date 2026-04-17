@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import json
 from aiogram import Bot, Dispatcher, Router, types, F
@@ -23,6 +24,13 @@ def get_lesson_time_for_day(student: Student, day_of_week: int) -> str:
         return times.get(str(day_of_week), times.get('default', '18:00'))
     except:
         return '18:00'
+
+
+def get_remaining_lessons(student: Student) -> int:
+    """Normalize lessons remaining for old and new student records."""
+    if student.lessons_remaining is None:
+        return student.lessons_count or 0
+    return student.lessons_remaining
 
 logger = logging.getLogger(__name__)
 
@@ -598,6 +606,10 @@ async def cb_skip_reason(callback: CallbackQuery):
         
         skipped_count = 0
         for student in students:
+            days = student.lesson_days.split(",") if student.lesson_days else []
+            if str(today.weekday()) not in days:
+                continue
+
             # Check if already marked
             existing = await s.execute(
                 select(Lesson).where(
@@ -616,6 +628,7 @@ async def cb_skip_reason(callback: CallbackQuery):
                 date=today,
                 time=lesson_time,
                 location=student.location,
+                location_id=student.location_id,
                 notes=f"Отмена: {reason_text}"
             )
             s.add(lesson)
@@ -625,7 +638,10 @@ async def cb_skip_reason(callback: CallbackQuery):
             att = Attendance(
                 lesson_id=lesson.id,
                 student_id=student.id,
-                status="excused"
+                location_id=student.location_id,
+                status="excused",
+                attendance_date=today,
+                attendance_time=lesson_time
             )
             s.add(att)
             skipped_count += 1
@@ -748,11 +764,12 @@ async def mark_notification_sent(coach_id: int, notification_type: str):
         await s.commit()
 
 
-async def send_daily_summary(coach_id: int = None):
+async def send_daily_summary(coach_id: int = None, force: bool = False):
     """Send daily summary to coach(es). If coach_id is None, send to all coaches."""
     from app.models import DailyNotificationLog
     
     today = date.today()
+    sent_count = 0
     
     async with async_session() as s:
         if coach_id:
@@ -775,7 +792,7 @@ async def send_daily_summary(coach_id: int = None):
                     DailyNotificationLog.date == today
                 )
             )
-            if already_sent.scalar_one_or_none():
+            if already_sent.scalar_one_or_none() and not force:
                 continue
             
             # Get all active students
@@ -809,21 +826,26 @@ async def send_daily_summary(coach_id: int = None):
                         })
                 
                 # Check lessons remaining
-                if student.lessons_remaining <= 0:
+                remaining_lessons = get_remaining_lessons(student)
+                if remaining_lessons <= 0:
                     depleted.append({
                         "name": student.name,
                         "remaining": 0
                     })
-                elif student.lessons_remaining <= 2:
+                elif remaining_lessons <= 2:
                     low_lessons.append({
                         "name": student.name,
-                        "remaining": student.lessons_remaining
+                        "remaining": remaining_lessons
                     })
             
-            # Only send if there are alerts
+            # Send if there are alerts, today's lessons, or a forced manual request
             total_alerts = len(expired) + len(ending_soon) + len(low_lessons) + len(depleted)
+            has_today_lessons = any(
+                str(today.weekday()) in (student.lesson_days.split(",") if student.lesson_days else [])
+                for student in students
+            )
             
-            if total_alerts > 0 or True:  # Send even if no alerts (for testing)
+            if force or total_alerts > 0 or has_today_lessons:
                 text = f"📊 <b>Ежедневная сводка ({today.strftime('%d.%m.%Y')})</b>\n\n"
                 
                 # Urgent: expired subscriptions
@@ -868,7 +890,7 @@ async def send_daily_summary(coach_id: int = None):
                         today_lessons.append({
                             "name": student.name,
                             "time": get_lesson_time_for_day(student, weekday),
-                            "remaining": student.lessons_remaining
+                            "remaining": get_remaining_lessons(student)
                         })
                 
                 if today_lessons:
@@ -908,17 +930,21 @@ async def send_daily_summary(coach_id: int = None):
                     await bot.send_message(coach.telegram_id, text, parse_mode="HTML", reply_markup=kb)
                     
                     # Mark as sent
-                    log = DailyNotificationLog(
-                        coach_id=coach.id,
-                        notification_type="daily_summary",
-                        date=today
-                    )
-                    s.add(log)
+                    if not already_sent.scalar_one_or_none():
+                        log = DailyNotificationLog(
+                            coach_id=coach.id,
+                            notification_type="daily_summary",
+                            date=today
+                        )
+                        s.add(log)
                     await s.commit()
+                    sent_count += 1
                     
                     logger.info(f"Daily summary sent to coach {coach.id}")
                 except Exception as e:
                     logger.error(f"Failed to send daily summary to coach {coach.id}: {e}")
+
+    return sent_count
 
 
 @router.message(Command("summary"))
@@ -936,8 +962,11 @@ async def cmd_summary(message: Message):
         return
     
     await message.answer("⏳ Формирую сводку...")
-    await send_daily_summary(coach.id)
-    await message.answer("✅ Сводка отправлена!")
+    sent_count = await send_daily_summary(coach.id, force=True)
+    if sent_count:
+        await message.answer("✅ Сводка отправлена!")
+    else:
+        await message.answer("ℹ️ Сегодня нет данных для сводки.")
 
 
 # === Lesson Reminder Scheduler ===

@@ -189,8 +189,13 @@ async def run_migrations():
             logger.info("Migrating: Adding lesson_times to students")
             await conn.execute(text('ALTER TABLE students ADD COLUMN lesson_times VARCHAR(500)'))
             # Populate with default values
-            result = await conn.execute(text("SELECT id, lesson_days, lesson_time FROM students"))
-            rows = result.fetchall()
+            try:
+                result = await conn.execute(text("SELECT id, lesson_days, lesson_time FROM students"))
+                rows = result.fetchall()
+            except:
+                result = await conn.execute(text("SELECT id, lesson_days FROM students"))
+                rows = [(student_id, days, "18:00") for student_id, days in result.fetchall()]
+
             for row in rows:
                 student_id, days, time = row
                 if days:
