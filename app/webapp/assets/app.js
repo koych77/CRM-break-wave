@@ -1092,7 +1092,7 @@ function selectCalendarDay(day, element) {
                             
                             return `
                                 <div class="list-item" style="margin-bottom: 0; cursor: pointer; padding: 12px;" 
-                                     onclick="openStudentDetail(${s.student_id})">
+                                     onclick="openLessonDetailFromCalendar(${day}, ${index})">
                                     <div style="display: flex; justify-content: space-between; align-items: center;">
                                         <div style="flex: 1;">
                                             <div style="font-weight: 600; font-size: 15px; margin-bottom: 2px;">${escapeHtml(s.student_name)}</div>
@@ -1119,6 +1119,142 @@ function selectCalendarDay(day, element) {
     });
     if (element) {
         element.classList.add('selected');
+    }
+}
+
+function getCalendarIsoDate(day) {
+    const year = currentCalendarDate.getFullYear();
+    const month = String(currentCalendarDate.getMonth() + 1).padStart(2, '0');
+    const dayString = String(day).padStart(2, '0');
+    return `${year}-${month}-${dayString}`;
+}
+
+function getLessonStatusLabel(status) {
+    if (status === 'present') return 'Присутствовал';
+    if (status === 'absent') return 'Отсутствовал';
+    if (status === 'sick') return 'Болел';
+    return 'Не отмечен';
+}
+
+function renderLessonDetail(lesson, lessonDate, day, lessonIndex) {
+    const container = document.getElementById('lesson-detail-content');
+    if (!container || !lesson) return;
+
+    const currentStatus = lesson.status || '';
+    const statusButtons = [
+        { value: 'present', label: '✅ Был' },
+        { value: 'absent', label: '❌ Не был' },
+        { value: 'sick', label: '🤒 Болел' },
+    ];
+
+    container.innerHTML = `
+        <div class="screen-header">
+            <button class="back-btn" onclick="goBack()">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none"><path d="M15 18L9 12L15 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </button>
+            <span class="screen-title">Урок</span>
+            <div style="width: 40px;"></div>
+        </div>
+        <div class="form-container">
+            <div class="detail-card">
+                <div class="detail-row">
+                    <span class="detail-label">Ученик</span>
+                    <span class="detail-value">${escapeHtml(lesson.student_name)}</span>
+                </div>
+                <div class="detail-row">
+                    <span class="detail-label">Дата</span>
+                    <span class="detail-value">${formatDate(lessonDate)}</span>
+                </div>
+                <div class="detail-row">
+                    <span class="detail-label">Время</span>
+                    <span class="detail-value">${escapeHtml(lesson.time || '—')}</span>
+                </div>
+                <div class="detail-row">
+                    <span class="detail-label">Зал</span>
+                    <span class="detail-value">${escapeHtml(lesson.location || 'Зал')}</span>
+                </div>
+                <div class="detail-row">
+                    <span class="detail-label">Статус</span>
+                    <span class="detail-value">${escapeHtml(getLessonStatusLabel(currentStatus))}</span>
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label>Отметить посещаемость</label>
+                <div class="action-buttons-grid">
+                    ${statusButtons.map((button) => `
+                        <button class="${currentStatus === button.value ? 'btn-primary' : 'btn-secondary'}"
+                                onclick="saveLessonAttendanceFromCalendar(${day}, ${lessonIndex}, '${button.value}')">
+                            ${button.label}
+                        </button>
+                    `).join('')}
+                </div>
+            </div>
+
+            <div class="form-actions">
+                <button type="button" class="btn-secondary" onclick="openStudentDetail(${lesson.student_id})">Карточка ученика</button>
+                <button type="button" class="btn-secondary" onclick="goBack()">Назад</button>
+            </div>
+        </div>
+    `;
+}
+
+function openLessonDetailFromCalendar(day, lessonIndex) {
+    const lesson = calendarData.days?.[day]?.[lessonIndex];
+    if (!lesson) {
+        return;
+    }
+
+    renderLessonDetail(lesson, getCalendarIsoDate(day), day, lessonIndex);
+    navigate('lesson-detail');
+}
+
+async function saveLessonAttendanceFromCalendar(day, lessonIndex, status) {
+    const lesson = calendarData.days?.[day]?.[lessonIndex];
+    if (!lesson) {
+        showNotification('Урок не найден', 'error');
+        return;
+    }
+
+    const lessonDate = getCalendarIsoDate(day);
+    const endpoint = lesson.lesson_id
+        ? `${API}/api/lessons/${lesson.lesson_id}/attendance`
+        : `${API}/api/lessons/create`;
+    const payload = lesson.lesson_id
+        ? { initData, status }
+        : {
+            initData,
+            lesson: {
+                student_id: lesson.student_id,
+                date: lessonDate,
+                time: lesson.time,
+                location: lesson.location,
+                status,
+            }
+        };
+
+    try {
+        const res = await fetch(endpoint, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(payload)
+        });
+        const result = await res.json();
+
+        if (!result.success) {
+            showNotification('Ошибка сохранения', 'error');
+            return;
+        }
+
+        lesson.status = status;
+        lesson.is_marked = true;
+        lesson.lesson_id = result.id || lesson.lesson_id;
+        renderLessonDetail(lesson, lessonDate, day, lessonIndex);
+        showNotification('Посещаемость обновлена', 'success');
+        loadCalendar();
+    } catch (e) {
+        console.error('Lesson attendance save error:', e);
+        showNotification('Ошибка сети', 'error');
     }
 }
 
@@ -1888,6 +2024,8 @@ async function saveExtraAttendance(studentId) {
             document.querySelector('.modal')?.remove();
             // Refresh student detail
             openStudentDetail(studentId);
+        } else if (result.error === 'already_marked') {
+            showNotification('На это время посещаемость уже отмечена', 'warning');
         } else if (result.error === 'no_lessons_remaining') {
             showNotification('У ученика не осталось занятий в абонементе', 'error');
         } else {

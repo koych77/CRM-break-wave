@@ -59,6 +59,16 @@ def get_remaining_lessons(student: Student) -> int:
 
 logger = logging.getLogger(__name__)
 
+LESSON_REMINDER_WINDOW_MINUTES = 10
+LESSON_REMINDER_POLL_SECONDS = 60
+DAILY_SUMMARY_HOUR = 10
+DAILY_SUMMARY_MINUTE = 0
+
+
+def build_lesson_reminder_log_key(reminder_date: date, time_str: str) -> str:
+    """Stable key for deduplicating reminder notifications in the DB."""
+    return f"[lesson_reminder:{reminder_date.isoformat()}:{time_str}]"
+
 
 def create_bot() -> Bot:
     """Create bot instance lazily so module import does not crash without env."""
@@ -479,7 +489,7 @@ async def cmd_now(message: Message):
                         text="📱 Открыть CRM",
                         web_app=WebAppInfo(url=f"{WEBAPP_URL or 'https://your-app.up.railway.app'}/")
                     )],
-                    [InlineKeyboardButton(text="❌ Тренировки нет", callback_data="skip_lesson")]
+                    [InlineKeyboardButton(text="❌ Тренировки нет", callback_data=f"skip_group:{time_key}")]
                 ])
                 
                 await message.answer(text, reply_markup=kb)
@@ -728,10 +738,8 @@ async def cb_skip_reason(callback: CallbackQuery):
     reason = callback.data.split(":")[1]
     reason_text = {"holiday": "Праздник", "sick": "Тренер болеет", "other": "Другое"}.get(reason, "Другое")
     
-    from datetime import date
-    from app.models import Lesson, Attendance, Student
-    
     today = datetime.now(BELARUS_TZ).date()
+    current_weekday = today.weekday()
     
     async with async_session() as s:
         # Get all students for this coach
@@ -747,47 +755,47 @@ async def cb_skip_reason(callback: CallbackQuery):
         
         skipped_count = 0
         for student in students:
-            # Check if already marked
-            lesson_time = get_lesson_time_for_day(student, today.weekday())
-            existing = await s.execute(
-                select(Lesson).where(
-                    Lesson.student_id == student.id,
-                    Lesson.date == today,
-                    Lesson.time == lesson_time
+            for sched_info in student.get_schedules_for_day(current_weekday):
+                lesson_time = sched_info["time"]
+                existing = await s.execute(
+                    select(Lesson).where(
+                        Lesson.student_id == student.id,
+                        Lesson.date == today,
+                        Lesson.time == lesson_time
+                    )
                 )
-            )
-            if existing.scalar_one_or_none():
-                continue
-            
-            # Create skipped lesson
-            lesson = Lesson(
-                coach_id=coach.id,
-                student_id=student.id,
-                date=today,
-                time=lesson_time,
-                location=student.location,
-                notes=f"Отмена: {reason_text}"
-            )
-            s.add(lesson)
-            await s.flush()
-            
-            # Mark as excused
-            att = Attendance(
-                lesson_id=lesson.id,
-                student_id=student.id,
-                status="excused",
-                attendance_date=today,
-                attendance_time=lesson_time
-            )
-            s.add(att)
-            skipped_count += 1
+                if existing.scalar_one_or_none():
+                    continue
+                
+                lesson = Lesson(
+                    coach_id=coach.id,
+                    student_id=student.id,
+                    date=today,
+                    time=lesson_time,
+                    location=sched_info.get("location_name", student.location),
+                    location_id=sched_info.get("location_id"),
+                    notes=f"Отмена: {reason_text}"
+                )
+                s.add(lesson)
+                await s.flush()
+                
+                att = Attendance(
+                    lesson_id=lesson.id,
+                    student_id=student.id,
+                    location_id=sched_info.get("location_id"),
+                    status="excused",
+                    attendance_date=today,
+                    attendance_time=lesson_time
+                )
+                s.add(att)
+                skipped_count += 1
         
         await s.commit()
     
     await callback.message.edit_text(
         f"✅ Сохранено\n\n"
         f"Тренировка отменена: {reason_text}\n"
-        f"Учеников: {skipped_count}"
+        f"Отмечено слотов: {skipped_count}"
     )
 
 
@@ -858,7 +866,6 @@ async def cb_skip_group_reason(callback: CallbackQuery):
     reason = parts[2]
     reason_text = {"holiday": "Праздник", "sick": "Тренер болеет", "other": "Другое"}.get(reason, "Другое")
     
-    from datetime import date
     today = datetime.now(BELARUS_TZ).date()
     current_weekday = today.weekday()
     
@@ -899,6 +906,7 @@ async def cb_skip_group_reason(callback: CallbackQuery):
                         date=today,
                         time=time_key,
                         location=sched_info.get("location_name", student.location),
+                        location_id=sched_info.get("location_id"),
                         notes=f"Отмена: {reason_text}"
                     )
                     s.add(lesson)
@@ -908,6 +916,7 @@ async def cb_skip_group_reason(callback: CallbackQuery):
                     att = Attendance(
                         lesson_id=lesson.id,
                         student_id=student.id,
+                        location_id=sched_info.get("location_id"),
                         status="excused",
                         attendance_date=today,
                         attendance_time=time_key
@@ -920,7 +929,7 @@ async def cb_skip_group_reason(callback: CallbackQuery):
     await callback.message.edit_text(
         f"✅ Сохранено\n\n"
         f"Тренировка {time_key} отменена: {reason_text}\n"
-        f"Учеников: {skipped_count}"
+        f"Отмечено слотов: {skipped_count}"
     )
 
 
@@ -1030,8 +1039,8 @@ async def mark_notification_sent(coach_id: int, notification_type: str):
         await s.commit()
 
 
-async def send_daily_summary(coach_id: int = None):
-    """Send daily summary to coach(es). If coach_id is None, send to all coaches."""
+async def _deprecated_send_daily_summary(coach_id: int = None):
+    """Deprecated duplicate preserved temporarily during migration."""
     if bot is None:
         logger.warning("Bot is not initialized; skipping daily summary")
         return
@@ -1379,25 +1388,21 @@ async def cmd_summary(message: Message):
     else:
         await message.answer("ℹ️ Сегодня нет данных для сводки.")
     return
-    await message.answer("✅ Сводка отправлена!")
 
 
 # === Lesson Reminder Scheduler ===
 
 async def lesson_reminder_scheduler():
-    """Background task: check for unmarked lessons every 5 minutes."""
+    """Background task: remind about groups whose attendance has not been marked yet."""
     while True:
         try:
-            await asyncio.sleep(300)  # 5 minutes
-            
             now = datetime.now(BELARUS_TZ)
             current_weekday = now.weekday()
             current_date = now.date()
             
             async with async_session() as s:
-                # Get all coaches with notifications eager-loaded to avoid greenlet_spawn on cascade
                 coaches_result = await s.execute(
-                    select(Coach).options(selectinload(Coach.notifications)).where(Coach.is_active == True)
+                    select(Coach).where(Coach.is_active == True)
                 )
                 coaches = coaches_result.scalars().all()
                 
@@ -1425,8 +1430,8 @@ async def lesson_reminder_scheduler():
                             lesson_start = lesson_hour * 60 + lesson_min
                             now_total = now.hour * 60 + now.minute
                             
-                            # Only notify at lesson start time (within 5 min window)
-                            if not (0 <= now_total - lesson_start <= 5):
+                            # Keep a small grace window so a restart does not lose the reminder.
+                            if not (0 <= now_total - lesson_start <= LESSON_REMINDER_WINDOW_MINUTES):
                                 continue
                             
                             # Check if lesson already marked
@@ -1456,7 +1461,15 @@ async def lesson_reminder_scheduler():
                                 Notification.created_at >= now - timedelta(minutes=30)
                             )
                         )
-                        if existing_notification.scalar_one_or_none():
+                        reminder_key = build_lesson_reminder_log_key(current_date, lesson_time)
+                        existing_notification_exact = await s.execute(
+                            select(Notification).where(
+                                Notification.coach_id == coach.id,
+                                Notification.type == "lesson_reminder",
+                                Notification.message.like(f"{reminder_key}%")
+                            )
+                        )
+                        if existing_notification.scalar_one_or_none() or existing_notification_exact.scalar_one_or_none():
                             continue
                         
                         # Send reminder for group
@@ -1467,7 +1480,7 @@ async def lesson_reminder_scheduler():
                             coach_id=coach.id,
                             student_id=students_list[0].id,
                             type="lesson_reminder",
-                            message=f"Напоминание о тренировке {lesson_time} ({len(students_list)} учеников)"
+                            message=f"{reminder_key} Reminder for lesson {lesson_time} ({len(students_list)} students)"
                         )
                         s.add(notification)
                         await s.commit()
@@ -1476,7 +1489,8 @@ async def lesson_reminder_scheduler():
                         
         except Exception as e:
             logger.error(f"Error in reminder scheduler: {e}")
-            await asyncio.sleep(60)
+        
+        await asyncio.sleep(LESSON_REMINDER_POLL_SECONDS)
 
 
 async def send_lesson_reminder(coach: Coach, students: list, time_str: str):
@@ -1510,7 +1524,7 @@ async def send_lesson_reminder(coach: Coach, students: list, time_str: str):
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📱 Открыть CRM", web_app=WebAppInfo(url=f"{WEBAPP_URL or 'https://your-app.up.railway.app'}/"))],
-        [InlineKeyboardButton(text="❌ Тренировки нет", callback_data="skip_lesson")]
+        [InlineKeyboardButton(text="❌ Тренировки нет", callback_data=f"skip_group:{time_str}")]
     ])
     
     try:
@@ -1522,18 +1536,25 @@ async def send_lesson_reminder(coach: Coach, students: list, time_str: str):
 # === Daily Notification Scheduler ===
 
 async def daily_notification_scheduler():
-    """Background task: send daily summaries at 9:00 AM."""
+    """Background task: send daily summaries once per morning."""
     while True:
         try:
             now = datetime.now(BELARUS_TZ)
             
-            # Calculate time until 10:00 AM (Belarus time)
-            target_time = now.replace(hour=10, minute=0, second=0, microsecond=0)
+            target_time = now.replace(
+                hour=DAILY_SUMMARY_HOUR,
+                minute=DAILY_SUMMARY_MINUTE,
+                second=0,
+                microsecond=0
+            )
             if target_time <= now:
                 target_time += timedelta(days=1)
             
             wait_seconds = (target_time - now).total_seconds()
-            logger.info(f"Daily notification scheduler: waiting {wait_seconds/3600:.1f} hours until 10:00 AM (Belarus time)")
+            logger.info(
+                f"Daily notification scheduler: waiting {wait_seconds/3600:.1f} hours "
+                f"until {DAILY_SUMMARY_HOUR:02d}:{DAILY_SUMMARY_MINUTE:02d} (Belarus time)"
+            )
             
             await asyncio.sleep(wait_seconds)
             

@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, date, timedelta
 from zoneinfo import ZoneInfo
 from typing import Optional
+import re
 
 BELARUS_TZ = ZoneInfo('Europe/Minsk')
 import hmac
@@ -146,6 +147,58 @@ def normalize_lesson_times_payload(lesson_times, lesson_days: str, fallback_time
     return json.dumps(normalized)
 
 
+def normalize_schedule_days_payload(days, fallback_days: str = "1,3") -> str:
+    """Normalize schedule day payloads to comma-separated weekday values."""
+    if isinstance(days, list):
+        normalized_days = [str(day).strip() for day in days if str(day).strip()]
+        return ",".join(normalized_days) or fallback_days
+    if isinstance(days, str) and days.strip():
+        return ",".join(part.strip() for part in days.split(",") if part.strip()) or fallback_days
+    return fallback_days
+
+
+async def resolve_legacy_schedule_fields(
+    session,
+    schedules_payload,
+    fallback_location: str = "Зал Break Wave",
+    fallback_location_id: int | None = None,
+    fallback_days: str = "1,3",
+    fallback_times: str | None = None,
+) -> dict:
+    """Derive legacy single-location fields from the primary schedule."""
+    if not schedules_payload:
+        return {
+            "location": fallback_location,
+            "location_id": fallback_location_id,
+            "lesson_days": fallback_days,
+            "lesson_times": fallback_times or normalize_lesson_times_payload(None, fallback_days),
+        }
+
+    primary_schedule = next(
+        (schedule for schedule in schedules_payload if schedule.get("is_primary")),
+        schedules_payload[0],
+    )
+    lesson_days = normalize_schedule_days_payload(primary_schedule.get("days"), fallback_days)
+    lesson_times = normalize_lesson_times_payload(
+        primary_schedule.get("times"),
+        lesson_days,
+        primary_schedule.get("time", "18:00"),
+    )
+    location_id = primary_schedule.get("location_id") or fallback_location_id
+    location_name = fallback_location
+    if location_id:
+        location = await session.get(Location, location_id)
+        if location:
+            location_name = location.name
+
+    return {
+        "location": location_name,
+        "location_id": location_id,
+        "lesson_days": lesson_days,
+        "lesson_times": lesson_times,
+    }
+
+
 def apply_attendance_to_balance(student: Student, old_status: str | None, new_status: str) -> None:
     """Keep lessons_remaining consistent when attendance changes."""
     if getattr(student, "is_unlimited", False):
@@ -169,9 +222,9 @@ async def root():
     html_file = WEBAPP_DIR / "index.html"
     if html_file.exists():
         content = html_file.read_text()
-        # Replace version placeholder or add version to assets
-        content = content.replace('href="/assets/style.css?v=2"', f'href="/assets/style.css?v={APP_VERSION}"')
-        content = content.replace('src="/assets/app.js?v=2"', f'src="/assets/app.js?v={APP_VERSION}"')
+        # Always bump asset versions on server start so Telegram WebApp does not keep stale JS/CSS.
+        content = re.sub(r'href="/assets/style\.css\?v=\d+"', f'href="/assets/style.css?v={APP_VERSION}"', content)
+        content = re.sub(r'src="/assets/app\.js\?v=\d+"', f'src="/assets/app.js?v={APP_VERSION}"', content)
         return Response(content=content, media_type="text/html", headers={
             "Cache-Control": "no-cache, no-store, must-revalidate",
             "Pragma": "no-cache",
@@ -573,11 +626,20 @@ async def api_create_student(request: Request):
         if not target_coach:
             return JSONResponse({"error": "coach_not_found"}, 400)
         
+        schedules_payload = data.get("schedules") or []
         lesson_days = data.get("lesson_days", "1,3")
         lesson_times = normalize_lesson_times_payload(
             data.get("lesson_times"),
             lesson_days,
             data.get("lesson_time", "18:00")
+        )
+        legacy_fields = await resolve_legacy_schedule_fields(
+            s,
+            schedules_payload,
+            fallback_location=data.get("location", "Р—Р°Р» Break Wave"),
+            fallback_location_id=data.get("location_id"),
+            fallback_days=lesson_days,
+            fallback_times=lesson_times,
         )
         
         student = Student(
@@ -599,6 +661,10 @@ async def api_create_student(request: Request):
             subscription_end=None,
             notes=data.get("notes") or None,
         )
+        student.location = legacy_fields["location"]
+        student.location_id = legacy_fields["location_id"]
+        student.lesson_days = legacy_fields["lesson_days"]
+        student.lesson_times = legacy_fields["lesson_times"]
         s.add(student)
         await s.flush()  # Get student.id without committing
         
@@ -608,11 +674,11 @@ async def api_create_student(request: Request):
         schedule_times = lesson_times
         
         # If schedules array provided (new format), use it
-        if data.get("schedules") and len(data["schedules"]) > 0:
-            for idx, sched_data in enumerate(data["schedules"]):
+        if schedules_payload:
+            for idx, sched_data in enumerate(schedules_payload):
                 times = sched_data.get("times")
                 if not times and sched_data.get("time"):
-                    days_list = sched_data.get("days", "1,3").split(",")
+                    days_list = normalize_schedule_days_payload(sched_data.get("days"), "1,3").split(",")
                     times = json.dumps({d.strip(): sched_data["time"] for d in days_list})
                 elif isinstance(times, dict):
                     times = json.dumps(times)
@@ -620,10 +686,10 @@ async def api_create_student(request: Request):
                 schedule = StudentSchedule(
                     student_id=student.id,
                     location_id=sched_data.get("location_id"),
-                    days=sched_data.get("days", "1,3"),
+                    days=normalize_schedule_days_payload(sched_data.get("days"), "1,3"),
                     times=times or '{"1": "18:00"}',
                     duration=sched_data.get("duration", 90),
-                    is_primary=(idx == 0)  # First schedule is primary
+                    is_primary=bool(sched_data.get("is_primary", idx == 0))
                 )
                 s.add(schedule)
         else:
@@ -823,6 +889,7 @@ async def api_update_student(student_id: int, request: Request):
         
         # Update schedules if provided (new multi-location system)
         if "schedules" in data and data["schedules"]:
+            schedules_payload = data["schedules"]
             # Get existing schedules
             existing_schedules_result = await s.execute(
                 select(StudentSchedule).where(StudentSchedule.student_id == student_id)
@@ -830,8 +897,9 @@ async def api_update_student(student_id: int, request: Request):
             existing_schedules = {sch.id: sch for sch in existing_schedules_result.scalars().all()}
             
             # Process incoming schedules
-            for idx, sched_data in enumerate(data["schedules"]):
+            for idx, sched_data in enumerate(schedules_payload):
                 sched_id = sched_data.get("id")
+                normalized_days = normalize_schedule_days_payload(sched_data.get("days"), student.lesson_days or "1,3")
                 
                 # Handle times JSON
                 times = sched_data.get("times")
@@ -839,7 +907,7 @@ async def api_update_student(student_id: int, request: Request):
                     times = json.dumps(times)
                 elif not times and sched_data.get("time"):
                     # Legacy format: create times from single time value
-                    days = sched_data.get("days", "1,3").split(",")
+                    days = normalized_days.split(",")
                     times_dict = {d.strip(): sched_data["time"] for d in days}
                     times = json.dumps(times_dict)
                 
@@ -849,7 +917,7 @@ async def api_update_student(student_id: int, request: Request):
                     if "location_id" in sched_data:
                         sch.location_id = sched_data["location_id"]
                     if "days" in sched_data:
-                        sch.days = sched_data["days"]
+                        sch.days = normalized_days
                     if times:
                         sch.times = times
                     if "duration" in sched_data:
@@ -863,16 +931,28 @@ async def api_update_student(student_id: int, request: Request):
                     new_schedule = StudentSchedule(
                         student_id=student_id,
                         location_id=sched_data.get("location_id"),
-                        days=sched_data.get("days", "1,3"),
+                        days=normalized_days,
                         times=times or '{"1": "18:00", "3": "18:00"}',
                         duration=int(sched_data.get("duration", 90)),
                         is_primary=sched_data.get("is_primary", idx == 0)
                     )
                     s.add(new_schedule)
             
-            # Delete schedules that weren't in the update (optional - can be disabled if you want to keep orphans)
-            # for sch in existing_schedules.values():
-            #     await s.delete(sch)
+            for sch in existing_schedules.values():
+                await s.delete(sch)
+
+            legacy_fields = await resolve_legacy_schedule_fields(
+                s,
+                schedules_payload,
+                fallback_location=student.location or "Зал Break Wave",
+                fallback_location_id=student.location_id,
+                fallback_days=student.lesson_days or "1,3",
+                fallback_times=student.lesson_times,
+            )
+            student.location = legacy_fields["location"]
+            student.location_id = legacy_fields["location_id"]
+            student.lesson_days = legacy_fields["lesson_days"]
+            student.lesson_times = legacy_fields["lesson_times"]
         
         await s.commit()
         return {"success": True}
@@ -1236,16 +1316,17 @@ async def recalculate_student_subscription(student_id: int, session):
             )
             used_lessons = used_result.scalar() or 0
             total_lessons = sum(p.lessons_count or 0 for p in paid_payments)
+            remaining_lessons = max(0, total_lessons - used_lessons)
             await session.execute(
                 update(Student).where(Student.id == student_id).values(
                     is_unlimited=False,
                     lessons_count=total_lessons,
-                    lessons_remaining=total_lessons - used_lessons,
+                    lessons_remaining=remaining_lessons,
                     subscription_start=last_payment.period_start,
                     subscription_end=last_payment.period_end
                 )
             )
-            logger.info(f"Student {student_id} set to regular: {total_lessons - used_lessons} remaining")
+            logger.info(f"Student {student_id} set to regular: {remaining_lessons} remaining")
     else:
         await session.execute(
             update(Student).where(Student.id == student_id).values(
@@ -1507,7 +1588,8 @@ async def api_current_lesson(request: Request):
                     existing = await s.execute(
                         select(Lesson).where(
                             Lesson.student_id == student.id,
-                            Lesson.date == current_date
+                            Lesson.date == current_date,
+                            Lesson.time == lesson_time
                         )
                     )
                     lesson_exists = existing.scalar_one_or_none()
@@ -2020,8 +2102,10 @@ async def api_update_subscription(student_id: int, request: Request):
             student.lessons_remaining = int(data["lessons_remaining"])
         elif "add_lessons" in data:
             # Add lessons to existing count
-            student.lessons_remaining += int(data["add_lessons"])
-            student.lessons_count += int(data["add_lessons"])
+            add_lessons = int(data["add_lessons"])
+            current_remaining = get_remaining_lessons(student)
+            student.lessons_remaining = current_remaining + add_lessons
+            student.lessons_count = (student.lessons_count or 0) + add_lessons
         
         if "subscription_start" in data:
             student.subscription_start = date.fromisoformat(data["subscription_start"]) if data["subscription_start"] else None
@@ -2259,8 +2343,7 @@ async def api_daily_summary(request: Request):
             
             for idx, student in enumerate(students):
                 try:
-                    # Fix for old records without lessons_remaining
-                    lessons_remaining = student.lessons_remaining if student.lessons_remaining is not None else student.lessons_count
+                    lessons_remaining = get_remaining_lessons(student)
                     
                     # Check subscription expiry
                     if student.subscription_end:
@@ -2281,17 +2364,18 @@ async def api_daily_summary(request: Request):
                             })
                     
                     # Check lessons remaining
-                    if lessons_remaining <= 0:
+                    if not getattr(student, "is_unlimited", False) and lessons_remaining <= 0:
                         depleted.append({
                             "id": student.id,
                             "name": student.name,
                             "lessons_remaining": 0
                         })
-                    elif lessons_remaining <= 2:
+                    elif not getattr(student, "is_unlimited", False) and lessons_remaining <= 2:
                         low_lessons.append({
                             "id": student.id,
                             "name": student.name,
-                            "lessons_remaining": lessons_remaining
+                            "lessons_remaining": lessons_remaining,
+                            "is_unlimited": getattr(student, "is_unlimited", False)
                         })
                 except Exception as e:
                     logger.error(f"Error processing student {student.id}: {e}")
@@ -2305,7 +2389,7 @@ async def api_daily_summary(request: Request):
                     # Use new multi-location schedule system
                     schedules = student.get_schedules_for_day(weekday)
                     for sched_info in schedules:
-                        lessons_remaining = student.lessons_remaining if student.lessons_remaining is not None else student.lessons_count
+                        lessons_remaining = get_remaining_lessons(student)
                         today_lessons.append({
                             "id": student.id,
                             "name": student.name,
