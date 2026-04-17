@@ -3,11 +3,13 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse, HTMLResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
-from sqlalchemy import select, func, and_, or_, desc
+from sqlalchemy import select, func, and_, or_, desc, delete, update
 from contextlib import asynccontextmanager
 from datetime import datetime, date, timedelta
+from zoneinfo import ZoneInfo
 from typing import Optional
-from dateutil.relativedelta import relativedelta
+
+BELARUS_TZ = ZoneInfo('Europe/Minsk')
 import hmac
 import hashlib
 import json
@@ -16,7 +18,8 @@ import logging
 import urllib.parse
 
 from app.database import async_session, init_db
-from app.models import Coach, Student, Lesson, Attendance, Payment, Notification, AdminUser, DailyNotificationLog, Location
+from app.models import Coach, Student, Lesson, Attendance, Payment, Notification, AdminUser, DailyNotificationLog, Location, StudentSchedule
+from sqlalchemy.orm import selectinload
 from app.config import WEBAPP_DIR, BOT_TOKEN, WEEKDAYS, ADMIN_IDS
 
 # Version for cache busting - auto-generated on server start (timestamp)
@@ -35,6 +38,18 @@ class NoCacheMiddleware(BaseHTTPMiddleware):
         return response
 
 logger = logging.getLogger(__name__)
+
+
+def get_student_schedule_for_time(student: Student, day_of_week: int, target_time: str | None = None) -> dict | None:
+    """Return matching schedule info for a day/time, or the primary schedule for that day."""
+    schedules = student.get_schedules_for_day(day_of_week)
+    if not schedules:
+        return None
+    if target_time:
+        for sched in schedules:
+            if sched["time"] == target_time:
+                return sched
+    return schedules[0]
 
 
 @asynccontextmanager
@@ -112,36 +127,10 @@ async def is_admin_user(user_id: int | None) -> bool:
 
 
 def get_remaining_lessons(student: Student) -> int:
-    """Return a normalized remaining lessons value for old and new records."""
-    if student.lessons_remaining is None:
-        return student.lessons_count or 0
+    """Return normalized remaining lessons value for old and new records."""
+    if getattr(student, "lessons_remaining", None) is None:
+        return getattr(student, "lessons_count", 0) or 0
     return student.lessons_remaining
-
-
-def get_student_lesson_time(student: Student, lesson_date: date | None = None, day_of_week: int | None = None) -> str:
-    """Return the configured lesson time for a student on a given day."""
-    if day_of_week is None:
-        day_of_week = lesson_date.weekday() if lesson_date else date.today().weekday()
-    return student.get_lesson_time_for_day(day_of_week)
-
-
-def get_student_schedule_slots(student: Student) -> list[tuple[int, str]]:
-    """Expand student's weekly schedule into (day, time) pairs."""
-    if not student.lesson_days:
-        return []
-
-    slots: list[tuple[int, str]] = []
-    for raw_day in student.lesson_days.split(","):
-        raw_day = raw_day.strip()
-        if not raw_day:
-            continue
-        try:
-            day = int(raw_day)
-        except ValueError:
-            continue
-        slots.append((day, get_student_lesson_time(student, day_of_week=day)))
-
-    return slots
 
 
 def normalize_lesson_times_payload(lesson_times, lesson_days: str, fallback_time: str = "18:00") -> str:
@@ -159,6 +148,9 @@ def normalize_lesson_times_payload(lesson_times, lesson_days: str, fallback_time
 
 def apply_attendance_to_balance(student: Student, old_status: str | None, new_status: str) -> None:
     """Keep lessons_remaining consistent when attendance changes."""
+    if getattr(student, "is_unlimited", False):
+        return
+
     current_remaining = get_remaining_lessons(student)
     student.lessons_remaining = current_remaining
 
@@ -167,21 +159,6 @@ def apply_attendance_to_balance(student: Student, old_status: str | None, new_st
             student.lessons_remaining = current_remaining - 1
     elif new_status != "present" and old_status == "present":
         student.lessons_remaining = current_remaining + 1
-
-
-def apply_paid_payment_to_student(student: Student, payment: Payment) -> None:
-    """Update subscription counters when a payment becomes paid."""
-    current_total = student.lessons_count or 0
-    current_remaining = get_remaining_lessons(student)
-
-    if payment.period_start and not student.subscription_start:
-        student.subscription_start = payment.period_start
-    if payment.period_end:
-        student.subscription_end = payment.period_end
-
-    if payment.lessons_count:
-        student.lessons_count = current_total + payment.lessons_count
-        student.lessons_remaining = current_remaining + payment.lessons_count
 
 
 # === Routes ===
@@ -246,7 +223,7 @@ async def api_dashboard(request: Request):
     if not coach:
         return JSONResponse({"error": "unauthorized"}, 403)
     
-    today = date.today()
+    today = datetime.now(BELARUS_TZ).date()
     month_start = today.replace(day=1)
     
     async with async_session() as s:
@@ -281,8 +258,7 @@ async def api_dashboard(request: Request):
         total_attendance_result = await s.execute(
             select(func.count(Attendance.id)).join(Lesson).where(
                 Lesson.coach_id == coach.id,
-                Lesson.date >= month_start,
-                Attendance.status != "excused"
+                Lesson.date >= month_start
             )
         )
         total_attendance = total_attendance_result.scalar()
@@ -338,7 +314,7 @@ async def api_sync(request: Request):
     if not coach:
         return JSONResponse({"error": "unauthorized"}, 403)
     
-    today = date.today()
+    today = datetime.now(BELARUS_TZ).date()
     month_start = today.replace(day=1)
     
     async with async_session() as s:
@@ -359,6 +335,7 @@ async def api_sync(request: Request):
             "lesson_price": st.lesson_price,
             "lessons_count": st.lessons_count,
             "lessons_remaining": get_remaining_lessons(st),
+            "is_unlimited": st.is_unlimited,
             "subscription_start": st.subscription_start.isoformat() if st.subscription_start else None,
             "subscription_end": st.subscription_end.isoformat() if st.subscription_end else None,
             "notes": st.notes,
@@ -472,7 +449,7 @@ async def api_coaches(request: Request):
 
 @app.post("/api/students")
 async def api_students(request: Request):
-    """Get all students for coach (or all for admin)."""
+    """Get all students for coach (or all for admin/shared view)."""
     body = await request.json()
     coach = await get_current_coach(body.get("initData", ""))
     if not coach:
@@ -490,39 +467,88 @@ async def api_students(request: Request):
             if admin_result.scalar_one_or_none():
                 is_admin_user = True
     
-    async with async_session() as s:
-        if is_admin_user:
-            # Admin sees all students
-            result = await s.execute(
-                select(Student).order_by(Student.name)
-            )
-        else:
-            # Regular coach sees only their students
-            result = await s.execute(
-                select(Student).where(Student.coach_id == coach.id).order_by(Student.name)
-            )
-        students = result.scalars().all()
+    # Get filter parameters
+    view_mode = body.get("view_mode", "all")  # "all" or "my"
+    coach_filter = body.get("coach_id")  # Filter by specific coach
     
-    return [{
-        "id": st.id,
-        "coach_id": st.coach_id,
-        "name": st.name,
-        "nickname": st.nickname,
-        "phone": st.phone,
-        "parent_phone": st.parent_phone,
-        "age": st.age,
-        "location": st.location,
-        "location_id": st.location_id,
-        "lesson_days": st.lesson_days,
-        "lesson_times": st.lesson_times,
-        "lesson_price": st.lesson_price,
-        "lessons_count": st.lessons_count,
-        "lessons_remaining": get_remaining_lessons(st),
-        "subscription_start": st.subscription_start.isoformat() if st.subscription_start else None,
-        "subscription_end": st.subscription_end.isoformat() if st.subscription_end else None,
-        "notes": st.notes,
-        "is_active": st.is_active,
-    } for st in students]
+    async with async_session() as s:
+        # Build query with eager loading for schedules
+        query = select(Student, Coach).join(Coach).options(
+            selectinload(Student.schedules).selectinload(StudentSchedule.location)
+        )
+        
+        if coach_filter:
+            # Filter by specific coach
+            query = query.where(Student.coach_id == coach_filter)
+        elif view_mode == "my" and not is_admin_user:
+            # Show only my students
+            query = query.where(Student.coach_id == coach.id)
+        # else: show all students (shared view for coaches)
+        
+        query = query.where(Student.is_active == True).order_by(Student.name)
+        result = await s.execute(query)
+        rows = result.all()
+        
+        # Recalculate subscriptions for all students to ensure consistency
+        for st, _ in rows:
+            await recalculate_student_subscription(st.id, s)
+        await s.commit()
+        
+        # Clear identity map and reload all students fresh from DB
+        s.expunge_all()
+        student_ids = [st.id for st, _ in rows]
+        if student_ids:
+            result = await s.execute(
+                select(Student, Coach).join(Coach).options(
+                    selectinload(Student.schedules).selectinload(StudentSchedule.location)
+                ).where(Student.id.in_(student_ids)).order_by(Student.name)
+            )
+            rows = result.all()
+        
+        # Format response with schedules
+        result_list = []
+        for st, coach_obj in rows:
+            # Build schedules list
+            schedules_list = []
+            for sch in st.schedules:
+                loc_name = sch.location.name if sch.location else "Зал"
+                schedules_list.append({
+                    "id": sch.id,
+                    "location_id": sch.location_id,
+                    "location_name": loc_name,
+                    "days": sch.days,
+                    "times": sch.times,
+                    "duration": sch.duration,
+                    "is_primary": sch.is_primary
+                })
+            
+            result_list.append({
+                "id": st.id,
+                "coach_id": st.coach_id,
+                "coach_name": coach_obj.first_name if coach_obj else "Unknown",
+                "coach_username": coach_obj.username if coach_obj else None,
+                "is_my_student": st.coach_id == coach.id,
+                "name": st.name,
+                "nickname": st.nickname,
+                "phone": st.phone,
+                "parent_phone": st.parent_phone,
+                "age": st.age,
+                "location": st.location,
+                "location_id": st.location_id,
+                "lesson_days": st.lesson_days,
+                "lesson_times": st.lesson_times,
+                "lesson_price": st.lesson_price,
+                "lessons_count": st.lessons_count,
+                "lessons_remaining": get_remaining_lessons(st),
+                "is_unlimited": st.is_unlimited,
+                "subscription_start": st.subscription_start.isoformat() if st.subscription_start else None,
+                "subscription_end": st.subscription_end.isoformat() if st.subscription_end else None,
+                "notes": st.notes,
+                "is_active": st.is_active,
+                "schedules": schedules_list  # Include schedules for frontend
+            })
+        
+        return result_list
 
 
 @app.post("/api/students/create")
@@ -534,13 +560,11 @@ async def api_create_student(request: Request):
         return JSONResponse({"error": "unauthorized"}, 403)
     
     data = body.get("student", {})
-    user = verify_telegram_init_data(body.get("initData", ""))
-    is_admin_actor = await is_admin_user(user.get("id") if user else None)
     
-    # Determine coach_id (only admins can assign students to another coach)
+    user = verify_telegram_init_data(body.get("initData", ""))
     requested_coach_id = data.get("coach_id")
     coach_id = requested_coach_id or coach.id
-    if coach_id != coach.id and not is_admin_actor:
+    if coach_id != coach.id and not await is_admin_user(user.get("id") if user else None):
         return JSONResponse({"error": "forbidden"}, 403)
     
     # Verify coach exists
@@ -549,7 +573,6 @@ async def api_create_student(request: Request):
         if not target_coach:
             return JSONResponse({"error": "coach_not_found"}, 400)
         
-        lessons_count = int(data.get("lessons_count", 8))
         lesson_days = data.get("lesson_days", "1,3")
         lesson_times = normalize_lesson_times_payload(
             data.get("lesson_times"),
@@ -568,14 +591,53 @@ async def api_create_student(request: Request):
             location_id=data.get("location_id"),
             lesson_days=lesson_days,
             lesson_times=lesson_times,
-            lesson_price=int(data.get("lesson_price", 150)),
-            lessons_count=lessons_count,
-            lessons_remaining=lessons_count,
-            subscription_start=date.fromisoformat(data["subscription_start"]) if data.get("subscription_start") else None,
-            subscription_end=date.fromisoformat(data["subscription_end"]) if data.get("subscription_end") else None,
+            lesson_price=150,
+            lessons_count=0,
+            lessons_remaining=0,
+            is_unlimited=False,
+            subscription_start=None,
+            subscription_end=None,
             notes=data.get("notes") or None,
         )
         s.add(student)
+        await s.flush()  # Get student.id without committing
+        
+        # Create primary schedule in new table (for multi-location support)
+        # This duplicates data temporarily for migration purposes
+        schedule_days = data.get("lesson_days", "1,3")
+        schedule_times = lesson_times
+        
+        # If schedules array provided (new format), use it
+        if data.get("schedules") and len(data["schedules"]) > 0:
+            for idx, sched_data in enumerate(data["schedules"]):
+                times = sched_data.get("times")
+                if not times and sched_data.get("time"):
+                    days_list = sched_data.get("days", "1,3").split(",")
+                    times = json.dumps({d.strip(): sched_data["time"] for d in days_list})
+                elif isinstance(times, dict):
+                    times = json.dumps(times)
+                
+                schedule = StudentSchedule(
+                    student_id=student.id,
+                    location_id=sched_data.get("location_id"),
+                    days=sched_data.get("days", "1,3"),
+                    times=times or '{"1": "18:00"}',
+                    duration=sched_data.get("duration", 90),
+                    is_primary=(idx == 0)  # First schedule is primary
+                )
+                s.add(schedule)
+        else:
+            # Create from legacy fields (default behavior)
+            schedule = StudentSchedule(
+                student_id=student.id,
+                location_id=data.get("location_id"),
+                days=schedule_days,
+                times=schedule_times,
+                duration=int(data.get("lesson_duration", 90)),
+                is_primary=True
+            )
+            s.add(schedule)
+        
         await s.commit()
         
         return {"success": True, "id": student.id}
@@ -610,6 +672,9 @@ async def api_get_student(student_id: int, request: Request):
                 "status": att.status,
             })
         
+        # Recalculate subscription to ensure consistency before returning
+        await recalculate_student_subscription(student_id, s)
+        
         # Get payments
         payments_result = await s.execute(
             select(Payment).where(Payment.student_id == student_id).order_by(desc(Payment.created_at))
@@ -617,13 +682,16 @@ async def api_get_student(student_id: int, request: Request):
         payments = [{
             "id": p.id,
             "amount": p.amount,
+            "lessons_count": p.lessons_count,
             "status": p.status,
             "period_start": p.period_start.isoformat() if p.period_start else None,
             "period_end": p.period_end.isoformat() if p.period_end else None,
             "paid_at": p.paid_at.isoformat() if p.paid_at else None,
+            "is_unlimited": p.is_unlimited,
+            "notes": p.notes,
         } for p in payments_result.scalars().all()]
         
-        # Get location info
+        # Get location info (legacy)
         location_name = st.location
         if st.location_id:
             loc_result = await s.execute(select(Location).where(Location.id == st.location_id))
@@ -631,21 +699,71 @@ async def api_get_student(student_id: int, request: Request):
             if loc:
                 location_name = loc.name
         
+        # Get schedules (new multi-location system)
+        schedules_result = await s.execute(
+            select(StudentSchedule, Location).outerjoin(
+                Location, StudentSchedule.location_id == Location.id
+            ).where(StudentSchedule.student_id == student_id)
+        )
+        schedules = []
+        for sched, loc in schedules_result.all():
+            schedules.append({
+                "id": sched.id,
+                "location_id": sched.location_id,
+                "location_name": loc.name if loc else "Зал",
+                "location_address": loc.address if loc else None,
+                "days": sched.days,
+                "times": sched.times,
+                "duration": sched.duration,
+                "is_primary": sched.is_primary,
+            })
+        
+        # If no schedules yet, create fallback from legacy data
+        if not schedules and st.lesson_days:
+            schedules = [{
+                "id": None,
+                "location_id": st.location_id,
+                "location_name": location_name,
+                "days": st.lesson_days,
+                "times": st.lesson_times,
+                "duration": st.lesson_duration,
+                "is_primary": True,
+                "is_legacy": True
+            }]
+        
+        await s.commit()
+        
+        # Clear SQLAlchemy identity map to force fresh DB read
+        s.expunge_all()
+        
+        # Reload fresh student data with schedules after commit
+        result = await s.execute(
+            select(Student).options(
+                selectinload(Student.schedules).selectinload(StudentSchedule.location)
+            ).where(Student.id == student_id)
+        )
+        st = result.scalar_one()
+        
         return {
             "id": st.id,
+            "coach_id": st.coach_id,
             "name": st.name,
             "nickname": st.nickname,
             "phone": st.phone,
             "parent_phone": st.parent_phone,
             "age": st.age,
             "birthday": st.birthday.isoformat() if st.birthday else None,
+            # Legacy fields (for backward compatibility)
             "location": location_name,
             "location_id": st.location_id,
             "lesson_days": st.lesson_days,
             "lesson_times": st.lesson_times,
+            # New multi-location system
+            "schedules": schedules,
             "lesson_price": st.lesson_price,
             "lessons_count": st.lessons_count,
             "lessons_remaining": get_remaining_lessons(st),
+            "is_unlimited": st.is_unlimited,
             "subscription_start": st.subscription_start.isoformat() if st.subscription_start else None,
             "subscription_end": st.subscription_end.isoformat() if st.subscription_end else None,
             "notes": st.notes,
@@ -696,20 +814,65 @@ async def api_update_student(student_id: int, request: Request):
             student.lesson_times = normalize_lesson_times_payload(None, student.lesson_days, data["lesson_time"])
         if "lesson_price" in data:
             student.lesson_price = int(data["lesson_price"])
-        if "lessons_count" in data:
-            student.lessons_count = int(data["lessons_count"])
-            if student.lessons_remaining is None:
-                student.lessons_remaining = student.lessons_count
-        if "lessons_remaining" in data:
-            student.lessons_remaining = int(data["lessons_remaining"])
-        if "subscription_start" in data:
-            student.subscription_start = date.fromisoformat(data["subscription_start"]) if data["subscription_start"] else None
-        if "subscription_end" in data:
-            student.subscription_end = date.fromisoformat(data["subscription_end"]) if data["subscription_end"] else None
+        # Note: subscription fields (lessons_count, lessons_remaining, is_unlimited,
+        # subscription_start, subscription_end) are managed via Payments API only
         if "notes" in data:
             student.notes = data["notes"] or None
         if "is_active" in data:
             student.is_active = bool(data["is_active"])
+        
+        # Update schedules if provided (new multi-location system)
+        if "schedules" in data and data["schedules"]:
+            # Get existing schedules
+            existing_schedules_result = await s.execute(
+                select(StudentSchedule).where(StudentSchedule.student_id == student_id)
+            )
+            existing_schedules = {sch.id: sch for sch in existing_schedules_result.scalars().all()}
+            
+            # Process incoming schedules
+            for idx, sched_data in enumerate(data["schedules"]):
+                sched_id = sched_data.get("id")
+                
+                # Handle times JSON
+                times = sched_data.get("times")
+                if isinstance(times, dict):
+                    times = json.dumps(times)
+                elif not times and sched_data.get("time"):
+                    # Legacy format: create times from single time value
+                    days = sched_data.get("days", "1,3").split(",")
+                    times_dict = {d.strip(): sched_data["time"] for d in days}
+                    times = json.dumps(times_dict)
+                
+                if sched_id and sched_id in existing_schedules:
+                    # Update existing schedule
+                    sch = existing_schedules[sched_id]
+                    if "location_id" in sched_data:
+                        sch.location_id = sched_data["location_id"]
+                    if "days" in sched_data:
+                        sch.days = sched_data["days"]
+                    if times:
+                        sch.times = times
+                    if "duration" in sched_data:
+                        sch.duration = int(sched_data["duration"])
+                    if "is_primary" in sched_data:
+                        sch.is_primary = bool(sched_data["is_primary"])
+                    # Remove from dict to track which ones to keep
+                    del existing_schedules[sched_id]
+                else:
+                    # Create new schedule
+                    new_schedule = StudentSchedule(
+                        student_id=student_id,
+                        location_id=sched_data.get("location_id"),
+                        days=sched_data.get("days", "1,3"),
+                        times=times or '{"1": "18:00", "3": "18:00"}',
+                        duration=int(sched_data.get("duration", 90)),
+                        is_primary=sched_data.get("is_primary", idx == 0)
+                    )
+                    s.add(new_schedule)
+            
+            # Delete schedules that weren't in the update (optional - can be disabled if you want to keep orphans)
+            # for sch in existing_schedules.values():
+            #     await s.delete(sch)
         
         await s.commit()
         return {"success": True}
@@ -734,6 +897,75 @@ async def api_delete_student(student_id: int, request: Request):
         student.is_active = False
         await s.commit()
         return {"success": True}
+
+
+@app.post("/api/students/{student_id}/destroy")
+async def api_destroy_student(student_id: int, request: Request):
+    """Permanently delete student and all related data (lessons, attendance, payments, schedules).
+    
+    WARNING: This action cannot be undone! Use for students who left the school.
+    """
+    body = await request.json()
+    coach = await get_current_coach(body.get("initData", ""))
+    if not coach:
+        return JSONResponse({"error": "unauthorized"}, 403)
+    
+    # Optional: require confirmation
+    confirmed = body.get("confirm_destroy", False)
+    if not confirmed:
+        return JSONResponse({
+            "error": "confirmation_required",
+            "message": "Это действие необратимо! Для подтверждения отправьте confirm_destroy: true"
+        }, 400)
+    
+    async with async_session() as s:
+        # Verify student exists and belongs to coach
+        result = await s.execute(
+            select(Student).where(Student.id == student_id, Student.coach_id == coach.id)
+        )
+        student = result.scalar_one_or_none()
+        if not student:
+            return JSONResponse({"error": "not_found"}, 404)
+        
+        student_name = student.name
+        
+        # Delete all related data (cascade delete)
+        # 1. Delete attendance records
+        await s.execute(
+            delete(Attendance).where(Attendance.student_id == student_id)
+        )
+        
+        # 2. Delete lessons
+        await s.execute(
+            delete(Lesson).where(Lesson.student_id == student_id)
+        )
+        
+        # 3. Delete payments
+        await s.execute(
+            delete(Payment).where(Payment.student_id == student_id)
+        )
+        
+        # 4. Delete schedules
+        await s.execute(
+            delete(StudentSchedule).where(StudentSchedule.student_id == student_id)
+        )
+        
+        # 5. Delete notifications
+        await s.execute(
+            delete(Notification).where(Notification.student_id == student_id)
+        )
+        
+        # 6. Finally delete student
+        await s.delete(student)
+        await s.commit()
+        
+        logger.info(f"Student {student_name} (ID: {student_id}) permanently deleted by coach {coach.id}")
+        
+        return {
+            "success": True,
+            "message": f"Ученик {student_name} и все связанные данные полностью удалены",
+            "student_id": student_id
+        }
 
 
 # === Lessons & Attendance ===
@@ -849,21 +1081,24 @@ async def api_create_lesson(request: Request):
             return JSONResponse({"error": "student_not_found"}, 404)
         
         lesson_date = date.fromisoformat(data.get("date"))
-        lesson_time = data.get("time") or get_student_lesson_time(student, lesson_date=lesson_date)
-        status = data.get("status", "present")
+        weekday = lesson_date.weekday()
+        sched_info = get_student_schedule_for_time(student, weekday, data.get("time"))
+        lesson_time = data.get("time") or (sched_info["time"] if sched_info else student.get_lesson_time_for_day(weekday))
+        location_name = data.get("location") or (sched_info.get("location_name") if sched_info else student.location)
+        location_id = sched_info.get("location_id") if sched_info else student.location_id
 
         lesson_result = await s.execute(
             select(Lesson).where(
                 Lesson.student_id == student_id,
                 Lesson.coach_id == coach.id,
-                Lesson.date == lesson_date
+                Lesson.date == lesson_date,
+                Lesson.time == lesson_time
             )
         )
         lesson = lesson_result.scalar_one_or_none()
         if lesson:
-            lesson.time = lesson_time
-            lesson.location = data.get("location", lesson.location or student.location)
-            lesson.location_id = student.location_id
+            lesson.location = location_name
+            lesson.location_id = location_id
             lesson.topic = data.get("topic")
             lesson.notes = data.get("notes")
         else:
@@ -872,38 +1107,38 @@ async def api_create_lesson(request: Request):
                 student_id=student_id,
                 date=lesson_date,
                 time=lesson_time,
-                location=data.get("location", student.location),
-                location_id=student.location_id,
+                location=location_name,
+                location_id=location_id,
                 topic=data.get("topic"),
                 notes=data.get("notes"),
             )
             s.add(lesson)
             await s.flush()
-        
+
         attendance_result = await s.execute(
             select(Attendance).where(Attendance.lesson_id == lesson.id)
         )
         attendance = attendance_result.scalar_one_or_none()
         old_status = attendance.status if attendance else None
         if attendance:
-            attendance.status = status
+            attendance.status = data.get("status", "present")
             attendance.notes = data.get("attendance_notes")
             attendance.attendance_date = lesson_date
             attendance.attendance_time = lesson_time
-            attendance.location_id = student.location_id
+            attendance.location_id = location_id
         else:
             attendance = Attendance(
                 lesson_id=lesson.id,
                 student_id=student_id,
-                location_id=student.location_id,
-                status=status,
+                location_id=location_id,
+                status=data.get("status", "present"),
                 attendance_date=lesson_date,
                 attendance_time=lesson_time,
                 notes=data.get("attendance_notes"),
             )
             s.add(attendance)
 
-        apply_attendance_to_balance(student, old_status, status)
+        apply_attendance_to_balance(student, old_status, attendance.status)
         await s.commit()
         
         return {"success": True, "id": lesson.id}
@@ -962,6 +1197,70 @@ async def api_update_attendance(lesson_id: int, request: Request):
 
 # === Payments ===
 
+async def recalculate_student_subscription(student_id: int, session):
+    """Recalculate student's subscription based on all paid payments using raw UPDATE."""
+    from sqlalchemy import func
+    
+    # Get all paid payments for this student (newest first by created_at, then by id)
+    payments_result = await session.execute(
+        select(Payment).where(
+            Payment.student_id == student_id,
+            Payment.status == "paid"
+        ).order_by(desc(Payment.created_at), desc(Payment.id))
+    )
+    paid_payments = payments_result.scalars().all()
+    
+    logger.info(f"Recalculate subscription for student {student_id}: found {len(paid_payments)} paid payments")
+    
+    if paid_payments:
+        last_payment = paid_payments[0]
+        logger.info(f"Last payment id={last_payment.id}, is_unlimited={last_payment.is_unlimited}, status={last_payment.status}")
+        
+        if last_payment.is_unlimited:
+            await session.execute(
+                update(Student).where(Student.id == student_id).values(
+                    is_unlimited=True,
+                    lessons_count=0,
+                    lessons_remaining=0,
+                    subscription_start=last_payment.period_start,
+                    subscription_end=last_payment.period_end
+                )
+            )
+            logger.info(f"Student {student_id} set to UNLIMITED")
+        else:
+            used_result = await session.execute(
+                select(func.count(Attendance.id)).where(
+                    Attendance.student_id == student_id,
+                    Attendance.status == "present"
+                )
+            )
+            used_lessons = used_result.scalar() or 0
+            total_lessons = sum(p.lessons_count or 0 for p in paid_payments)
+            await session.execute(
+                update(Student).where(Student.id == student_id).values(
+                    is_unlimited=False,
+                    lessons_count=total_lessons,
+                    lessons_remaining=total_lessons - used_lessons,
+                    subscription_start=last_payment.period_start,
+                    subscription_end=last_payment.period_end
+                )
+            )
+            logger.info(f"Student {student_id} set to regular: {total_lessons - used_lessons} remaining")
+    else:
+        await session.execute(
+            update(Student).where(Student.id == student_id).values(
+                is_unlimited=False,
+                lessons_count=0,
+                lessons_remaining=0,
+                subscription_start=None,
+                subscription_end=None
+            )
+        )
+        logger.info(f"Student {student_id} reset to no subscription")
+    
+    await session.flush()
+
+
 @app.post("/api/payments")
 async def api_payments(request: Request):
     """Get all payments for coach."""
@@ -996,6 +1295,7 @@ async def api_payments(request: Request):
                 "period_start": payment.period_start.isoformat() if payment.period_start else None,
                 "period_end": payment.period_end.isoformat() if payment.period_end else None,
                 "paid_at": payment.paid_at.isoformat() if payment.paid_at else None,
+                "is_unlimited": payment.is_unlimited,
                 "notes": payment.notes,
             })
         
@@ -1020,23 +1320,31 @@ async def api_create_payment(request: Request):
         if not student:
             return JSONResponse({"error": "student_not_found"}, 404)
 
+        is_unlimited = bool(data.get("is_unlimited", False))
+        lessons_count = int(data.get("lessons_count", 0)) if not is_unlimited else 0
+        
         payment = Payment(
             coach_id=coach.id,
             student_id=data.get("student_id"),
             amount=int(data.get("amount", 0)),
-            lessons_count=int(data.get("lessons_count", 8)),
+            lessons_count=lessons_count,
             status=data.get("status", "pending"),
             period_start=date.fromisoformat(data["period_start"]) if data.get("period_start") else None,
             period_end=date.fromisoformat(data["period_end"]) if data.get("period_end") else None,
+            is_unlimited=is_unlimited,
             notes=data.get("notes"),
         )
         
         if payment.status == "paid":
             payment.paid_at = datetime.utcnow()
-            apply_paid_payment_to_student(student, payment)
         
         s.add(payment)
         await s.commit()
+        
+        # Recalculate student subscription based on all paid payments
+        await recalculate_student_subscription(payment.student_id, s)
+        await s.commit()
+        
         return {"success": True, "id": payment.id}
 
 
@@ -1056,19 +1364,96 @@ async def api_mark_payment_paid(payment_id: int, request: Request):
         if not payment:
             return JSONResponse({"error": "not_found"}, 404)
         
-        was_paid = payment.status == "paid"
         payment.status = "paid"
-        payment.paid_at = payment.paid_at or datetime.utcnow()
+        payment.paid_at = datetime.utcnow()
         
-        # Update student subscription
-        student_result = await s.execute(
-            select(Student).where(Student.id == payment.student_id)
-        )
-        student = student_result.scalar_one_or_none()
-        if student and not was_paid:
-            apply_paid_payment_to_student(student, payment)
+        # Recalculate student subscription based on all paid payments
+        await recalculate_student_subscription(payment.student_id, s)
         
         await s.commit()
+        return {"success": True}
+
+
+@app.post("/api/payments/{payment_id}/update")
+async def api_update_payment(payment_id: int, request: Request):
+    """Update payment record."""
+    body = await request.json()
+    coach = await get_current_coach(body.get("initData", ""))
+    if not coach:
+        return JSONResponse({"error": "unauthorized"}, 403)
+    
+    data = body.get("payment", {})
+    
+    async with async_session() as s:
+        result = await s.execute(
+            select(Payment).where(Payment.id == payment_id, Payment.coach_id == coach.id)
+        )
+        payment = result.scalar_one_or_none()
+        if not payment:
+            return JSONResponse({"error": "not_found"}, 404)
+        
+        logger.info(f"api_update_payment id={payment_id} received data: {data}")
+        
+        if "amount" in data:
+            payment.amount = int(data["amount"])
+        if "lessons_count" in data:
+            payment.lessons_count = int(data["lessons_count"])
+        if "status" in data:
+            old_status = payment.status
+            payment.status = data["status"]
+            if payment.status == "paid" and old_status != "paid":
+                payment.paid_at = datetime.utcnow()
+            elif payment.status != "paid" and old_status == "paid":
+                payment.paid_at = None
+        if "period_start" in data:
+            payment.period_start = date.fromisoformat(data["period_start"]) if data["period_start"] else None
+        if "period_end" in data:
+            payment.period_end = date.fromisoformat(data["period_end"]) if data["period_end"] else None
+        if "is_unlimited" in data:
+            payment.is_unlimited = bool(data["is_unlimited"])
+            if payment.is_unlimited:
+                payment.lessons_count = 0
+        if "notes" in data:
+            payment.notes = data["notes"] or None
+        
+        await s.commit()
+        
+        logger.info(f"api_update_payment id={payment_id} after commit: is_unlimited={payment.is_unlimited}, lessons_count={payment.lessons_count}")
+        
+        # Clear SQLAlchemy identity map to force fresh DB read
+        s.expunge_all()
+        
+        # Recalculate student subscription
+        await recalculate_student_subscription(payment.student_id, s)
+        await s.commit()
+        
+        return {"success": True}
+
+
+@app.post("/api/payments/{payment_id}/delete")
+async def api_delete_payment(payment_id: int, request: Request):
+    """Delete payment record."""
+    body = await request.json()
+    coach = await get_current_coach(body.get("initData", ""))
+    if not coach:
+        return JSONResponse({"error": "unauthorized"}, 403)
+    
+    async with async_session() as s:
+        result = await s.execute(
+            select(Payment).where(Payment.id == payment_id, Payment.coach_id == coach.id)
+        )
+        payment = result.scalar_one_or_none()
+        if not payment:
+            return JSONResponse({"error": "not_found"}, 404)
+        
+        student_id = payment.student_id
+        await s.delete(payment)
+        await s.commit()
+        
+        # Recalculate student subscription
+        await recalculate_student_subscription(student_id, s)
+        await s.commit()
+        
         return {"success": True}
 
 
@@ -1083,15 +1468,18 @@ async def api_current_lesson(request: Request):
         return JSONResponse({"error": "unauthorized"}, 403)
     
     from datetime import datetime, timedelta
-    now = datetime.now()
+    now = datetime.now(BELARUS_TZ)
     current_weekday = now.weekday()
     current_time = now.strftime("%H:%M")
     current_date = now.date()
     
     async with async_session() as s:
-        # Get all active students for this coach
+        # Get all active students with schedules eager-loaded
+        from sqlalchemy.orm import selectinload
         result = await s.execute(
-            select(Student).where(
+            select(Student).options(
+                selectinload(Student.schedules).selectinload(StudentSchedule.location)
+            ).where(
                 Student.coach_id == coach.id,
                 Student.is_active == True
             )
@@ -1099,12 +1487,14 @@ async def api_current_lesson(request: Request):
         all_students = result.scalars().all()
         
         # Find students who have lesson now (within time window)
+        # Use new multi-location schedule system
         current_lessons = []
         for student in all_students:
-            days = student.lesson_days.split(",") if student.lesson_days else []
-            if str(current_weekday) in days:
+            # Get schedules for today
+            schedules = student.get_schedules_for_day(current_weekday)
+            for sched_info in schedules:
                 # Check if within lesson time (±15 min window)
-                lesson_time = student.get_lesson_time_for_day(current_weekday)
+                lesson_time = sched_info["time"]
                 lesson_hour, lesson_min = map(int, lesson_time.split(":"))
                 lesson_start = lesson_hour * 60 + lesson_min
                 
@@ -1136,7 +1526,8 @@ async def api_current_lesson(request: Request):
                         "name": student.name,
                         "nickname": student.nickname,
                         "lesson_time": lesson_time,
-                        "lesson_duration": student.lesson_duration,
+                        "lesson_duration": sched_info.get("duration", 90),
+                        "location": sched_info.get("location_name", "Зал"),
                         "status": status,
                         "marked": lesson_exists is not None
                     })
@@ -1176,7 +1567,7 @@ async def api_bulk_attendance(request: Request):
         return JSONResponse({"error": "unauthorized"}, 403)
     
     data = body.get("attendance", [])
-    lesson_date = body.get("date", datetime.now().date().isoformat())
+    lesson_date = body.get("date", datetime.now(BELARUS_TZ).date().isoformat())
     
     if not data:
         return JSONResponse({"error": "no_data"}, 400)
@@ -1189,21 +1580,25 @@ async def api_bulk_attendance(request: Request):
             student_id = item.get("student_id")
             status = item.get("status", "present")
             
-            # Get student info
+            # Get student info with schedules eager-loaded
             student_result = await s.execute(
-                select(Student).where(Student.id == student_id, Student.coach_id == coach.id)
+                select(Student).options(
+                    selectinload(Student.schedules).selectinload(StudentSchedule.location)
+                ).where(Student.id == student_id, Student.coach_id == coach.id)
             )
             student = student_result.scalar_one_or_none()
             if not student:
                 continue
             
-            # Check if lesson exists
-            lesson_result = await s.execute(
-                select(Lesson).where(
-                    Lesson.student_id == student_id,
-                    Lesson.date == date.fromisoformat(lesson_date)
-                )
+            # Check if lesson exists (with optional time filter)
+            lesson_time = item.get("time")
+            lesson_query = select(Lesson).where(
+                Lesson.student_id == student_id,
+                Lesson.date == date.fromisoformat(lesson_date)
             )
+            if lesson_time:
+                lesson_query = lesson_query.where(Lesson.time == lesson_time)
+            lesson_result = await s.execute(lesson_query)
             lesson = lesson_result.scalar_one_or_none()
             
             # Track old status for lesson counting
@@ -1220,31 +1615,45 @@ async def api_bulk_attendance(request: Request):
                     att.status = status
                     att.attendance_date = date.fromisoformat(lesson_date)
                     att.attendance_time = lesson.time
-                    att.location_id = student.location_id
+                    att.location_id = lesson.location_id or student.location_id
                 else:
-                    # Get time for this day
+                    # Get time for this day (using new schedule system)
                     weekday = date.fromisoformat(lesson_date).weekday()
-                    lesson_time = get_student_lesson_time(student, day_of_week=weekday)
+                    sched_info = get_student_schedule_for_time(student, weekday, lesson.time)
+                    lesson_time = lesson.time or (sched_info["time"] if sched_info else "18:00")
+                    
                     att = Attendance(
                         lesson_id=lesson.id,
                         student_id=student_id,
-                        location_id=student.location_id,
+                        location_id=lesson.location_id or student.location_id,
                         status=status,
                         attendance_date=date.fromisoformat(lesson_date),
                         attendance_time=lesson_time
                     )
                     s.add(att)
             else:
-                # Create new lesson
+                # Create new lesson (using new schedule system)
                 weekday = date.fromisoformat(lesson_date).weekday()
-                lesson_time = get_student_lesson_time(student, day_of_week=weekday)
+                
+                # Get first schedule for this day (for time and location)
+                schedules = student.get_schedules_for_day(weekday)
+                if not schedules:
+                    continue  # Skip if no schedule for this day
+                
+                sched_info = get_student_schedule_for_time(student, weekday, item.get("time"))
+                if not sched_info:
+                    continue
+                lesson_time = sched_info["time"]
+                location_name = sched_info.get("location_name", student.location or "Зал")
+                location_id = sched_info.get("location_id")
+                
                 lesson = Lesson(
                     coach_id=coach.id,
                     student_id=student_id,
                     date=date.fromisoformat(lesson_date),
                     time=lesson_time,
-                    location=student.location,
-                    location_id=student.location_id,
+                    location=location_name,
+                    location_id=location_id
                 )
                 s.add(lesson)
                 await s.flush()
@@ -1253,16 +1662,15 @@ async def api_bulk_attendance(request: Request):
                 att = Attendance(
                     lesson_id=lesson.id,
                     student_id=student_id,
-                    location_id=student.location_id,
+                    location_id=location_id,
                     status=status,
                     attendance_date=date.fromisoformat(lesson_date),
                     attendance_time=lesson_time
                 )
                 s.add(att)
             
-            # Update lessons_remaining based on status change
             apply_attendance_to_balance(student, old_status, status)
-            if get_remaining_lessons(student) <= 2:
+            if not getattr(student, "is_unlimited", False) and get_remaining_lessons(student) <= 2:
                 students_with_low_lessons.append({
                     "id": student.id,
                     "name": student.name,
@@ -1288,61 +1696,63 @@ async def api_skip_lesson(request: Request):
         return JSONResponse({"error": "unauthorized"}, 403)
     
     reason = body.get("reason", "no_training")
-    lesson_date = body.get("date", datetime.now().date().isoformat())
-    target_date = date.fromisoformat(lesson_date)
-    target_weekday = target_date.weekday()
+    lesson_date = body.get("date", datetime.now(BELARUS_TZ).date().isoformat())
     
     async with async_session() as s:
-        # Get all students for this coach
+        # Get all students for this coach with schedules eager-loaded
         result = await s.execute(
-            select(Student).where(
+            select(Student).options(
+                selectinload(Student.schedules).selectinload(StudentSchedule.location)
+            ).where(
                 Student.coach_id == coach.id,
                 Student.is_active == True
             )
         )
         students = result.scalars().all()
-        skipped_count = 0
         
-        for student in students:
-            days = student.lesson_days.split(",") if student.lesson_days else []
-            if str(target_weekday) not in days:
-                continue
+        skipped_count = 0
 
-            # Check if lesson already exists
-            existing = await s.execute(
-                select(Lesson).where(
-                    Lesson.student_id == student.id,
-                    Lesson.date == target_date
+        for student in students:
+            # Use new schedule system
+            weekday = date.fromisoformat(lesson_date).weekday()
+            schedules = student.get_schedules_for_day(weekday)
+            
+            # Create skipped lesson for each schedule (if multiple locations)
+            for sched_info in schedules:
+                # Check if lesson already exists
+                existing = await s.execute(
+                    select(Lesson).where(
+                        Lesson.student_id == student.id,
+                        Lesson.date == date.fromisoformat(lesson_date),
+                        Lesson.time == sched_info["time"]
+                    )
                 )
-            )
-            if existing.scalar_one_or_none():
-                continue  # Already marked
-            
-            # Create skipped lesson
-            lesson_time = get_student_lesson_time(student, lesson_date=target_date)
-            lesson = Lesson(
-                coach_id=coach.id,
-                student_id=student.id,
-                date=target_date,
-                time=lesson_time,
-                location=student.location,
-                location_id=student.location_id,
-                notes=f"Тренировка отменена: {reason}"
-            )
-            s.add(lesson)
-            await s.flush()
-            
-            # Mark as excused (не влияет на статистику)
-            att = Attendance(
-                lesson_id=lesson.id,
-                student_id=student.id,
-                location_id=student.location_id,
-                status="excused",
-                attendance_date=target_date,
-                attendance_time=lesson_time
-            )
-            s.add(att)
-            skipped_count += 1
+                if existing.scalar_one_or_none():
+                    continue  # Already marked
+                
+                lesson = Lesson(
+                    coach_id=coach.id,
+                    student_id=student.id,
+                    date=date.fromisoformat(lesson_date),
+                    time=sched_info["time"],
+                    location=sched_info.get("location_name", student.location or "Зал"),
+                    location_id=sched_info.get("location_id"),
+                    notes=f"Тренировка отменена: {reason}"
+                )
+                s.add(lesson)
+                await s.flush()
+                
+                # Mark as excused (не влияет на статистику)
+                att = Attendance(
+                    lesson_id=lesson.id,
+                    student_id=student.id,
+                    location_id=sched_info.get("location_id"),
+                    status="excused",
+                    attendance_date=date.fromisoformat(lesson_date),
+                    attendance_time=sched_info["time"]
+                )
+                s.add(att)
+                skipped_count += 1
         
         await s.commit()
         return {"success": True, "skipped": skipped_count}
@@ -1352,14 +1762,14 @@ async def api_skip_lesson(request: Request):
 
 @app.post("/api/calendar")
 async def api_calendar(request: Request):
-    """Get calendar data with lessons."""
+    """Get calendar data with scheduled lessons and attendance status."""
     body = await request.json()
     coach = await get_current_coach(body.get("initData", ""))
     if not coach:
         return JSONResponse({"error": "unauthorized"}, 403)
     
-    year = body.get("year", date.today().year)
-    month = body.get("month", date.today().month)
+    year = body.get("year", datetime.now(BELARUS_TZ).date().year)
+    month = body.get("month", datetime.now(BELARUS_TZ).date().month)
     
     # Calculate date range
     month_start = date(year, month, 1)
@@ -1369,25 +1779,74 @@ async def api_calendar(request: Request):
         month_end = date(year, month + 1, 1) - timedelta(days=1)
     
     async with async_session() as s:
+        # Get all active students with their schedules (eager loading)
         result = await s.execute(
-            select(Lesson, Student).join(Student).where(
+            select(Student).options(
+                selectinload(Student.schedules).selectinload(StudentSchedule.location)
+            ).where(
+                Student.coach_id == coach.id,
+                Student.is_active == True
+            )
+        )
+        students = result.scalars().all()
+        
+        # Get marked lessons for this period (for attendance status)
+        lessons_result = await s.execute(
+            select(Lesson, Attendance).join(
+                Attendance, Lesson.id == Attendance.lesson_id, isouter=True
+            ).where(
                 Lesson.coach_id == coach.id,
                 Lesson.date >= month_start,
                 Lesson.date <= month_end
-            ).order_by(Lesson.date, Lesson.time)
+            )
         )
         
+        # Build attendance lookup: {(student_id, day, time): status}
+        attendance_lookup = {}
+        for lesson, att in lessons_result.all():
+            key = (lesson.student_id, lesson.date.day, lesson.time or "")
+            status = att.status if att else None
+            attendance_lookup[key] = {
+                "status": status,
+                "lesson_id": lesson.id,
+                "time": lesson.time
+            }
+        
+        # Build schedule for each day
         days = {}
-        for lesson, student in result.all():
-            day = lesson.date.day
-            if day not in days:
-                days[day] = []
-            days[day].append({
-                "id": lesson.id,
-                "time": lesson.time,
-                "student_name": student.name,
-                "student_id": student.id,
-            })
+        current_date = month_start
+        while current_date <= month_end:
+            weekday = current_date.weekday()
+            day = current_date.day
+            
+            # Find all students with lessons on this day
+            day_lessons = []
+            for student in students:
+                # Use new schedule system
+                schedules = student.get_schedules_for_day(weekday)
+                
+                for sched_info in schedules:
+                    # Check if already marked
+                    att_key = (student.id, day, sched_info["time"] or "")
+                    att_info = attendance_lookup.get(att_key, {})
+                    
+                    day_lessons.append({
+                        "id": student.id,
+                        "time": sched_info["time"],
+                        "student_name": student.name,
+                        "student_id": student.id,
+                        "location": sched_info.get("location_name", "Зал"),
+                        "status": att_info.get("status"),  # present, absent, sick, or None
+                        "lesson_id": att_info.get("lesson_id"),
+                        "is_marked": att_info.get("status") is not None
+                    })
+            
+            if day_lessons:
+                # Sort by time
+                day_lessons.sort(key=lambda x: x["time"])
+                days[day] = day_lessons
+            
+            current_date += timedelta(days=1)
         
         return {"days": days, "month_start": month_start.isoformat()}
 
@@ -1403,8 +1862,8 @@ async def api_extra_attendance(request: Request):
         return JSONResponse({"error": "unauthorized"}, 403)
     
     student_id = body.get("student_id")
-    attendance_date = body.get("date", datetime.now().date().isoformat())
-    attendance_time = body.get("time", datetime.now().strftime("%H:%M"))
+    attendance_date = body.get("date", datetime.now(BELARUS_TZ).date().isoformat())
+    attendance_time = body.get("time", datetime.now(BELARUS_TZ).strftime("%H:%M"))
     status = body.get("status", "present")
     notes = body.get("notes", "")
     deduct_lesson = body.get("deduct_lesson", True)  # Whether to deduct from subscription
@@ -1418,10 +1877,10 @@ async def api_extra_attendance(request: Request):
         if not student:
             return JSONResponse({"error": "student_not_found"}, 404)
         
-        # Check remaining lessons
+        # Check remaining lessons (skip for unlimited subscriptions)
         remaining_lessons = get_remaining_lessons(student)
         student.lessons_remaining = remaining_lessons
-        if deduct_lesson and remaining_lessons <= 0:
+        if deduct_lesson and not getattr(student, 'is_unlimited', False) and remaining_lessons <= 0:
             return JSONResponse({
                 "error": "no_lessons_remaining",
                 "message": "У ученика не осталось занятий в абонементе"
@@ -1436,7 +1895,7 @@ async def api_extra_attendance(request: Request):
             )
         )
         if duplicate_result.scalar_one_or_none():
-            return JSONResponse({"error": "already_marked"}, 409)
+            return JSONResponse({"error": "already_marked", "message": "Посещаемость уже отмечена"}, 409)
 
         # Create extra attendance record (no lesson entry - this is out-of-schedule)
         att = Attendance(
@@ -1452,7 +1911,7 @@ async def api_extra_attendance(request: Request):
         s.add(att)
         
         # Deduct from remaining lessons if present
-        if deduct_lesson and status == "present":
+        if deduct_lesson and status == "present" and not getattr(student, 'is_unlimited', False):
             student.lessons_remaining = max(0, remaining_lessons - 1)
         
         await s.commit()
@@ -1512,17 +1971,17 @@ async def api_student_attendance_history(student_id: int, request: Request):
             attendance.append(record)
         
         # Calculate stats
-        total_lessons = len([a for a in attendance if not a["is_extra"] and a["status"] != "excused"])
-        extra_lessons = len([a for a in attendance if a["is_extra"]])
-        present_count = len([a for a in attendance if a["status"] == "present"])
         counted_attendance = [a for a in attendance if a["status"] != "excused"]
+        total_lessons = len([a for a in counted_attendance if not a["is_extra"]])
+        extra_lessons = len([a for a in attendance if a["is_extra"]])
+        present_count = len([a for a in counted_attendance if a["status"] == "present"])
         
         return {
             "student": {
                 "id": student.id,
                 "name": student.name,
                 "lessons_count": student.lessons_count,
-                "lessons_remaining": get_remaining_lessons(student),
+                "lessons_remaining": student.lessons_remaining,
             },
             "attendance": attendance,
             "stats": {
@@ -1561,9 +2020,8 @@ async def api_update_subscription(student_id: int, request: Request):
             student.lessons_remaining = int(data["lessons_remaining"])
         elif "add_lessons" in data:
             # Add lessons to existing count
-            add_lessons = int(data["add_lessons"])
-            student.lessons_remaining = get_remaining_lessons(student) + add_lessons
-            student.lessons_count = (student.lessons_count or 0) + add_lessons
+            student.lessons_remaining += int(data["add_lessons"])
+            student.lessons_count += int(data["add_lessons"])
         
         if "subscription_start" in data:
             student.subscription_start = date.fromisoformat(data["subscription_start"]) if data["subscription_start"] else None
@@ -1575,7 +2033,7 @@ async def api_update_subscription(student_id: int, request: Request):
         return {
             "success": True,
             "lessons_count": student.lessons_count,
-            "lessons_remaining": get_remaining_lessons(student),
+            "lessons_remaining": student.lessons_remaining,
             "subscription_end": student.subscription_end.isoformat() if student.subscription_end else None
         }
 
@@ -1596,7 +2054,7 @@ async def api_subscription_status(student_id: int, request: Request):
         if not student:
             return JSONResponse({"error": "not_found"}, 404)
         
-        today = date.today()
+        today = datetime.now(BELARUS_TZ).date()
         
         # Check subscription status
         days_until_expiry = None
@@ -1611,11 +2069,10 @@ async def api_subscription_status(student_id: int, request: Request):
         
         # Check lessons remaining
         lessons_status = "ok"
-        remaining_lessons = get_remaining_lessons(student)
-
-        if remaining_lessons <= 0:
+        remaining = get_remaining_lessons(student)
+        if remaining <= 0:
             lessons_status = "depleted"
-        elif remaining_lessons <= 2:
+        elif remaining <= 2:
             lessons_status = "low"
         
         return {
@@ -1623,8 +2080,8 @@ async def api_subscription_status(student_id: int, request: Request):
             "name": student.name,
             "subscription": {
                 "total_lessons": student.lessons_count,
-                "remaining": remaining_lessons,
-                "used": (student.lessons_count or 0) - remaining_lessons,
+                "remaining": remaining,
+                "used": max(0, student.lessons_count - remaining),
                 "start_date": student.subscription_start.isoformat() if student.subscription_start else None,
                 "end_date": student.subscription_end.isoformat() if student.subscription_end else None,
                 "days_until_expiry": days_until_expiry,
@@ -1652,7 +2109,7 @@ async def api_add_student_to_current_lesson(request: Request):
     
     student_id = body.get("student_id")
     target_time = body.get("target_time")  # If None, use current time
-    lesson_date = body.get("date", datetime.now().date().isoformat())
+    lesson_date = body.get("date", datetime.now(BELARUS_TZ).date().isoformat())
     
     async with async_session() as s:
         # Verify student belongs to coach
@@ -1663,22 +2120,21 @@ async def api_add_student_to_current_lesson(request: Request):
         if not student:
             return JSONResponse({"error": "student_not_found"}, 404)
         
-        lesson_day = date.fromisoformat(lesson_date)
-        original_time = get_student_lesson_time(student, lesson_date=lesson_day)
-
         # If target_time specified, temporarily update student's schedule
+        lesson_day = date.fromisoformat(lesson_date).weekday()
+        original_time = student.get_lesson_time_for_day(lesson_day)
         if target_time and target_time != original_time:
             duplicate_result = await s.execute(
                 select(Attendance).where(
                     Attendance.student_id == student_id,
                     Attendance.is_extra == True,
-                    Attendance.attendance_date == lesson_day,
+                    Attendance.attendance_date == date.fromisoformat(lesson_date),
                     Attendance.attendance_time == target_time
                 )
             )
             if duplicate_result.scalar_one_or_none():
                 return JSONResponse({"error": "already_marked"}, 409)
-            
+
             # Create extra attendance for this specific session
             att = Attendance(
                 lesson_id=None,
@@ -1686,16 +2142,16 @@ async def api_add_student_to_current_lesson(request: Request):
                 location_id=student.location_id,
                 status="present",
                 is_extra=True,
-                attendance_date=lesson_day,
+                attendance_date=date.fromisoformat(lesson_date),
                 attendance_time=target_time,
                 notes=f"Добавлен к группе {target_time} (обычное время: {original_time})"
             )
             s.add(att)
             
-            # Deduct lesson if present
+            # Deduct lesson if present (skip for unlimited)
             remaining_lessons = get_remaining_lessons(student)
             student.lessons_remaining = remaining_lessons
-            if remaining_lessons > 0:
+            if not getattr(student, 'is_unlimited', False) and remaining_lessons > 0:
                 student.lessons_remaining = remaining_lessons - 1
             
             await s.commit()
@@ -1703,7 +2159,7 @@ async def api_add_student_to_current_lesson(request: Request):
             return {
                 "success": True,
                 "message": f"{student.name} добавлен к группе {target_time}",
-                "lessons_remaining": get_remaining_lessons(student)
+                "lessons_remaining": student.lessons_remaining
             }
         else:
             # Regular attendance at student's scheduled time
@@ -1720,41 +2176,47 @@ async def api_get_groups(request: Request):
     
     async with async_session() as s:
         result = await s.execute(
-            select(Student).where(
+            select(Student).options(
+                selectinload(Student.schedules).selectinload(StudentSchedule.location)
+            ).where(
                 Student.coach_id == coach.id,
                 Student.is_active == True
             ).order_by(Student.name)
         )
         students = result.scalars().all()
         
-        # Group by day/time slots from the student's schedule
+        # Group by time
         groups = {}
         for student in students:
-            for day, time_key in get_student_schedule_slots(student):
-                group_key = f"{day}:{time_key}"
-                if group_key not in groups:
-                    groups[group_key] = {
-                        "day": day,
-                        "day_name": WEEKDAYS.get(day, str(day)),
+            weekday_times = set()
+            for day in range(7):
+                for sched_info in student.get_schedules_for_day(day):
+                    weekday_times.add(sched_info["time"])
+
+            fallback_time = student.get_lesson_time_for_day(0)
+            for time_key in sorted(weekday_times or {fallback_time}):
+                if time_key not in groups:
+                    groups[time_key] = {
                         "time": time_key,
                         "students": [],
                         "count": 0,
                         "low_lessons": 0
                     }
-                
-                groups[group_key]["students"].append({
+
+                remaining = get_remaining_lessons(student)
+                groups[time_key]["students"].append({
                     "id": student.id,
                     "name": student.name,
-                    "lessons_remaining": get_remaining_lessons(student),
+                    "lessons_remaining": remaining,
                     "subscription_end": student.subscription_end.isoformat() if student.subscription_end else None
                 })
-                groups[group_key]["count"] += 1
-                
-                if get_remaining_lessons(student) <= 2:
-                    groups[group_key]["low_lessons"] += 1
+                groups[time_key]["count"] += 1
+
+                if not getattr(student, "is_unlimited", False) and remaining <= 2:
+                    groups[time_key]["low_lessons"] += 1
         
         # Sort by time
-        sorted_groups = sorted(groups.values(), key=lambda g: (g["day"], g["time"]))
+        sorted_groups = sorted(groups.values(), key=lambda g: g["time"])
         
         return {
             "groups": sorted_groups,
@@ -1773,13 +2235,16 @@ async def api_daily_summary(request: Request):
         if not coach:
             return JSONResponse({"error": "unauthorized"}, 403)
         
-        today = date.today()
+        today = datetime.now(BELARUS_TZ).date()
         logger.info(f"Daily summary requested for coach {coach.id}")
         
         async with async_session() as s:
-            # Get all active students
+            # Get all active students with schedules eager-loaded
+            from sqlalchemy.orm import selectinload
             result = await s.execute(
-                select(Student).where(
+                select(Student).options(
+                    selectinload(Student.schedules).selectinload(StudentSchedule.location)
+                ).where(
                     Student.coach_id == coach.id,
                     Student.is_active == True
                 )
@@ -1794,9 +2259,8 @@ async def api_daily_summary(request: Request):
             
             for idx, student in enumerate(students):
                 try:
-                    logger.debug(f"Processing student {idx}: {student.id} - {student.name}")
                     # Fix for old records without lessons_remaining
-                    lessons_remaining = get_remaining_lessons(student)
+                    lessons_remaining = student.lessons_remaining if student.lessons_remaining is not None else student.lessons_count
                     
                     # Check subscription expiry
                     if student.subscription_end:
@@ -1833,20 +2297,20 @@ async def api_daily_summary(request: Request):
                     logger.error(f"Error processing student {student.id}: {e}")
                     continue
             
-            # Get today's lessons
+            # Get today's lessons (using new schedule system)
             weekday = today.weekday()
             today_lessons = []
             for student in students:
                 try:
-                    days = student.lesson_days.split(",") if student.lesson_days else []
-                    if str(weekday) in days:
-                        # Get time for this day
-                        lesson_time = student.get_lesson_time_for_day(weekday)
-                        lessons_remaining = get_remaining_lessons(student)
+                    # Use new multi-location schedule system
+                    schedules = student.get_schedules_for_day(weekday)
+                    for sched_info in schedules:
+                        lessons_remaining = student.lessons_remaining if student.lessons_remaining is not None else student.lessons_count
                         today_lessons.append({
                             "id": student.id,
                             "name": student.name,
-                            "time": lesson_time,
+                            "time": sched_info["time"],
+                            "location": sched_info.get("location_name", "Зал"),
                             "lessons_remaining": lessons_remaining
                         })
                 except Exception as e:
@@ -1994,7 +2458,7 @@ async def api_statistics(request: Request):
     period = body.get("period", "month")  # week, month, year, all
     location_id = body.get("location_id")
     
-    today = date.today()
+    today = datetime.now(BELARUS_TZ).date()
     
     if period == "week":
         start_date = today - timedelta(days=today.weekday())
@@ -2020,8 +2484,7 @@ async def api_statistics(request: Request):
         # Attendance statistics
         attendance_query = select(Attendance, Student).join(Student).where(
             Student.coach_id == coach.id,
-            Attendance.attendance_date >= start_date,
-            Attendance.status != "excused"
+            Attendance.attendance_date >= start_date
         )
         if location_id:
             attendance_query = attendance_query.where(Attendance.location_id == location_id)
@@ -2030,16 +2493,17 @@ async def api_statistics(request: Request):
         attendance_records = attendance_result.all()
         
         # Calculate stats
-        total_present = sum(1 for att, _ in attendance_records if att.status == "present")
-        total_absent = sum(1 for att, _ in attendance_records if att.status == "absent")
-        total_sick = sum(1 for att, _ in attendance_records if att.status == "sick")
-        total_lessons = len(attendance_records)
+        counted_attendance = [(att, student) for att, student in attendance_records if att.status != "excused"]
+        total_present = sum(1 for att, _ in counted_attendance if att.status == "present")
+        total_absent = sum(1 for att, _ in counted_attendance if att.status == "absent")
+        total_sick = sum(1 for att, _ in counted_attendance if att.status == "sick")
+        total_lessons = len(counted_attendance)
         
         attendance_rate = round(total_present / total_lessons * 100) if total_lessons > 0 else 0
         
         # By day of week
         by_day_of_week = {}
-        for att, student in attendance_records:
+        for att, student in counted_attendance:
             day = att.attendance_date.weekday()
             if day not in by_day_of_week:
                 by_day_of_week[day] = {"total": 0, "present": 0}
@@ -2055,7 +2519,7 @@ async def api_statistics(request: Request):
         locations = {loc.id: loc.name for loc in locations_result.scalars().all()}
         locations[None] = "Без зала"
         
-        for att, student in attendance_records:
+        for att, student in counted_attendance:
             loc_name = locations.get(att.location_id, "Другой")
             if loc_name not in by_location:
                 by_location[loc_name] = {"total": 0, "present": 0}
@@ -2075,11 +2539,20 @@ async def api_statistics(request: Request):
             else:
                 age_groups["Взрослые (18+)"] += 1
         
-        # Monthly trend (last 6 months)
+        # Monthly trend (last 6 months) - correct month calculation
         monthly_trend = []
         for i in range(5, -1, -1):
-            month_start = today.replace(day=1) - relativedelta(months=i)
-            month_end = month_start + relativedelta(months=1)
+            # Calculate month correctly (handle year boundaries)
+            total_months = today.year * 12 + today.month - 1 - i
+            year = total_months // 12
+            month = (total_months % 12) + 1
+            month_date = date(year, month, 1)
+            
+            month_start = month_date
+            if month == 12:
+                month_end = date(year + 1, 1, 1)
+            else:
+                month_end = date(year, month + 1, 1)
             
             month_attendance = await s.execute(
                 select(func.count(Attendance.id)).join(Student).where(
@@ -2090,7 +2563,7 @@ async def api_statistics(request: Request):
                 )
             )
             monthly_trend.append({
-                "month": month_start.strftime("%b"),
+                "month": month_date.strftime("%b"),
                 "count": month_attendance.scalar() or 0
             })
         
@@ -2155,11 +2628,463 @@ async def api_search(request: Request):
             "phone": st.phone,
             "parent_phone": st.parent_phone,
             "age": st.age,
-            "lessons_remaining": st.lessons_remaining,
+            "lessons_remaining": get_remaining_lessons(st),
+            "is_unlimited": st.is_unlimited,
             "location": st.location,
         } for st in students]
         
         return {
             "results": results,
             "count": len(results)
+        }
+
+
+# === Student Schedules (Multiple Locations) ===
+
+@app.post("/api/students/{student_id}/schedules")
+async def api_get_student_schedules(student_id: int, request: Request):
+    """Get all schedules (locations) for a student."""
+    body = await request.json()
+    coach = await get_current_coach(body.get("initData", ""))
+    if not coach:
+        return JSONResponse({"error": "unauthorized"}, 403)
+    
+    async with async_session() as s:
+        # Verify student exists and belongs to coach
+        student_result = await s.execute(
+            select(Student).where(Student.id == student_id)
+        )
+        student = student_result.scalar_one_or_none()
+        if not student:
+            return JSONResponse({"error": "not_found"}, 404)
+        
+        # Get all schedules with location info
+        schedules_result = await s.execute(
+            select(StudentSchedule, Location).outerjoin(
+                Location, StudentSchedule.location_id == Location.id
+            ).where(StudentSchedule.student_id == student_id)
+        )
+        
+        schedules = []
+        for sched, loc in schedules_result.all():
+            schedules.append({
+                "id": sched.id,
+                "location_id": sched.location_id,
+                "location_name": loc.name if loc else "Зал",
+                "location_address": loc.address if loc else None,
+                "days": sched.days,
+                "times": sched.times,
+                "duration": sched.duration,
+                "is_primary": sched.is_primary,
+            })
+        
+        return {
+            "student_id": student_id,
+            "student_name": student.name,
+            "schedules": schedules
+        }
+
+
+@app.post("/api/students/{student_id}/schedules/create")
+async def api_create_student_schedule(student_id: int, request: Request):
+    """Add a new schedule (location) for a student."""
+    body = await request.json()
+    coach = await get_current_coach(body.get("initData", ""))
+    if not coach:
+        return JSONResponse({"error": "unauthorized"}, 403)
+    
+    data = body.get("schedule", {})
+    
+    async with async_session() as s:
+        # Verify student belongs to coach
+        student_result = await s.execute(
+            select(Student).where(Student.id == student_id, Student.coach_id == coach.id)
+        )
+        student = student_result.scalar_one_or_none()
+        if not student:
+            return JSONResponse({"error": "not_found"}, 404)
+        
+        # Verify location belongs to coach
+        location_id = data.get("location_id")
+        if location_id:
+            loc_result = await s.execute(
+                select(Location).where(Location.id == location_id, Location.coach_id == coach.id)
+            )
+            if not loc_result.scalar_one_or_none():
+                return JSONResponse({"error": "location_not_found"}, 404)
+        
+        # If this is the first schedule, mark as primary
+        existing_count = await s.execute(
+            select(func.count(StudentSchedule.id)).where(StudentSchedule.student_id == student_id)
+        )
+        is_primary = existing_count.scalar() == 0
+        
+        # Handle times JSON
+        times = data.get("times")
+        if not times and data.get("time"):
+            # Legacy format: single time for all days
+            days = data.get("days", "1,3").split(",")
+            times = json.dumps({day.strip(): data["time"] for day in days})
+        elif isinstance(times, dict):
+            times = json.dumps(times)
+        
+        schedule = StudentSchedule(
+            student_id=student_id,
+            location_id=location_id,
+            days=data.get("days", "1,3"),
+            times=times or '{"1": "18:00", "3": "18:00"}',
+            duration=int(data.get("duration", 90)),
+            is_primary=data.get("is_primary", is_primary)
+        )
+        s.add(schedule)
+        await s.commit()
+        
+        return {"success": True, "id": schedule.id}
+
+
+@app.post("/api/schedules/{schedule_id}/update")
+async def api_update_schedule(schedule_id: int, request: Request):
+    """Update a student schedule."""
+    body = await request.json()
+    coach = await get_current_coach(body.get("initData", ""))
+    if not coach:
+        return JSONResponse({"error": "unauthorized"}, 403)
+    
+    data = body.get("schedule", {})
+    
+    async with async_session() as s:
+        # Get schedule and verify ownership through student
+        sched_result = await s.execute(
+            select(StudentSchedule, Student).join(Student).where(
+                StudentSchedule.id == schedule_id,
+                Student.coach_id == coach.id
+            )
+        )
+        row = sched_result.one_or_none()
+        if not row:
+            return JSONResponse({"error": "not_found"}, 404)
+        
+        schedule, student = row
+        
+        # Update fields
+        if "location_id" in data:
+            schedule.location_id = data["location_id"]
+        if "days" in data:
+            schedule.days = data["days"]
+        if "times" in data:
+            schedule.times = json.dumps(data["times"]) if isinstance(data["times"], dict) else data["times"]
+        elif "time" in data:
+            # Update time for all days
+            days = schedule.days.split(",") if schedule.days else []
+            times = {}
+            for day in days:
+                times[day.strip()] = data["time"]
+            schedule.times = json.dumps(times)
+        if "duration" in data:
+            schedule.duration = int(data["duration"])
+        if "is_primary" in data:
+            schedule.is_primary = bool(data["is_primary"])
+        
+        await s.commit()
+        return {"success": True}
+
+
+@app.post("/api/schedules/{schedule_id}/delete")
+async def api_delete_schedule(schedule_id: int, request: Request):
+    """Delete a student schedule."""
+    body = await request.json()
+    coach = await get_current_coach(body.get("initData", ""))
+    if not coach:
+        return JSONResponse({"error": "unauthorized"}, 403)
+    
+    async with async_session() as s:
+        # Get schedule and verify ownership
+        sched_result = await s.execute(
+            select(StudentSchedule, Student).join(Student).where(
+                StudentSchedule.id == schedule_id,
+                Student.coach_id == coach.id
+            )
+        )
+        row = sched_result.one_or_none()
+        if not row:
+            return JSONResponse({"error": "not_found"}, 404)
+        
+        schedule, student = row
+        
+        # Check if it's the only schedule
+        count_result = await s.execute(
+            select(func.count(StudentSchedule.id)).where(StudentSchedule.student_id == student.id)
+        )
+        if count_result.scalar() <= 1:
+            return JSONResponse({"error": "cannot_delete_only_schedule"}, 400)
+        
+        await s.delete(schedule)
+        await s.commit()
+        return {"success": True}
+
+
+@app.post("/api/students/{student_id}/schedules/set-primary")
+async def api_set_primary_schedule(student_id: int, request: Request):
+    """Set a schedule as primary (and unset others)."""
+    body = await request.json()
+    coach = await get_current_coach(body.get("initData", ""))
+    if not coach:
+        return JSONResponse({"error": "unauthorized"}, 403)
+    
+    primary_schedule_id = body.get("schedule_id")
+    
+    async with async_session() as s:
+        # Verify student belongs to coach
+        student_result = await s.execute(
+            select(Student).where(Student.id == student_id, Student.coach_id == coach.id)
+        )
+        if not student_result.scalar_one_or_none():
+            return JSONResponse({"error": "not_found"}, 404)
+        
+        # Unset all primary for this student
+        await s.execute(
+            select(StudentSchedule).where(StudentSchedule.student_id == student_id)
+        )
+        schedules = await s.execute(
+            select(StudentSchedule).where(StudentSchedule.student_id == student_id)
+        )
+        for sched in schedules.scalars().all():
+            sched.is_primary = (sched.id == primary_schedule_id)
+        
+        await s.commit()
+        return {"success": True}
+
+
+# === Finance Reports ===
+
+@app.post("/api/finance/summary")
+async def api_finance_summary(request: Request):
+    """Get financial summary for period."""
+    body = await request.json()
+    coach = await get_current_coach(body.get("initData", ""))
+    if not coach:
+        return JSONResponse({"error": "unauthorized"}, 403)
+    
+    period = body.get("period", "month")  # month, year, all
+    location_id = body.get("location_id")  # Filter by location
+    
+    today = datetime.now(BELARUS_TZ).date()
+    
+    if period == "month":
+        start_date = today.replace(day=1)
+    elif period == "year":
+        start_date = today.replace(month=1, day=1)
+    else:
+        start_date = date(2000, 1, 1)
+    
+    async with async_session() as s:
+        # Base query
+        base_query = select(Payment).where(Payment.coach_id == coach.id)
+        
+        if location_id:
+            # Join with students to filter by location
+            base_query = base_query.join(Student).where(Student.location_id == location_id)
+        
+        # Total revenue
+        revenue_result = await s.execute(
+            select(func.sum(Payment.amount)).where(
+                Payment.coach_id == coach.id,
+                Payment.status == "paid",
+                Payment.paid_at >= start_date
+            )
+        )
+        total_revenue = revenue_result.scalar() or 0
+        
+        # Revenue by coach (for shared view)
+        revenue_by_coach = []
+        coaches_result = await s.execute(select(Coach).where(Coach.is_active == True))
+        all_coaches = coaches_result.scalars().all()
+        
+        for c in all_coaches:
+            coach_revenue = await s.execute(
+                select(func.sum(Payment.amount)).where(
+                    Payment.coach_id == c.id,
+                    Payment.status == "paid",
+                    Payment.paid_at >= start_date
+                )
+            )
+            rev = coach_revenue.scalar() or 0
+            if rev > 0:
+                revenue_by_coach.append({
+                    "coach_id": c.id,
+                    "coach_name": c.first_name,
+                    "revenue": rev
+                })
+        
+        # Revenue by location
+        revenue_by_location = []
+        locations_result = await s.execute(
+            select(Location).where(Location.is_active == True)
+        )
+        all_locations = locations_result.scalars().all()
+        
+        for loc in all_locations:
+            # Get payments for students in this location
+            loc_revenue = await s.execute(
+                select(func.sum(Payment.amount)).join(Student).where(
+                    Student.location_id == loc.id,
+                    Payment.status == "paid",
+                    Payment.paid_at >= start_date
+                )
+            )
+            rev = loc_revenue.scalar() or 0
+            if rev > 0:
+                revenue_by_location.append({
+                    "location_id": loc.id,
+                    "location_name": loc.name,
+                    "revenue": rev
+                })
+        
+        # Pending payments (overdue + pending)
+        pending_result = await s.execute(
+            select(func.sum(Payment.amount)).where(
+                Payment.coach_id == coach.id,
+                Payment.status.in_(["pending", "overdue"]),
+                Payment.created_at >= start_date
+            )
+        )
+        pending_amount = pending_result.scalar() or 0
+        
+        # Overdue breakdown
+        overdue_result = await s.execute(
+            select(Payment, Student).join(Student).where(
+                Payment.coach_id == coach.id,
+                Payment.status == "overdue"
+            ).order_by(desc(Payment.created_at))
+        )
+        
+        overdue_list = []
+        for payment, student in overdue_result.all():
+            overdue_list.append({
+                "id": payment.id,
+                "student_name": student.name,
+                "amount": payment.amount,
+                "period_end": payment.period_end.isoformat() if payment.period_end else None,
+                "days_overdue": (today - payment.period_end).days if payment.period_end else 0
+            })
+        
+        # Monthly trend (last 6 months) - correct month calculation
+        monthly_trend = []
+        for i in range(5, -1, -1):
+            # Calculate month correctly (handle year boundaries)
+            total_months = today.year * 12 + today.month - 1 - i
+            year = total_months // 12
+            month = (total_months % 12) + 1
+            month_date = date(year, month, 1)
+            
+            month_start = month_date
+            if month == 12:
+                month_end = date(year + 1, 1, 1)
+            else:
+                month_end = date(year, month + 1, 1)
+            
+            month_revenue = await s.execute(
+                select(func.sum(Payment.amount)).where(
+                    Payment.status == "paid",
+                    Payment.paid_at >= month_start,
+                    Payment.paid_at < month_end
+                )
+            )
+            monthly_trend.append({
+                "month": month_date.strftime("%b"),
+                "revenue": month_revenue.scalar() or 0
+            })
+        
+        return {
+            "period": period,
+            "summary": {
+                "total_revenue": total_revenue,
+                "pending_amount": pending_amount,
+                "overdue_count": len(overdue_list),
+                "overdue_total": sum(o["amount"] for o in overdue_list)
+            },
+            "by_coach": revenue_by_coach,
+            "by_location": revenue_by_location,
+            "overdue_payments": overdue_list[:10],  # Top 10
+            "monthly_trend": monthly_trend
+        }
+
+
+@app.post("/api/finance/debtors")
+async def api_finance_debtors(request: Request):
+    """Get list of students with payment issues."""
+    body = await request.json()
+    coach = await get_current_coach(body.get("initData", ""))
+    if not coach:
+        return JSONResponse({"error": "unauthorized"}, 403)
+    
+    today = datetime.now(BELARUS_TZ).date()
+    
+    async with async_session() as s:
+        # Get all active students with subscription info
+        result = await s.execute(
+            select(Student).where(
+                Student.coach_id == coach.id,
+                Student.is_active == True
+            ).order_by(Student.name)
+        )
+        students = result.scalars().all()
+        
+        debtors = {
+            "expired_subscription": [],  # Subscription ended
+            "ending_soon": [],           # 1-3 days left
+            "no_lessons": [],            # 0 lessons remaining
+            "low_lessons": []            # 1-2 lessons remaining
+        }
+        
+        for student in students:
+            remaining = student.lessons_remaining if student.lessons_remaining is not None else student.lessons_count
+            
+            # Check lessons
+            if remaining <= 0:
+                debtors["no_lessons"].append({
+                    "id": student.id,
+                    "name": student.name,
+                    "coach_id": student.coach_id,
+                    "reason": "no_lessons",
+                    "remaining": 0
+                })
+            elif remaining <= 2:
+                debtors["low_lessons"].append({
+                    "id": student.id,
+                    "name": student.name,
+                    "coach_id": student.coach_id,
+                    "reason": "low_lessons",
+                    "remaining": remaining
+                })
+            
+            # Check subscription
+            if student.subscription_end:
+                days_left = (student.subscription_end - today).days
+                if days_left < 0:
+                    debtors["expired_subscription"].append({
+                        "id": student.id,
+                        "name": student.name,
+                        "coach_id": student.coach_id,
+                        "reason": "expired",
+                        "days_overdue": abs(days_left)
+                    })
+                elif days_left <= 3:
+                    debtors["ending_soon"].append({
+                        "id": student.id,
+                        "name": student.name,
+                        "coach_id": student.coach_id,
+                        "reason": "ending_soon",
+                        "days_left": days_left
+                    })
+        
+        return {
+            "counts": {
+                "expired": len(debtors["expired_subscription"]),
+                "ending_soon": len(debtors["ending_soon"]),
+                "no_lessons": len(debtors["no_lessons"]),
+                "low_lessons": len(debtors["low_lessons"]),
+                "total": sum(len(v) for v in debtors.values())
+            },
+            "debtors": debtors
         }

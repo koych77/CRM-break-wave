@@ -10,15 +10,26 @@ from aiogram.types import (
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from sqlalchemy import select, func, and_, or_
+from sqlalchemy.orm import selectinload
 from datetime import datetime, date, timedelta
+from zoneinfo import ZoneInfo
 from app.database import async_session
-from app.models import Coach, Student, Lesson, Attendance, Payment, AdminUser
+
+BELARUS_TZ = ZoneInfo('Europe/Minsk')
+from app.models import Coach, Student, Lesson, Attendance, Payment, AdminUser, StudentSchedule, Notification
 from app.config import BOT_TOKEN, ADMIN_IDS, ADMIN_SECRET, WEBAPP_URL
 
 
-# Helper function to get lesson time for a specific day
+# Helper function to get lesson time for a specific day (using new schedule system)
 def get_lesson_time_for_day(student: Student, day_of_week: int) -> str:
-    """Get lesson time for specific day from lesson_times JSON."""
+    """Get lesson time for specific day from student schedules."""
+    # First check new schedules table
+    if student.schedules:
+        for schedule in student.schedules:
+            if schedule.has_lesson_on_day(day_of_week):
+                return schedule.get_time_for_day(day_of_week)
+    
+    # Fallback to legacy lesson_times
     try:
         times = json.loads(student.lesson_times or '{}')
         return times.get(str(day_of_week), times.get('default', '18:00'))
@@ -26,15 +37,42 @@ def get_lesson_time_for_day(student: Student, day_of_week: int) -> str:
         return '18:00'
 
 
+def student_has_lesson_on_day(student: Student, day_of_week: int) -> bool:
+    """Check if student has lesson on given day using new schedule system."""
+    # First check new schedules table
+    if student.schedules:
+        return any(schedule.has_lesson_on_day(day_of_week) for schedule in student.schedules)
+    
+    # Fallback to legacy lesson_days
+    if student.lesson_days:
+        days = [d.strip() for d in student.lesson_days.split(",")]
+        return str(day_of_week) in days
+    
+    return False
+
+
 def get_remaining_lessons(student: Student) -> int:
-    """Normalize lessons remaining for old and new student records."""
-    if student.lessons_remaining is None:
-        return student.lessons_count or 0
+    """Normalize remaining lessons for legacy and current records."""
+    if getattr(student, "lessons_remaining", None) is None:
+        return getattr(student, "lessons_count", 0) or 0
     return student.lessons_remaining
 
 logger = logging.getLogger(__name__)
 
-bot = Bot(token=BOT_TOKEN)
+
+def create_bot() -> Bot:
+    """Create bot instance lazily so module import does not crash without env."""
+    global bot
+    if not BOT_TOKEN:
+        raise RuntimeError("BOT_TOKEN is not configured")
+    try:
+        bot = Bot(token=BOT_TOKEN)
+        return bot
+    except Exception as exc:
+        raise RuntimeError(f"Invalid BOT_TOKEN: {exc}") from exc
+
+
+bot = None
 dp = Dispatcher()
 router = Router()
 dp.include_router(router)
@@ -158,7 +196,81 @@ async def cmd_start(message: Message):
         )
         return
     
-    # Coach registered - show main menu
+    # Coach registered - check for current lessons first
+    now = datetime.now(BELARUS_TZ)
+    current_weekday = now.weekday()
+    current_date = now.date()
+    
+    async with async_session() as s:
+        # Get students grouped by time
+        result = await s.execute(
+            select(Student).options(
+                selectinload(Student.schedules).selectinload(StudentSchedule.location)
+            ).where(
+                Student.coach_id == coach.id,
+                Student.is_active == True
+            )
+        )
+        students = result.scalars().all()
+        
+        # Group by time and check for unmarked (using new schedule system)
+        groups = {}
+        for st in students:
+            # Use new schedule system
+            schedules = st.get_schedules_for_day(current_weekday)
+            for sched_info in schedules:
+                time_key = sched_info["time"]
+                lesson_hour, lesson_min = map(int, time_key.split(":"))
+                lesson_start = lesson_hour * 60 + lesson_min
+                now_total = now.hour * 60 + now.minute
+                
+                # Check if lesson is now (±30 min) or passed (up to 90 min ago)
+                if -30 <= now_total - lesson_start <= 90:
+                    if time_key not in groups:
+                        groups[time_key] = {"students": [], "marked": 0}
+                    
+                    existing = await s.execute(
+                        select(Lesson).where(
+                            Lesson.student_id == st.id,
+                            Lesson.date == current_date,
+                            Lesson.time == time_key
+                        )
+                    )
+                    is_marked = existing.scalar_one_or_none() is not None
+                    
+                    groups[time_key]["students"].append({"student": st, "marked": is_marked})
+                    if is_marked:
+                        groups[time_key]["marked"] += 1
+        
+        # Find first active group with unmarked students
+        for time_key in sorted(groups.keys()):
+            group = groups[time_key]
+            unmarked = [s for s in group["students"] if not s["marked"]]
+            
+            if unmarked:
+                text = f"📋 <b>Тренировка {time_key}</b>\n\n"
+                text += f"👥 Не отмечены: {len(unmarked)}/{len(group['students'])}\n\n"
+                
+                for item in unmarked[:5]:
+                    text += f"⏳ {item['student'].name}\n"
+                if len(unmarked) > 5:
+                    text += f"... и ещё {len(unmarked) - 5}\n"
+                
+                kb = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(
+                        text=f"✅ Отметить ({len(unmarked)} чел.)",
+                        callback_data=f"quick_group:{time_key}"
+                    )],
+                    [InlineKeyboardButton(
+                        text="❌ Тренировки нет",
+                        callback_data=f"skip_group:{time_key}"
+                    )]
+                ])
+                
+                await message.answer(text, parse_mode="HTML", reply_markup=kb)
+                return
+    
+    # No active lessons - show main menu
     webapp_url = WEBAPP_URL or "https://your-app.up.railway.app"
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -173,7 +285,8 @@ async def cmd_start(message: Message):
     await message.answer(
         f"👋 Привет, {coach.first_name or 'тренер'}!\n\n"
         "<b>CRM Break Wave</b> — управление учениками, посещаемостью и оплатой.\n\n"
-        "Быстрые действия:",
+        f"📅 Сейчас активных тренировок нет.\n"
+        f"🕐 Текущее время: {now.strftime('%H:%M')}",
         parse_mode="HTML",
         reply_markup=kb
     )
@@ -292,25 +405,28 @@ async def cmd_now(message: Message):
         return
     
     from datetime import datetime
-    now = datetime.now()
+    now = datetime.now(BELARUS_TZ)
     current_weekday = now.weekday()
     current_date = now.date()
     
     async with async_session() as s:
         result = await s.execute(
-            select(Student).where(
+            select(Student).options(
+                selectinload(Student.schedules).selectinload(StudentSchedule.location)
+            ).where(
                 Student.coach_id == coach.id,
                 Student.is_active == True
             )
         )
         students = result.scalars().all()
         
-        # Group by time
+        # Group by time (using new schedule system)
         groups = {}
         for st in students:
-            days = st.lesson_days.split(",") if st.lesson_days else []
-            if str(current_weekday) in days:
-                time_key = get_lesson_time_for_day(st, current_weekday)
+            # Use new schedule system
+            schedules = st.get_schedules_for_day(current_weekday)
+            for sched_info in schedules:
+                time_key = sched_info["time"]
                 if time_key not in groups:
                     groups[time_key] = []
                 
@@ -318,7 +434,8 @@ async def cmd_now(message: Message):
                 existing = await s.execute(
                     select(Lesson).where(
                         Lesson.student_id == st.id,
-                        Lesson.date == current_date
+                        Lesson.date == current_date,
+                        Lesson.time == time_key
                     )
                 )
                 lesson_exists = existing.scalar_one_or_none()
@@ -384,7 +501,9 @@ async def cb_my_students(callback: CallbackQuery):
     
     async with async_session() as s:
         result = await s.execute(
-            select(Student).where(Student.coach_id == coach.id, Student.is_active == True)
+            select(Student).options(
+                selectinload(Student.schedules).selectinload(StudentSchedule.location)
+            ).where(Student.coach_id == coach.id, Student.is_active == True)
         )
         students = result.scalars().all()
     
@@ -396,19 +515,35 @@ async def cb_my_students(callback: CallbackQuery):
         return
     
     text = f"👥 <b>Ваши ученики ({len(students)}):</b>\n\n"
+    day_names = {"0":"Пн","1":"Вт","2":"Ср","3":"Чт","4":"Пт","5":"Сб","6":"Вс"}
     for st in students:
-        days = st.lesson_days or "1,3"
-        days_str = ",".join([{"0":"Пн","1":"Вт","2":"Ср","3":"Чт","4":"Пт","5":"Сб","6":"Вс"}[d] for d in days.split(",")])
-        # Show first time or indicate different times
-        try:
-            times = json.loads(st.lesson_times or '{}')
-            if len(times) <= 1:
+        schedules_info = []
+        if st.schedules:
+            for sched in st.schedules:
+                days = sched.days or ""
+                days_str = ",".join([day_names.get(d.strip(), d.strip()) for d in days.split(",") if d.strip()])
+                try:
+                    times = json.loads(sched.times or '{}')
+                    time_str = times.get('default', '18:00')
+                except:
+                    time_str = '18:00'
+                loc = sched.location.name if sched.location else (st.location or 'Зал')
+                schedules_info.append(f"🕐 {days_str} {time_str} 📍 {loc}")
+        else:
+            # Legacy fallback
+            days = st.lesson_days or "1,3"
+            days_str = ",".join([day_names.get(d.strip(), d.strip()) for d in days.split(",") if d.strip()])
+            try:
+                times = json.loads(st.lesson_times or '{}')
                 time_str = times.get('default', '18:00')
-            else:
-                time_str = "разное"
-        except:
-            time_str = "18:00"
-        text += f"• <b>{st.name}</b>\n  📍 {st.location} | 🕐 {days_str} {time_str}\n  💰 {st.lesson_price} Br/{st.lessons_count} занятий\n\n"
+            except:
+                time_str = '18:00'
+            schedules_info.append(f"🕐 {days_str} {time_str} 📍 {st.location or 'Зал'}")
+        
+        text += f"• <b>{st.name}</b>\n"
+        for info in schedules_info:
+            text += f"  {info}\n"
+        text += f"  💰 {st.lesson_price} Br/{st.lessons_count} занятий\n\n"
     
     await callback.message.edit_text(text, parse_mode="HTML")
 
@@ -420,7 +555,7 @@ async def cb_check_payments(callback: CallbackQuery):
         await callback.answer("Нет доступа")
         return
     
-    today = date.today()
+    today = datetime.now(BELARUS_TZ).date()
     
     async with async_session() as s:
         # Find students with ending or overdue subscriptions
@@ -478,25 +613,28 @@ async def cb_quick_attendance(callback: CallbackQuery):
         return
     
     from datetime import datetime
-    now = datetime.now()
+    now = datetime.now(BELARUS_TZ)
     current_weekday = now.weekday()
     current_date = now.date()
     
     async with async_session() as s:
         result = await s.execute(
-            select(Student).where(
+            select(Student).options(
+                selectinload(Student.schedules).selectinload(StudentSchedule.location)
+            ).where(
                 Student.coach_id == coach.id,
                 Student.is_active == True
             )
         )
         students = result.scalars().all()
         
-        # Filter students for current time
+        # Filter students for current time (using new schedule system)
         current_students = []
         for st in students:
-            days = st.lesson_days.split(",") if st.lesson_days else []
-            if str(current_weekday) in days:
-                lesson_time = get_lesson_time_for_day(st, current_weekday)
+            # Use new schedule system
+            schedules = st.get_schedules_for_day(current_weekday)
+            for sched_info in schedules:
+                lesson_time = sched_info["time"]
                 lesson_hour, lesson_min = map(int, lesson_time.split(":"))
                 lesson_start = lesson_hour * 60 + lesson_min
                 now_total = now.hour * 60 + now.minute
@@ -507,7 +645,8 @@ async def cb_quick_attendance(callback: CallbackQuery):
                     existing = await s.execute(
                         select(Lesson).where(
                             Lesson.student_id == st.id,
-                            Lesson.date == current_date
+                            Lesson.date == current_date,
+                            Lesson.time == lesson_time
                         )
                     )
                     lesson_exists = existing.scalar_one_or_none()
@@ -592,12 +731,14 @@ async def cb_skip_reason(callback: CallbackQuery):
     from datetime import date
     from app.models import Lesson, Attendance, Student
     
-    today = date.today()
+    today = datetime.now(BELARUS_TZ).date()
     
     async with async_session() as s:
         # Get all students for this coach
         result = await s.execute(
-            select(Student).where(
+            select(Student).options(
+                selectinload(Student.schedules).selectinload(StudentSchedule.location)
+            ).where(
                 Student.coach_id == coach.id,
                 Student.is_active == True
             )
@@ -606,29 +747,25 @@ async def cb_skip_reason(callback: CallbackQuery):
         
         skipped_count = 0
         for student in students:
-            days = student.lesson_days.split(",") if student.lesson_days else []
-            if str(today.weekday()) not in days:
-                continue
-
             # Check if already marked
+            lesson_time = get_lesson_time_for_day(student, today.weekday())
             existing = await s.execute(
                 select(Lesson).where(
                     Lesson.student_id == student.id,
-                    Lesson.date == today
+                    Lesson.date == today,
+                    Lesson.time == lesson_time
                 )
             )
             if existing.scalar_one_or_none():
                 continue
             
             # Create skipped lesson
-            lesson_time = get_lesson_time_for_day(student, today.weekday())
             lesson = Lesson(
                 coach_id=coach.id,
                 student_id=student.id,
                 date=today,
                 time=lesson_time,
                 location=student.location,
-                location_id=student.location_id,
                 notes=f"Отмена: {reason_text}"
             )
             s.add(lesson)
@@ -638,7 +775,6 @@ async def cb_skip_reason(callback: CallbackQuery):
             att = Attendance(
                 lesson_id=lesson.id,
                 student_id=student.id,
-                location_id=student.location_id,
                 status="excused",
                 attendance_date=today,
                 attendance_time=lesson_time
@@ -659,6 +795,133 @@ async def cb_skip_reason(callback: CallbackQuery):
 async def cb_cancel_skip(callback: CallbackQuery):
     """Cancel skip action."""
     await callback.message.delete()
+
+
+@router.callback_query(F.data.startswith("quick_group:"))
+async def cb_quick_group(callback: CallbackQuery):
+    """Open CRM for specific group attendance."""
+    coach = await get_coach(callback.from_user.id)
+    if not coach:
+        await callback.answer("Нет доступа")
+        return
+    
+    time_key = callback.data.split(":")[1]
+    
+    # Open WebApp with parameter for specific time
+    webapp_url = WEBAPP_URL or "https://your-app.up.railway.app"
+    
+    await callback.message.edit_text(
+        f"📋 Тренировка {time_key}\n\n"
+        f"Откройте CRM для отметки посещаемости:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(
+                text="✅ Отметить в CRM",
+                web_app=WebAppInfo(url=f"{webapp_url}/?time={time_key}")
+            )]
+        ])
+    )
+
+
+@router.callback_query(F.data.startswith("skip_group:"))
+async def cb_skip_group(callback: CallbackQuery):
+    """Skip specific group lesson."""
+    coach = await get_coach(callback.from_user.id)
+    if not coach:
+        await callback.answer("Нет доступа")
+        return
+    
+    time_key = callback.data.split(":")[1]
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🎉 Праздник", callback_data=f"skip_group_reason:{time_key}:holiday")],
+        [InlineKeyboardButton(text="🤒 Тренер болеет", callback_data=f"skip_group_reason:{time_key}:sick")],
+        [InlineKeyboardButton(text="🏠 Другое", callback_data=f"skip_group_reason:{time_key}:other")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_skip")]
+    ])
+    
+    await callback.message.edit_text(
+        f"❌ Тренировка {time_key} отменена\n\nВыберите причину:",
+        reply_markup=kb
+    )
+
+
+@router.callback_query(F.data.startswith("skip_group_reason:"))
+async def cb_skip_group_reason(callback: CallbackQuery):
+    """Handle group skip with reason."""
+    coach = await get_coach(callback.from_user.id)
+    if not coach:
+        await callback.answer("Нет доступа")
+        return
+    
+    parts = callback.data.split(":")
+    time_key = parts[1]
+    reason = parts[2]
+    reason_text = {"holiday": "Праздник", "sick": "Тренер болеет", "other": "Другое"}.get(reason, "Другое")
+    
+    from datetime import date
+    today = datetime.now(BELARUS_TZ).date()
+    current_weekday = today.weekday()
+    
+    async with async_session() as s:
+        # Get students for this specific time
+        result = await s.execute(
+            select(Student).options(
+                selectinload(Student.schedules).selectinload(StudentSchedule.location)
+            ).where(
+                Student.coach_id == coach.id,
+                Student.is_active == True
+            )
+        )
+        students = result.scalars().all()
+        
+        skipped_count = 0
+        for student in students:
+            # Use new schedule system
+            schedules = student.get_schedules_for_day(current_weekday)
+            for sched_info in schedules:
+                student_time = sched_info["time"]
+                if student_time == time_key:
+                    # Check if already marked
+                    existing = await s.execute(
+                        select(Lesson).where(
+                            Lesson.student_id == student.id,
+                            Lesson.date == today,
+                            Lesson.time == time_key
+                        )
+                    )
+                    if existing.scalar_one_or_none():
+                        continue
+                    
+                    # Create skipped lesson
+                    lesson = Lesson(
+                        coach_id=coach.id,
+                        student_id=student.id,
+                        date=today,
+                        time=time_key,
+                        location=sched_info.get("location_name", student.location),
+                        notes=f"Отмена: {reason_text}"
+                    )
+                    s.add(lesson)
+                    await s.flush()
+                    
+                    # Mark as excused
+                    att = Attendance(
+                        lesson_id=lesson.id,
+                        student_id=student.id,
+                        status="excused",
+                        attendance_date=today,
+                        attendance_time=time_key
+                    )
+                    s.add(att)
+                    skipped_count += 1
+        
+        await s.commit()
+    
+    await callback.message.edit_text(
+        f"✅ Сохранено\n\n"
+        f"Тренировка {time_key} отменена: {reason_text}\n"
+        f"Учеников: {skipped_count}"
+    )
 
 
 # === Admin Commands ===
@@ -715,6 +978,9 @@ async def cmd_stats(message: Message):
 
 async def notify_coach_payment_due(coach_id: int, student_name: str, days_left: int):
     """Send notification to coach about ending subscription."""
+    if bot is None:
+        logger.warning("Bot is not initialized; skipping payment due notification")
+        return
     async with async_session() as s:
         coach = await s.get(Coach, coach_id)
         if not coach:
@@ -737,7 +1003,7 @@ async def should_send_daily_notification(coach_id: int, notification_type: str) 
     """Check if daily notification was already sent today."""
     from app.models import DailyNotificationLog
     
-    today = date.today()
+    today = datetime.now(BELARUS_TZ).date()
     
     async with async_session() as s:
         result = await s.execute(
@@ -757,19 +1023,21 @@ async def mark_notification_sent(coach_id: int, notification_type: str):
     log = DailyNotificationLog(
         coach_id=coach_id,
         notification_type=notification_type,
-        date=date.today()
+        date=datetime.now(BELARUS_TZ).date()
     )
     async with async_session() as s:
         s.add(log)
         await s.commit()
 
 
-async def send_daily_summary(coach_id: int = None, force: bool = False):
+async def send_daily_summary(coach_id: int = None):
     """Send daily summary to coach(es). If coach_id is None, send to all coaches."""
+    if bot is None:
+        logger.warning("Bot is not initialized; skipping daily summary")
+        return
     from app.models import DailyNotificationLog
     
-    today = date.today()
-    sent_count = 0
+    today = datetime.now(BELARUS_TZ).date()
     
     async with async_session() as s:
         if coach_id:
@@ -792,12 +1060,14 @@ async def send_daily_summary(coach_id: int = None, force: bool = False):
                     DailyNotificationLog.date == today
                 )
             )
-            if already_sent.scalar_one_or_none() and not force:
+            if already_sent.scalar_one_or_none():
                 continue
             
             # Get all active students
             students_result = await s.execute(
-                select(Student).where(
+                select(Student).options(
+                    selectinload(Student.schedules).selectinload(StudentSchedule.location)
+                ).where(
                     Student.coach_id == coach.id,
                     Student.is_active == True
                 )
@@ -825,124 +1095,265 @@ async def send_daily_summary(coach_id: int = None, force: bool = False):
                             "days": days_left
                         })
                 
-                # Check lessons remaining
-                remaining_lessons = get_remaining_lessons(student)
-                if remaining_lessons <= 0:
-                    depleted.append({
-                        "name": student.name,
-                        "remaining": 0
-                    })
-                elif remaining_lessons <= 2:
-                    low_lessons.append({
-                        "name": student.name,
-                        "remaining": remaining_lessons
-                    })
-            
-            # Send if there are alerts, today's lessons, or a forced manual request
-            total_alerts = len(expired) + len(ending_soon) + len(low_lessons) + len(depleted)
-            has_today_lessons = any(
-                str(today.weekday()) in (student.lesson_days.split(",") if student.lesson_days else [])
-                for student in students
-            )
-            
-            if force or total_alerts > 0 or has_today_lessons:
-                text = f"📊 <b>Ежедневная сводка ({today.strftime('%d.%m.%Y')})</b>\n\n"
-                
-                # Urgent: expired subscriptions
-                if expired:
-                    text += f"🚨 <b>Просрочена оплата ({len(expired)}):</b>\n"
-                    for item in expired:
-                        text += f"  • {item['name']} — {item['days']} дн. назад\n"
-                    text += "\n"
-                
-                # Ending soon
-                if ending_soon:
-                    text += f"⏰ <b>Заканчивается абонемент ({len(ending_soon)}):</b>\n"
-                    for item in ending_soon:
-                        day_word = "день" if item['days'] == 1 else "дня" if item['days'] < 5 else "дней"
-                        text += f"  • {item['name']} — {item['days']} {day_word}\n"
-                    text += "\n"
-                
-                # Depleted lessons
-                if depleted:
-                    text += f"❌ <b>Закончились занятия ({len(depleted)}):</b>\n"
-                    for item in depleted:
-                        text += f"  • {item['name']}\n"
-                    text += "\n"
-                
-                # Low lessons
-                if low_lessons:
-                    text += f"⚠️ <b>Мало занятий осталось ({len(low_lessons)}):</b>\n"
-                    for item in low_lessons:
-                        lesson_word = "занятие" if item['remaining'] == 1 else "занятия"
-                        text += f"  • {item['name']} — {item['remaining']} {lesson_word}\n"
-                    text += "\n"
-                
-                if total_alerts == 0:
-                    text += "✅ Все абонементы в порядке!\n\n"
-                
-                # Add today's schedule
-                weekday = today.weekday()
-                today_lessons = []
-                for student in students:
-                    days = student.lesson_days.split(",") if student.lesson_days else []
-                    if str(weekday) in days:
-                        today_lessons.append({
+                # Check lessons remaining (only for non-unlimited subscriptions)
+                if not getattr(student, 'is_unlimited', False):
+                    remaining = getattr(student, 'lessons_remaining', None)
+                    if remaining is not None and remaining <= 0:
+                        depleted.append({
                             "name": student.name,
-                            "time": get_lesson_time_for_day(student, weekday),
-                            "remaining": get_remaining_lessons(student)
+                            "remaining": 0
                         })
-                
-                if today_lessons:
-                    # Group by time
-                    by_time = {}
-                    for lesson in today_lessons:
-                        time_key = lesson["time"]
-                        if time_key not in by_time:
-                            by_time[time_key] = []
-                        by_time[time_key].append(lesson)
-                    
-                    text += f"📅 <b>Сегодняшние тренировки ({len(today_lessons)}):</b>\n"
-                    for time_key in sorted(by_time.keys()):
-                        lessons = by_time[time_key]
-                        text += f"\n🕐 {time_key} ({len(lessons)} учеников)\n"
-                        for lesson in lessons[:5]:  # Show max 5 per group
-                            remaining = lesson["remaining"]
-                            if remaining <= 0:
-                                status = " ❌"
-                            elif remaining <= 2:
-                                status = " ⚠️"
-                            else:
-                                status = ""
-                            text += f"  • {lesson['name']}{status}\n"
-                        if len(lessons) > 5:
-                            text += f"  ... и ещё {len(lessons) - 5}\n"
-                
-                # Add action button
-                kb = InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(
-                        text="📱 Открыть CRM",
-                        web_app=WebAppInfo(url=f"{WEBAPP_URL or 'https://your-app.up.railway.app'}/")
-                    )]
-                ])
-                
-                try:
-                    await bot.send_message(coach.telegram_id, text, parse_mode="HTML", reply_markup=kb)
-                    
-                    # Mark as sent
-                    if not already_sent.scalar_one_or_none():
-                        log = DailyNotificationLog(
-                            coach_id=coach.id,
-                            notification_type="daily_summary",
-                            date=today
-                        )
-                        s.add(log)
-                    await s.commit()
-                    sent_count += 1
-                    
-                    logger.info(f"Daily summary sent to coach {coach.id}")
-                except Exception as e:
-                    logger.error(f"Failed to send daily summary to coach {coach.id}: {e}")
+                    elif remaining is not None and remaining <= 2:
+                        low_lessons.append({
+                            "name": student.name,
+                            "remaining": remaining
+                        })
+            
+            # Only send if there are alerts
+            total_alerts = len(expired) + len(ending_soon) + len(low_lessons) + len(depleted)
+            
+            if total_alerts <= 0:
+                continue
+
+            text = f"📊 <b>Ежедневная сводка ({today.strftime('%d.%m.%Y')})</b>\n\n"
+
+            # Urgent: expired subscriptions
+            if expired:
+                text += f"🚨 <b>Просрочена оплата ({len(expired)}):</b>\n"
+                for item in expired:
+                    text += f"  • {item['name']} — {item['days']} дн. назад\n"
+                text += "\n"
+
+            # Ending soon
+            if ending_soon:
+                text += f"⏰ <b>Заканчивается абонемент ({len(ending_soon)}):</b>\n"
+                for item in ending_soon:
+                    day_word = "день" if item['days'] == 1 else "дня" if item['days'] < 5 else "дней"
+                    text += f"  • {item['name']} — {item['days']} {day_word}\n"
+                text += "\n"
+
+            # Depleted lessons
+            if depleted:
+                text += f"❌ <b>Закончились занятия ({len(depleted)}):</b>\n"
+                for item in depleted:
+                    text += f"  • {item['name']}\n"
+                text += "\n"
+
+            # Low lessons
+            if low_lessons:
+                text += f"⚠️ <b>Осталось мало занятий ({len(low_lessons)}):</b>\n"
+                for item in low_lessons:
+                    lesson_word = "занятие" if item['remaining'] == 1 else "занятия"
+                    text += f"  • {item['name']} — {item['remaining']} {lesson_word}\n"
+                text += "\n"
+
+            # Add today's schedule (using new schedule system)
+            weekday = today.weekday()
+            today_lessons = []
+            for student in students:
+                schedules = student.get_schedules_for_day(weekday)
+                for sched_info in schedules:
+                    today_lessons.append({
+                        "name": student.name,
+                        "time": sched_info["time"],
+                        "remaining": student.lessons_remaining if student.lessons_remaining is not None else 0,
+                        "is_unlimited": getattr(student, 'is_unlimited', False)
+                    })
+
+            if today_lessons:
+                by_time = {}
+                for lesson in today_lessons:
+                    time_key = lesson["time"]
+                    if time_key not in by_time:
+                        by_time[time_key] = []
+                    by_time[time_key].append(lesson)
+
+                text += f"📅 <b>Сегодняшние тренировки ({len(today_lessons)}):</b>\n"
+                for time_key in sorted(by_time.keys()):
+                    lessons = by_time[time_key]
+                    text += f"\n🕐 {time_key} ({len(lessons)} учеников)\n"
+                    for lesson in lessons[:5]:
+                        if lesson.get("is_unlimited"):
+                            status = " ♾️"
+                        elif lesson["remaining"] <= 0:
+                            status = " ❌"
+                        elif lesson["remaining"] <= 2:
+                            status = " ⚠️"
+                        else:
+                            status = ""
+                        text += f"  • {lesson['name']}{status}\n"
+                    if len(lessons) > 5:
+                        text += f"  ... и ещё {len(lessons) - 5} учеников\n"
+
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(
+                    text="📱 Открыть CRM",
+                    web_app=WebAppInfo(url=f"{WEBAPP_URL or 'https://your-app.up.railway.app'}/")
+                )]
+            ])
+
+            try:
+                await bot.send_message(coach.telegram_id, text, parse_mode="HTML", reply_markup=kb)
+
+                log = DailyNotificationLog(
+                    coach_id=coach.id,
+                    notification_type="daily_summary",
+                    date=today
+                )
+                s.add(log)
+                await s.commit()
+
+                logger.info(f"Daily summary sent to coach {coach.id}")
+            except Exception as e:
+                logger.error(f"Failed to send daily summary to coach {coach.id}: {e}")
+
+
+async def send_daily_summary(coach_id: int = None, force: bool = False):
+    """Send daily summary to coach(es). If coach_id is None, send to all coaches."""
+    if bot is None:
+        logger.warning("Bot is not initialized; skipping daily summary")
+        return 0
+    from app.models import DailyNotificationLog
+
+    today = datetime.now(BELARUS_TZ).date()
+    sent_count = 0
+
+    async with async_session() as s:
+        if coach_id:
+            coaches_result = await s.execute(select(Coach).where(Coach.id == coach_id))
+        else:
+            coaches_result = await s.execute(select(Coach).where(Coach.is_active == True))
+
+        coaches = coaches_result.scalars().all()
+
+        for coach in coaches:
+            already_sent = await s.execute(
+                select(DailyNotificationLog).where(
+                    DailyNotificationLog.coach_id == coach.id,
+                    DailyNotificationLog.notification_type == "daily_summary",
+                    DailyNotificationLog.date == today
+                )
+            )
+            already_sent_row = already_sent.scalar_one_or_none()
+            if already_sent_row and not force:
+                continue
+
+            students_result = await s.execute(
+                select(Student).options(
+                    selectinload(Student.schedules).selectinload(StudentSchedule.location)
+                ).where(
+                    Student.coach_id == coach.id,
+                    Student.is_active == True
+                )
+            )
+            students = students_result.scalars().all()
+
+            expired = []
+            ending_soon = []
+            low_lessons = []
+            depleted = []
+
+            for student in students:
+                if student.subscription_end:
+                    days_left = (student.subscription_end - today).days
+                    if days_left < 0:
+                        expired.append({"name": student.name, "days": abs(days_left)})
+                    elif days_left <= 3:
+                        ending_soon.append({"name": student.name, "days": days_left})
+
+                if not getattr(student, "is_unlimited", False):
+                    remaining = get_remaining_lessons(student)
+                    if remaining <= 0:
+                        depleted.append({"name": student.name, "remaining": 0})
+                    elif remaining <= 2:
+                        low_lessons.append({"name": student.name, "remaining": remaining})
+
+            total_alerts = len(expired) + len(ending_soon) + len(low_lessons) + len(depleted)
+            text = f"📊 <b>Ежедневная сводка ({today.strftime('%d.%m.%Y')})</b>\n\n"
+
+            if expired:
+                text += f"🚨 <b>Просрочена оплата ({len(expired)}):</b>\n"
+                for item in expired:
+                    text += f"  • {item['name']} — {item['days']} дн. назад\n"
+                text += "\n"
+
+            if ending_soon:
+                text += f"⏰ <b>Заканчивается абонемент ({len(ending_soon)}):</b>\n"
+                for item in ending_soon:
+                    day_word = "день" if item["days"] == 1 else "дня" if item["days"] < 5 else "дней"
+                    text += f"  • {item['name']} — {item['days']} {day_word}\n"
+                text += "\n"
+
+            if depleted:
+                text += f"❌ <b>Закончились занятия ({len(depleted)}):</b>\n"
+                for item in depleted:
+                    text += f"  • {item['name']}\n"
+                text += "\n"
+
+            if low_lessons:
+                text += f"⚠️ <b>Осталось мало занятий ({len(low_lessons)}):</b>\n"
+                for item in low_lessons:
+                    lesson_word = "занятие" if item["remaining"] == 1 else "занятия"
+                    text += f"  • {item['name']} — {item['remaining']} {lesson_word}\n"
+                text += "\n"
+
+            weekday = today.weekday()
+            today_lessons = []
+            for student in students:
+                for sched_info in student.get_schedules_for_day(weekday):
+                    today_lessons.append({
+                        "name": student.name,
+                        "time": sched_info["time"],
+                        "remaining": get_remaining_lessons(student),
+                        "is_unlimited": getattr(student, "is_unlimited", False)
+                    })
+
+            if today_lessons:
+                by_time = {}
+                for lesson in today_lessons:
+                    by_time.setdefault(lesson["time"], []).append(lesson)
+
+                text += f"📅 <b>Сегодняшние тренировки ({len(today_lessons)}):</b>\n"
+                for time_key in sorted(by_time.keys()):
+                    lessons = by_time[time_key]
+                    text += f"\n🕐 {time_key} ({len(lessons)} учеников)\n"
+                    for lesson in lessons[:5]:
+                        if lesson.get("is_unlimited"):
+                            status = " ♾️"
+                        elif lesson["remaining"] <= 0:
+                            status = " ❌"
+                        elif lesson["remaining"] <= 2:
+                            status = " ⚠️"
+                        else:
+                            status = ""
+                        text += f"  • {lesson['name']}{status}\n"
+                    if len(lessons) > 5:
+                        text += f"  ... и ещё {len(lessons) - 5} учеников\n"
+
+            has_today_lessons = len(today_lessons) > 0
+            if not (force or total_alerts > 0 or has_today_lessons):
+                continue
+
+            kb = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(
+                    text="📱 Открыть CRM",
+                    web_app=WebAppInfo(url=f"{WEBAPP_URL or 'https://your-app.up.railway.app'}/")
+                )
+            ]])
+
+            try:
+                await bot.send_message(coach.telegram_id, text, parse_mode="HTML", reply_markup=kb)
+                if not already_sent_row:
+                    s.add(DailyNotificationLog(
+                        coach_id=coach.id,
+                        notification_type="daily_summary",
+                        date=today
+                    ))
+                await s.commit()
+                sent_count += 1
+                logger.info(f"Daily summary sent to coach {coach.id}")
+            except Exception as e:
+                logger.error(f"Failed to send daily summary to coach {coach.id}: {e}")
 
     return sent_count
 
@@ -967,32 +1378,37 @@ async def cmd_summary(message: Message):
         await message.answer("✅ Сводка отправлена!")
     else:
         await message.answer("ℹ️ Сегодня нет данных для сводки.")
+    return
+    await message.answer("✅ Сводка отправлена!")
 
 
 # === Lesson Reminder Scheduler ===
 
 async def lesson_reminder_scheduler():
     """Background task: check for unmarked lessons every 5 minutes."""
-    from app.models import Notification
-    
     while True:
         try:
             await asyncio.sleep(300)  # 5 minutes
             
-            now = datetime.now()
+            now = datetime.now(BELARUS_TZ)
             current_weekday = now.weekday()
             current_date = now.date()
-            current_time = now.strftime("%H:%M")
             
             async with async_session() as s:
-                # Get all coaches
-                coaches_result = await s.execute(select(Coach).where(Coach.is_active == True))
+                # Get all coaches with notifications eager-loaded to avoid greenlet_spawn on cascade
+                coaches_result = await s.execute(
+                    select(Coach).options(selectinload(Coach.notifications)).where(Coach.is_active == True)
+                )
                 coaches = coaches_result.scalars().all()
                 
                 for coach in coaches:
-                    # Get students with lessons at this time
+                    # Group students by lesson time
+                    time_groups = {}
+                    
                     students_result = await s.execute(
-                        select(Student).where(
+                        select(Student).options(
+                            selectinload(Student.schedules).selectinload(StudentSchedule.location)
+                        ).where(
                             Student.coach_id == coach.id,
                             Student.is_active == True
                         )
@@ -1000,53 +1416,63 @@ async def lesson_reminder_scheduler():
                     students = students_result.scalars().all()
                     
                     for student in students:
-                        days = student.lesson_days.split(",") if student.lesson_days else []
-                        if str(current_weekday) not in days:
-                            continue
+                        # Use new schedule system first, fallback to legacy
+                        schedules = student.get_schedules_for_day(current_weekday)
                         
-                        # Check if lesson time matches (within 5 min window)
-                        lesson_time = get_lesson_time_for_day(student, current_weekday)
-                        lesson_hour, lesson_min = map(int, lesson_time.split(":"))
-                        lesson_start = lesson_hour * 60 + lesson_min
-                        now_total = now.hour * 60 + now.minute
-                        
-                        # Only notify at lesson start time (within 5 min window)
-                        if not (0 <= now_total - lesson_start <= 5):
-                            continue
-                        
-                        # Check if already notified for this lesson
+                        for sched_info in schedules:
+                            lesson_time = sched_info["time"]
+                            lesson_hour, lesson_min = map(int, lesson_time.split(":"))
+                            lesson_start = lesson_hour * 60 + lesson_min
+                            now_total = now.hour * 60 + now.minute
+                            
+                            # Only notify at lesson start time (within 5 min window)
+                            if not (0 <= now_total - lesson_start <= 5):
+                                continue
+                            
+                            # Check if lesson already marked
+                            existing_lesson = await s.execute(
+                                select(Lesson).where(
+                                    Lesson.student_id == student.id,
+                                    Lesson.date == current_date,
+                                    Lesson.time == lesson_time
+                                )
+                            )
+                            if existing_lesson.scalar_one_or_none():
+                                continue
+                            
+                            # Group by time
+                            if lesson_time not in time_groups:
+                                time_groups[lesson_time] = []
+                            time_groups[lesson_time].append(student)
+                    
+                    # Send ONE notification per time group
+                    for lesson_time, students_list in time_groups.items():
+                        # Check if already notified for THIS SPECIFIC TIME
                         existing_notification = await s.execute(
                             select(Notification).where(
                                 Notification.coach_id == coach.id,
                                 Notification.type == "lesson_reminder",
+                                Notification.message.like(f"%тренировке {lesson_time}%"),
                                 Notification.created_at >= now - timedelta(minutes=30)
                             )
                         )
                         if existing_notification.scalar_one_or_none():
                             continue
                         
-                        # Check if lesson already marked
-                        existing_lesson = await s.execute(
-                            select(Lesson).where(
-                                Lesson.student_id == student.id,
-                                Lesson.date == current_date
-                            )
-                        )
-                        if existing_lesson.scalar_one_or_none():
-                            continue
+                        # Send reminder for group
+                        await send_lesson_reminder(coach, students_list, lesson_time)
                         
-                        # Send reminder
-                        await send_lesson_reminder(coach, [student], lesson_time)
-                        
-                        # Log notification
+                        # Log notification (for first student in group)
                         notification = Notification(
                             coach_id=coach.id,
-                            student_id=student.id,
+                            student_id=students_list[0].id,
                             type="lesson_reminder",
-                            message=f"Напоминание о тренировке {lesson_time}"
+                            message=f"Напоминание о тренировке {lesson_time} ({len(students_list)} учеников)"
                         )
                         s.add(notification)
                         await s.commit()
+                        
+                        logger.info(f"Lesson reminder sent to coach {coach.id} for {lesson_time} ({len(students_list)} students)")
                         
         except Exception as e:
             logger.error(f"Error in reminder scheduler: {e}")
@@ -1055,6 +1481,9 @@ async def lesson_reminder_scheduler():
 
 async def send_lesson_reminder(coach: Coach, students: list, time_str: str):
     """Send lesson reminder notification to coach."""
+    if bot is None:
+        logger.warning("Bot is not initialized; skipping lesson reminder")
+        return
     student_names = ", ".join([s.name for s in students[:3]])
     if len(students) > 3:
         student_names += f" и ещё {len(students) - 3}"
@@ -1062,7 +1491,11 @@ async def send_lesson_reminder(coach: Coach, students: list, time_str: str):
     text = f"⏰ <b>Тренировка {time_str}</b>\n\n"
     text += f"👥 Не отмечены ({len(students)}):\n"
     for st in students:
-        # Show remaining lessons indicator
+        # Show remaining lessons indicator (skip for unlimited)
+        if getattr(st, 'is_unlimited', False):
+            text += f"• {st.name} ♾️\n"
+            continue
+        
         remaining = getattr(st, 'lessons_remaining', None)
         if remaining is not None:
             if remaining <= 0:
@@ -1092,15 +1525,15 @@ async def daily_notification_scheduler():
     """Background task: send daily summaries at 9:00 AM."""
     while True:
         try:
-            now = datetime.now()
+            now = datetime.now(BELARUS_TZ)
             
-            # Calculate time until 9:00 AM
-            target_time = now.replace(hour=9, minute=0, second=0, microsecond=0)
+            # Calculate time until 10:00 AM (Belarus time)
+            target_time = now.replace(hour=10, minute=0, second=0, microsecond=0)
             if target_time <= now:
                 target_time += timedelta(days=1)
             
             wait_seconds = (target_time - now).total_seconds()
-            logger.info(f"Daily notification scheduler: waiting {wait_seconds/3600:.1f} hours until 9:00 AM")
+            logger.info(f"Daily notification scheduler: waiting {wait_seconds/3600:.1f} hours until 10:00 AM (Belarus time)")
             
             await asyncio.sleep(wait_seconds)
             

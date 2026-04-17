@@ -8,7 +8,7 @@
     <meta http-equiv="Expires" content="0">
     <title>CRM Break Wave</title>
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
-    <link rel="stylesheet" href="/assets/style.css?v=2">
+    <link rel="stylesheet" href="/assets/style.css?v=36">
 </head>
 <body>
     <div id="app">
@@ -80,9 +80,9 @@
                             <div class="action-icon">📅</div>
                             <div class="action-label">Календарь</div>
                         </button>
-                        <button class="action-card" onclick="navigate('payments')">
+                        <button class="action-card" onclick="navigate('finance')">
                             <div class="action-icon">💰</div>
-                            <div class="action-label">Оплаты</div>
+                            <div class="action-label">Финансы</div>
                         </button>
                         <button class="action-card" onclick="openQuickLesson()">
                             <div class="action-icon">✅</div>
@@ -109,8 +109,15 @@
                     <span class="screen-title">👥 Ученики</span>
                     <button class="btn-primary" onclick="openAddStudent()">+ Добавить</button>
                 </div>
-                <div class="search-box">
-                    <input type="text" id="students-search" placeholder="Поиск по имени..." oninput="filterStudents(this.value)">
+                <div class="students-filters">
+                    <div class="filter-tabs" id="coach-filter-tabs">
+                        <button class="filter-tab active" onclick="setStudentsFilter('all')" data-filter="all">Все</button>
+                        <button class="filter-tab" onclick="setStudentsFilter('my')" data-filter="my" id="filter-my">Мои</button>
+                        <button class="filter-tab" onclick="setStudentsFilter('other')" data-filter="other" id="filter-other">Брат</button>
+                    </div>
+                    <div class="search-box">
+                        <input type="text" id="students-search" placeholder="Поиск по имени..." oninput="filterStudents(this.value)">
+                    </div>
                 </div>
                 <div id="students-list" class="list-container"></div>
             </div>
@@ -167,53 +174,15 @@
                         <input type="number" id="st-age" placeholder="12" min="3" max="99">
                     </div>
                     
-                    <h3 class="form-section-title">📍 Настройки занятий</h3>
+                    <h3 class="form-section-title">📍 Залы и расписание</h3>
                     
-                    <div class="form-group">
-                        <label>Зал</label>
-                        <select id="st-location-id" class="form-input">
-                            <option value="">Основной зал</option>
-                        </select>
-                        <input type="hidden" id="st-location" value="Зал Break Wave">
-                    </div>
-                    <div class="form-group">
-                        <label>Дни недели</label>
-                        <div class="weekdays-selector" id="weekdays-selector">
-                            <button type="button" data-day="0">Пн</button>
-                            <button type="button" data-day="1">Вт</button>
-                            <button type="button" data-day="2">Ср</button>
-                            <button type="button" data-day="3">Чт</button>
-                            <button type="button" data-day="4">Пт</button>
-                            <button type="button" data-day="5">Сб</button>
-                            <button type="button" data-day="6">Вс</button>
-                        </div>
-                    </div>
-                    <div id="lesson-times-container">
-                        <!-- Time inputs will be generated here -->
-                    </div>
-                    <div class="form-row">
-                        <div class="form-group">
-                            <label>Стоимость (Br)</label>
-                            <input type="number" id="st-price" value="150" min="0" placeholder="150">
-                        </div>
-                        <div class="form-group">
-                            <label>Кол-во занятий</label>
-                            <input type="number" id="st-count" value="8" min="1">
-                        </div>
+                    <div id="student-locations-container">
+                        <!-- Location schedules will be added here dynamically -->
                     </div>
                     
-                    <h3 class="form-section-title">📅 Абонемент</h3>
-                    
-                    <div class="form-row">
-                        <div class="form-group">
-                            <label>Начало</label>
-                            <input type="date" id="st-sub-start">
-                        </div>
-                        <div class="form-group">
-                            <label>Окончание</label>
-                            <input type="date" id="st-sub-end">
-                        </div>
-                    </div>
+                    <button type="button" class="btn-secondary btn-add-location" onclick="addLocationSchedule()">
+                        + Добавить зал
+                    </button>
                     
                     <div class="form-group">
                         <label>Заметки</label>
@@ -271,7 +240,7 @@
                     <button class="back-btn" onclick="goBack()">
                         <svg width="24" height="24" viewBox="0 0 24 24" fill="none"><path d="M15 18L9 12L15 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
                     </button>
-                    <span class="screen-title">Новая оплата</span>
+                    <span class="screen-title" id="pay-form-title">Новая оплата</span>
                     <div style="width: 40px;"></div>
                 </div>
                 <form id="payment-form" class="form-container">
@@ -285,7 +254,19 @@
                         <label>Сумма (Br) *</label>
                         <input type="number" id="pay-amount" required min="0" placeholder="Например: 1200">
                     </div>
-                    <div class="form-group">
+                    <div class="form-group checkbox-group">
+                        <label class="checkbox-label">
+                            <input type="checkbox" id="pay-unlimited" onchange="togglePayUnlimited(this.checked)">
+                            <span class="checkmark"></span>
+                            <span class="checkbox-text">Безлимитное количество занятий (по месяцам)</span>
+                        </label>
+                    </div>
+                    <div id="pay-unlimited-hint" class="form-group" style="display: none; margin-top: -8px;">
+                        <div style="padding: 12px; border-radius: 10px; background: var(--bg-secondary); border-left: 3px solid var(--accent); color: var(--text-secondary); font-size: 13px;">
+                            ♾️ Безлимитный абонемент не считает посещения поштучно. Важны сумма и период действия.
+                        </div>
+                    </div>
+                    <div class="form-group" id="pay-count-group">
                         <label>Количество занятий</label>
                         <input type="number" id="pay-count" value="8" min="1">
                     </div>
@@ -323,15 +304,22 @@
                     <button class="back-btn" onclick="goBack()">
                         <svg width="24" height="24" viewBox="0 0 24 24" fill="none"><path d="M15 18L9 12L15 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
                     </button>
-                    <span class="screen-title">✅ Отметить занятие</span>
+                    <span class="screen-title" id="ql-title">✅ Быстрая отметка</span>
                     <div style="width: 40px;"></div>
                 </div>
                 <div id="quick-lesson-content">
-                    <div class="form-group" style="padding: 0 16px;">
-                        <label>Дата</label>
-                        <input type="date" id="ql-date">
+                    <div class="quick-lesson-filters">
+                        <input type="date" id="ql-date" onchange="loadQuickLesson()">
+                        <select id="ql-location" onchange="loadQuickLesson()">
+                            <option value="">Все залы</option>
+                        </select>
                     </div>
-                    <div id="quick-lesson-students"></div>
+                    <div id="quick-lesson-stats" class="quick-stats"></div>
+                    <div id="quick-lesson-students" class="quick-students-list"></div>
+                </div>
+                <div class="quick-lesson-footer">
+                    <button class="btn-secondary" onclick="selectAllQuick('present')">Все ✅</button>
+                    <button class="btn-primary" onclick="saveQuickAttendance()">Сохранить</button>
                 </div>
             </div>
 
@@ -357,6 +345,28 @@
                 <div id="statistics-content" class="statistics-container"></div>
             </div>
 
+            <!-- Finance -->
+            <div id="screen-finance" class="screen">
+                <div class="screen-header">
+                    <button class="back-btn" onclick="goBack()">
+                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none"><path d="M15 18L9 12L15 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                    </button>
+                    <span class="screen-title">💰 Финансы</span>
+                    <div style="width: 40px;"></div>
+                </div>
+                <div class="tabs">
+                    <button class="tab active" onclick="switchFinancePeriod('month', this)">Месяц</button>
+                    <button class="tab" onclick="switchFinancePeriod('year', this)">Год</button>
+                    <button class="tab" onclick="switchFinancePeriod('all', this)">Всё</button>
+                </div>
+                <div id="finance-content" class="finance-container">
+                    <div class="loading-container">
+                        <div class="spinner"></div>
+                        <p>Загрузка...</p>
+                    </div>
+                </div>
+            </div>
+
             <!-- Search -->
             <div id="screen-search" class="screen">
                 <div class="screen-header">
@@ -375,6 +385,6 @@
         </main>
     </div>
 
-    <script src="/assets/app.js?v=2"></script>
+    <script src="/assets/app.js?v=36"></script>
 </body>
 </html>

@@ -5,7 +5,7 @@ const tg = window.Telegram?.WebApp;
 
 // Cache busting - force reload if version changed
 const APP_VERSION_KEY = 'crm_bw_version';
-const CURRENT_VERSION = '4'; // Version 4: Multi-time per day, locations, statistics, search
+const CURRENT_VERSION = '37'; // Version 37: merge audit fixes after deep backend/frontend alignment
 
 // Check version on load
 const savedVersion = localStorage.getItem(APP_VERSION_KEY);
@@ -20,7 +20,7 @@ if (savedVersion && savedVersion !== CURRENT_VERSION) {
     localStorage.setItem(APP_VERSION_KEY, CURRENT_VERSION);
 }
 
-// Data cache helpers
+// Data cache helpers — caching disabled to avoid stale data when bot makes changes
 const DataCache = {
     STUDENTS_KEY: 'crm_cached_students',
     PAYMENTS_KEY: 'crm_cached_payments',
@@ -28,38 +28,26 @@ const DataCache = {
     LAST_SYNC_KEY: 'crm_last_sync',
     
     save(key, data) {
-        try {
-            localStorage.setItem(key, JSON.stringify({
-                data,
-                timestamp: Date.now()
-            }));
-        } catch (e) {
-            console.warn('Cache save failed:', e);
-        }
+        // Caching disabled: data is always fetched fresh from server
     },
     
     load(key) {
-        try {
-            const item = localStorage.getItem(key);
-            if (!item) return null;
-            const parsed = JSON.parse(item);
-            // Cache valid for 1 hour
-            if (Date.now() - parsed.timestamp > 3600000) {
-                localStorage.removeItem(key);
-                return null;
-            }
-            return parsed.data;
-        } catch (e) {
-            return null;
-        }
+        // Caching disabled: data is always fetched fresh from server
+        return null;
     },
     
     clear() {
-        localStorage.removeItem(this.STUDENTS_KEY);
-        localStorage.removeItem(this.PAYMENTS_KEY);
-        localStorage.removeItem(this.DASHBOARD_KEY);
+        try {
+            localStorage.removeItem(this.STUDENTS_KEY);
+            localStorage.removeItem(this.PAYMENTS_KEY);
+            localStorage.removeItem(this.DASHBOARD_KEY);
+            localStorage.removeItem(this.LAST_SYNC_KEY);
+        } catch (e) {}
     }
 };
+
+// Clear any old cached data on startup
+DataCache.clear();
 
 let currentScreen = 'loading';
 let screenHistory = [];
@@ -71,6 +59,7 @@ let payments = [];
 let calendarData = {};
 let currentCalendarDate = new Date();
 let editingStudentId = null;
+let editingPaymentId = null;
 let selectedDays = new Set([1, 3]); // Default Mon, Wed
 
 // === Init ===
@@ -99,7 +88,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Initialize date inputs with today
     const today = new Date().toISOString().split('T')[0];
     document.getElementById('ql-date')?.setAttribute('value', today);
-    document.getElementById('st-sub-start')?.setAttribute('value', today);
     
     // Setup weekday selector
     setupWeekdaySelector();
@@ -231,6 +219,9 @@ function showScreen(screen) {
         case 'statistics':
             loadStatistics();
             break;
+        case 'finance':
+            loadFinance();
+            break;
     }
 }
 
@@ -244,10 +235,35 @@ async function loadCoaches() {
             body: JSON.stringify({initData})
         });
         coaches = await res.json();
+        
+        // Update filter button labels with coach names
+        updateCoachFilterLabels();
+        
         return coaches;
     } catch (e) {
         console.error('Coaches load error:', e);
         return [];
+    }
+}
+
+function updateCoachFilterLabels() {
+    if (coaches.length < 2) return;
+    
+    const myBtn = document.getElementById('filter-my');
+    const otherBtn = document.getElementById('filter-other');
+    
+    if (!myBtn || !otherBtn) return;
+    
+    // Find current coach and other coach
+    const myCoach = coaches.find(c => c.is_current);
+    const otherCoach = coaches.find(c => !c.is_current);
+    
+    if (myCoach) {
+        myBtn.textContent = myCoach.first_name || 'Мои';
+    }
+    
+    if (otherCoach) {
+        otherBtn.textContent = otherCoach.first_name || 'Брат';
     }
 }
 
@@ -409,9 +425,23 @@ async function renderDashboard(data) {
 
 // === Students ===
 
+let currentStudentsFilter = 'all'; // 'all', 'my', 'other'
+
 async function loadStudents() {
     // Load coaches first (for displaying coach info)
     await loadCoaches();
+    
+    // Build request body based on filter
+    const requestBody = {initData};
+    if (currentStudentsFilter === 'my') {
+        requestBody.view_mode = 'my';
+    } else if (currentStudentsFilter === 'other' && coaches.length > 1) {
+        // Find other coach (brother)
+        const otherCoach = coaches.find(c => !c.is_current);
+        if (otherCoach) {
+            requestBody.coach_id = otherCoach.id;
+        }
+    }
     
     // Show cached data first
     const cached = DataCache.load(DataCache.STUDENTS_KEY);
@@ -424,7 +454,7 @@ async function loadStudents() {
         const res = await fetch(`${API}/api/students`, {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({initData})
+            body: JSON.stringify(requestBody)
         });
         
         students = await res.json();
@@ -440,6 +470,18 @@ async function loadStudents() {
             showNotification('Ошибка загрузки учеников', 'error');
         }
     }
+}
+
+function setStudentsFilter(filter) {
+    currentStudentsFilter = filter;
+    
+    // Update UI
+    document.querySelectorAll('.filter-tab').forEach(tab => {
+        tab.classList.toggle('active', tab.dataset.filter === filter);
+    });
+    
+    // Reload students with filter
+    loadStudents();
 }
 
 function renderStudentsList(list) {
@@ -477,37 +519,50 @@ function renderStudentsList(list) {
         
         // Check lessons remaining
         let lessonsBadge = '';
-        const remaining = s.lessons_remaining !== undefined ? s.lessons_remaining : s.lessons_count;
-        if (remaining <= 0) {
+        const remaining = getStudentRemainingLessons(s);
+        if (!s.is_unlimited && remaining <= 0) {
             lessonsBadge = '<span class="list-item-badge danger">Нет занятий</span>';
-        } else if (remaining <= 2) {
+        } else if (!s.is_unlimited && remaining <= 2) {
             lessonsBadge = `<span class="list-item-badge warning">${remaining} занятия</span>`;
+        } else if (s.is_unlimited) {
+            lessonsBadge = '<span class="list-item-badge" style="background: rgba(123, 92, 255, 0.15); color: var(--accent);">♾️ Безлимит</span>';
         }
         
-        // Get coach info if available
-        let coachInfo = '';
-        if (s.coach_id && coaches.length > 1) {
-            const coach = coaches.find(c => c.id === s.coach_id);
-            if (coach) {
-                const coachName = escapeHtml(coach.first_name || 'Без имени');
-                const coachUsername = coach.username ? `@${escapeHtml(coach.username)}` : '';
-                coachInfo = `<div class="list-item-coach">👤 ${coachName} ${coachUsername}</div>`;
-            }
+        // Get coach badge (my vs other)
+        let coachBadge = '';
+        if (coaches.length > 1) {
+            const isMyStudent = s.is_my_student !== undefined ? s.is_my_student : s.coach_id === currentCoach?.coach_id;
+            const badgeClass = isMyStudent ? 'my' : 'other';
+            const badgeText = isMyStudent ? 'Мой' : 'Брат';
+            coachBadge = `<span class="coach-badge ${badgeClass}">${badgeText}</span>`;
+        }
+        
+        // Show locations info
+        let locationsInfo = '';
+        if (s.schedules && s.schedules.length > 1) {
+            const locationCount = s.schedules.length;
+            const primaryLoc = s.schedules.find(sch => sch.is_primary);
+            locationsInfo = `<span>📍 ${primaryLoc?.location_name || 'Зал'} +${locationCount - 1}</span>`;
+        } else {
+            locationsInfo = `<span>📍 ${escapeHtml(s.location || 'Зал Break Wave')}</span>`;
         }
         
         // Lessons indicator
-        const lessonsIndicator = `<span class="lessons-indicator ${remaining <= 2 ? 'low' : remaining <= 0 ? 'none' : ''}">${remaining}/${s.lessons_count || 8}</span>`;
+        const indicatorClass = s.is_unlimited ? '' : (remaining <= 2 ? 'low' : remaining <= 0 ? 'none' : '');
+        const lessonsIndicator = `<span class="lessons-indicator ${indicatorClass}">${getStudentLessonsDisplay(s)}</span>`;
         
         return `
             <div class="list-item" onclick="openStudentDetail(${s.id})">
                 <div class="list-item-header">
                     <span class="list-item-title">${escapeHtml(s.name)} ${lessonsIndicator}</span>
-                    ${lessonsBadge || statusBadge}
+                    <div style="display: flex; gap: 4px;">
+                        ${coachBadge}
+                        ${lessonsBadge || statusBadge}
+                    </div>
                 </div>
                 <div class="list-item-subtitle">${escapeHtml(s.nickname || '')}</div>
-                ${coachInfo}
                 <div class="list-item-meta">
-                    <span>📍 ${escapeHtml(s.location || 'Зал Break Wave')}</span>
+                    ${locationsInfo}
                     <span>🕐 ${days}</span>
                 </div>
             </div>
@@ -528,7 +583,6 @@ async function openAddStudent() {
     document.getElementById('student-form-title').textContent = 'Новый ученик';
     document.getElementById('student-form').reset();
     selectedDays = new Set([1, 3]);
-    lessonTimes = {1: '18:00', 3: '18:00'};
     
     // Reset weekday buttons
     document.querySelectorAll('#weekdays-selector button').forEach(btn => {
@@ -538,11 +592,8 @@ async function openAddStudent() {
     
     // Set default values
     document.getElementById('st-location').value = 'Зал Break Wave';
-    document.getElementById('st-price').value = '150';
-    document.getElementById('st-count').value = '8';
     
     const today = new Date().toISOString().split('T')[0];
-    document.getElementById('st-sub-start').value = today;
     
     // Load locations
     await loadLocations();
@@ -596,14 +647,14 @@ async function openStudentDetail(id) {
         }
         
         // Lessons remaining
-        const remaining = student.lessons_remaining !== undefined ? student.lessons_remaining : student.lessons_count;
-        const total = student.lessons_count || 8;
-        const used = total - remaining;
+        const remaining = getStudentRemainingLessons(student);
+        const total = student.lessons_count || 0;
+        const used = Math.max(0, total - (Number.isFinite(remaining) ? remaining : 0));
         let lessonsAlert = '';
         
-        if (remaining <= 0) {
+        if (!student.is_unlimited && remaining <= 0) {
             lessonsAlert = '<div class="alert-danger">Занятия закончились! Требуется оплата.</div>';
-        } else if (remaining <= 2) {
+        } else if (!student.is_unlimited && remaining <= 2) {
             lessonsAlert = `<div class="alert-warning">Осталось ${remaining} занятия. Пора оплачивать!</div>`;
         }
         
@@ -661,37 +712,43 @@ async function openStudentDetail(id) {
             </div>
             
             <div class="info-section">
-                <h3>📍 Занятия</h3>
-                <div class="info-row">
-                    <span class="info-label">Место</span>
-                    <span class="info-value">${escapeHtml(student.location || 'Зал Break Wave')}</span>
-                </div>
-                <div class="info-row">
-                    <span class="info-label">Дни</span>
-                    <span class="info-value">${days}</span>
-                </div>
-                <div class="info-row">
-                    <span class="info-label">Время</span>
-                    <span class="info-value">${formatLessonTimes(student)}</span>
-                </div>
-                <div class="info-row">
+                <h3>📍 Залы и расписание</h3>
+                ${renderStudentDetailLocations(student)}
+                <div class="info-row" style="margin-top: 12px;">
                     <span class="info-label">Стоимость</span>
-                    <span class="info-value">${student.lesson_price?.toLocaleString() || 0} Br / ${total} занятий</span>
+                    <span class="info-value">${student.lesson_price?.toLocaleString() || 0} Br / занятие</span>
                 </div>
             </div>
             
             <div class="info-section">
                 <h3>📅 Абонемент</h3>
+                ${student.is_unlimited ? `
+                <div style="background: var(--bg-secondary); border-radius: 8px; padding: 12px; margin-bottom: 12px; border-left: 3px solid var(--accent);">
+                    <div style="font-size: 13px; color: var(--text-secondary); margin-bottom: 4px;">Тип абонемента</div>
+                    <div style="font-weight: 600; color: var(--accent);">♾️ Безлимитный (по месяцам)</div>
+                    <div style="font-size: 12px; color: var(--text-muted); margin-top: 4px;">
+                        Занятия не считаются. Оплата по окончанию срока.
+                    </div>
+                </div>
+                ` : (total > 0 ? `
                 <div class="lessons-progress">
                     <div class="progress-bar">
                         <div class="progress-fill ${remaining <= 2 ? 'low' : remaining <= 0 ? 'empty' : ''}" 
-                             style="width: ${(used / total) * 100}%"></div>
+                             style="width: ${total > 0 ? (used / total) * 100 : 0}%"></div>
                     </div>
                     <div class="progress-text">
                         <span>Использовано: <b>${used}</b></span>
                         <span class="${remaining <= 2 ? 'text-warning' : ''}">Осталось: <b>${remaining}</b></span>
                     </div>
                 </div>
+                <div style="font-size: 12px; color: var(--text-muted); margin-top: 8px; padding: 8px; background: var(--bg-secondary); border-radius: 8px;">
+                    💡 При отметке "Присутствовал" — занятие списывается автоматически
+                </div>
+                ` : `
+                <div style="font-size: 14px; color: var(--text-muted); padding: 12px; background: var(--bg-secondary); border-radius: 8px;">
+                    Абонемент не оформлен. Нажмите "💰 Оплата" чтобы добавить.
+                </div>
+                `)}
                 <div class="info-row" style="margin-top: 12px;">
                     <span class="info-label">Статус</span>
                     <span class="info-value">${subStatus}</span>
@@ -703,6 +760,29 @@ async function openStudentDetail(id) {
                 </div>
                 ` : ''}
             </div>
+            
+            ${student.payments && student.payments.length > 0 ? `
+            <div class="info-section">
+                <h3>💳 История оплат</h3>
+                ${student.payments.map(p => {
+                    const statusText = {paid: 'Оплачено', pending: 'Ожидает', overdue: 'Просрочено'}[p.status];
+                    const lessonsText = p.is_unlimited ? '♾️ Безлимит' : `${p.lessons_count || 0} занятий`;
+                    return `
+                    <div class="list-item" style="margin-bottom: 8px;">
+                        <div class="list-item-header">
+                            <span class="list-item-title">${p.amount.toLocaleString()} Br</span>
+                            <span class="payment-status ${p.status}">${statusText}</span>
+                        </div>
+                        <div class="list-item-subtitle">${lessonsText}${p.period_start && p.period_end ? ' • ' + formatDate(p.period_start) + ' — ' + formatDate(p.period_end) : ''}</div>
+                        <div style="display: flex; gap: 8px; margin-top: 8px;">
+                            <button class="btn-secondary" style="flex: 1; padding: 6px; font-size: 13px;" onclick="openEditPayment(${p.id})">✏️ Редактировать</button>
+                            <button class="btn-danger" style="flex: 1; padding: 6px; font-size: 13px;" onclick="deletePayment(${p.id})">🗑 Удалить</button>
+                        </div>
+                    </div>
+                    `;
+                }).join('')}
+            </div>
+            ` : ''}
             
             ${attendanceSummary ? `
             <div class="info-section">
@@ -719,10 +799,12 @@ async function openStudentDetail(id) {
             ` : ''}
             
             <div class="action-buttons-grid">
-                <button class="btn-primary" onclick="editStudent(${student.id})">✏️ Редактировать</button>
+                <button class="btn-primary" onclick="openEditStudent(${student.id})">✏️ Редактировать</button>
                 <button class="btn-secondary" onclick="addPaymentForStudent(${student.id})">💰 Оплата</button>
                 <button class="btn-secondary" onclick="markExtraAttendance(${student.id})">⭐ Внеплановое</button>
                 <button class="btn-secondary" onclick="viewAttendanceHistory(${student.id})">📋 История</button>
+                <button class="btn-secondary btn-danger" onclick="deactivateStudent(${student.id})">🚫 Деактивировать</button>
+                <button class="btn-danger" onclick="destroyStudent(${student.id}, '${escapeHtml(student.name)}')">🗑️ Удалить навсегда</button>
             </div>
         `;
         
@@ -745,36 +827,65 @@ async function editStudent(id) {
         
         const student = await res.json();
         
+        // Basic info
         document.getElementById('student-form-title').textContent = 'Редактировать ученика';
         document.getElementById('st-name').value = student.name || '';
         document.getElementById('st-nickname').value = student.nickname || '';
         document.getElementById('st-phone').value = student.phone || '';
         document.getElementById('st-parent-phone').value = student.parent_phone || '';
         document.getElementById('st-age').value = student.age || '';
-        document.getElementById('st-location').value = student.location || 'Зал Break Wave';
-        const legacyTimeInput = document.getElementById('st-time');
-        if (legacyTimeInput) legacyTimeInput.value = student.lesson_time || '18:00';
-        document.getElementById('st-price').value = student.lesson_price || 5000;
-        document.getElementById('st-count').value = student.lessons_count || 8;
         document.getElementById('st-notes').value = student.notes || '';
         
-        if (student.subscription_start) {
-            document.getElementById('st-sub-start').value = student.subscription_start;
-        }
-        if (student.subscription_end) {
-            document.getElementById('st-sub-end').value = student.subscription_end;
+        // Subscription info is now read-only (managed via Payments)
+        
+        // Location schedules - NEW SYSTEM
+        if (student.schedules && student.schedules.length > 0) {
+            currentLocationSchedules = student.schedules.map(s => ({
+                id: s.id,
+                location_id: s.location_id,
+                days: s.days ? s.days.split(',').map(Number) : [1, 3],
+                times: s.times ? JSON.parse(s.times) : {},
+                duration: s.duration || 90,
+                is_primary: s.is_primary
+            }));
+        } else {
+            // Fallback to legacy data
+            const legacyDays = student.lesson_days ? student.lesson_days.split(',').map(Number) : [1, 3];
+            const legacyTimes = {};
+            legacyDays.forEach(d => {
+                if (student.lesson_times) {
+                    try {
+                        const parsedTimes = JSON.parse(student.lesson_times);
+                        legacyTimes[d] = parsedTimes[String(d)] || parsedTimes[Object.keys(parsedTimes)[0]] || '18:00';
+                    } catch (e) {
+                        legacyTimes[d] = '18:00';
+                    }
+                } else {
+                    legacyTimes[d] = '18:00';
+                }
+            });
+            
+            currentLocationSchedules = [{
+                id: null,
+                location_id: null,
+                days: legacyDays,
+                times: legacyTimes,
+                duration: 90,
+                is_primary: true
+            }];
         }
         
-        // Set weekdays
-        selectedDays = new Set((student.lesson_days || '1,3').split(',').map(Number));
-        document.querySelectorAll('#weekdays-selector button').forEach(btn => {
-            const day = parseInt(btn.dataset.day);
-            btn.classList.toggle('active', selectedDays.has(day));
-        });
+        // Ensure locations are loaded before rendering
+        if (availableLocations.length === 0) {
+            await loadLocationsForSelect();
+        } else {
+            renderLocationSchedules();
+        }
         
         navigate('student-form');
     } catch (e) {
         console.error('Edit student error:', e);
+        showNotification('Ошибка загрузки данных ученика', 'error');
     }
 }
 
@@ -783,21 +894,22 @@ async function saveStudent() {
     const coachSelect = document.getElementById('st-coach');
     const coachId = coachSelect && coachSelect.value ? parseInt(coachSelect.value) : null;
     
+    // Validate location schedules
+    const schedules = collectLocationSchedules();
+    if (schedules.length === 0 || !schedules.some(s => s.location_id)) {
+        showNotification('Выберите хотя бы один зал', 'error');
+        return;
+    }
+    
     const data = {
         name: document.getElementById('st-name').value,
         nickname: document.getElementById('st-nickname').value,
         phone: document.getElementById('st-phone').value,
         parent_phone: document.getElementById('st-parent-phone').value,
         age: document.getElementById('st-age').value,
-        location: document.getElementById('st-location').value,
-        lesson_days: Array.from(selectedDays).join(','),
-        lesson_time: document.getElementById('st-time')?.value || '18:00',
-        lesson_price: parseInt(document.getElementById('st-price').value) || 5000,
-        lessons_count: parseInt(document.getElementById('st-count').value) || 8,
-        subscription_start: document.getElementById('st-sub-start').value,
-        subscription_end: document.getElementById('st-sub-end').value,
         notes: document.getElementById('st-notes').value,
         coach_id: coachId,
+        schedules: schedules
     };
     
     try {
@@ -818,9 +930,7 @@ async function saveStudent() {
             // Clear cache to force refresh
             DataCache.clear();
             goBack();
-            if (currentScreen === 'students') {
-                loadStudents();
-            }
+            loadStudents();
         } else {
             showNotification('Ошибка сохранения', 'error');
         }
@@ -900,110 +1010,115 @@ function selectCalendarDay(day, element) {
     const lessons = calendarData.days[day] || [];
     const container = document.getElementById('calendar-day-details');
     
+    // Get day of week name
+    const monthNames = ['Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь', 
+                        'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь'];
+    const dayNames = ['Воскресенье', 'Понедельник', 'Вторник', 'Среда', 'Четверг', 'Пятница', 'Суббота'];
+    const monthText = document.getElementById('calendar-month').textContent;
+    const [monthName, year] = monthText.split(' ');
+    const monthIndex = monthNames.indexOf(monthName);
+    const dateObj = new Date(parseInt(year), monthIndex, day);
+    const dayOfWeek = dayNames[dateObj.getDay()];
+    
     if (lessons.length === 0) {
         container.innerHTML = `
-            <h4>${day} ${document.getElementById('calendar-month').textContent}</h4>
-            <p style="color: var(--text-muted); margin-top: 8px;">Нет занятий</p>
+            <div style="text-align: center; padding: 20px;">
+                <div style="font-size: 24px; font-weight: 700; color: var(--accent); margin-bottom: 4px;">${day}</div>
+                <div style="font-size: 14px; color: var(--text-secondary); margin-bottom: 8px;">${dayOfWeek}</div>
+                <p style="color: var(--text-muted); margin-top: 16px;">Нет занятий</p>
+            </div>
         `;
     } else {
-        container.innerHTML = `
-            <h4>${day} ${document.getElementById('calendar-month').textContent}</h4>
-            <div style="margin-top: 12px;">
-                ${lessons.map(l => `
-                    <div class="list-item" style="margin-bottom: 8px;" onclick="openLessonDetail(${l.id})">
-                        <div class="list-item-header">
-                            <span class="list-item-title">${escapeHtml(l.time || '—')}</span>
-                        </div>
-                        <div class="list-item-subtitle">${escapeHtml(l.student_name)}</div>
-                    </div>
-                `).join('')}
-            </div>
-        `;
-    }
-    
-    // Highlight selected day
-    document.querySelectorAll('.calendar-day').forEach((el, i) => {
-        el.classList.remove('selected');
-    });
-    element?.classList.add('selected');
-}
-
-async function openLessonDetail(id) {
-    try {
-        const res = await fetch(`${API}/api/lessons/${id}`, {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({initData})
+        // Group by time
+        const byTime = {};
+        lessons.forEach(l => {
+            const time = l.time || '—';
+            if (!byTime[time]) byTime[time] = [];
+            byTime[time].push(l);
         });
-
-        const lesson = await res.json();
-        if (lesson.error) {
-            showNotification('Урок не найден', 'error');
-            return;
-        }
-
-        const statusMap = {
-            present: 'Был',
-            absent: 'Не был',
-            sick: 'Болеет',
-            excused: 'По уважительной'
-        };
-
-        const content = document.getElementById('lesson-detail-content');
-        content.innerHTML = `
-            <div class="screen-header">
-                <button class="back-btn" onclick="goBack()">
-                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none"><path d="M15 18L9 12L15 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-                </button>
-                <span class="screen-title">Урок</span>
-                <div style="width: 40px;"></div>
-            </div>
-            <div class="detail-card" style="padding: 16px;">
-                <div class="detail-row"><strong>Ученик:</strong> ${escapeHtml(lesson.student_name)}</div>
-                <div class="detail-row"><strong>Дата:</strong> ${formatDate(lesson.date)}</div>
-                <div class="detail-row"><strong>Время:</strong> ${escapeHtml(lesson.time || '—')}</div>
-                <div class="detail-row"><strong>Зал:</strong> ${escapeHtml(lesson.location || 'Зал Break Wave')}</div>
-                <div class="detail-row"><strong>Статус:</strong> ${escapeHtml(statusMap[lesson.attendance] || 'Не отмечен')}</div>
-                ${lesson.topic ? `<div class="detail-row"><strong>Тема:</strong> ${escapeHtml(lesson.topic)}</div>` : ''}
-                ${lesson.notes ? `<div class="detail-row"><strong>Заметки:</strong> ${escapeHtml(lesson.notes)}</div>` : ''}
-                ${lesson.attendance_notes ? `<div class="detail-row"><strong>Комментарий:</strong> ${escapeHtml(lesson.attendance_notes)}</div>` : ''}
-                <div class="action-buttons-grid" style="margin-top: 20px;">
-                    <button class="btn-primary" onclick="updateLessonAttendance(${lesson.id}, 'present')">Был</button>
-                    <button class="btn-secondary" onclick="updateLessonAttendance(${lesson.id}, 'absent')">Не был</button>
-                    <button class="btn-secondary" onclick="updateLessonAttendance(${lesson.id}, 'sick')">Болеет</button>
-                    <button class="btn-secondary" onclick="openStudentDetail(${lesson.student_id})">К карточке</button>
+        
+        // Calculate totals
+        const totalStudents = lessons.length;
+        const markedStudents = lessons.filter(s => s.is_marked).length;
+        const presentStudents = lessons.filter(s => s.status === 'present').length;
+        
+        let html = `
+            <div style="text-align: center; padding: 16px; background: var(--bg-secondary); border-radius: 12px; margin-bottom: 16px;">
+                <div style="font-size: 28px; font-weight: 700; color: var(--accent);">${day}</div>
+                <div style="font-size: 14px; color: var(--text-secondary); margin-bottom: 12px;">${dayOfWeek}</div>
+                <div style="display: flex; justify-content: center; gap: 16px; font-size: 13px;">
+                    <span style="color: var(--text-muted);">Всего: <b style="color: var(--text-primary);">${totalStudents}</b></span>
+                    <span style="color: var(--text-muted);">Отмечено: <b style="color: var(--success);">${markedStudents}</b></span>
+                    <span style="color: var(--text-muted);">Присутствовало: <b style="color: var(--accent);">${presentStudents}</b></span>
                 </div>
             </div>
         `;
-
-        navigate('lesson-detail');
-    } catch (e) {
-        console.error('Lesson detail error:', e);
-        showNotification('Ошибка загрузки', 'error');
-    }
-}
-
-async function updateLessonAttendance(lessonId, status) {
-    try {
-        const res = await fetch(`${API}/api/lessons/${lessonId}/attendance`, {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({initData, status})
+        
+        // Show lessons grouped by time
+        Object.keys(byTime).sort().forEach((time, index) => {
+            const students = byTime[time];
+            const markedCount = students.filter(s => s.is_marked).length;
+            const presentCount = students.filter(s => s.status === 'present').length;
+            
+            html += `
+                <div style="margin-bottom: 16px; background: var(--bg-card); border-radius: 12px; padding: 12px; border: 1px solid var(--border);">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; padding-bottom: 8px; border-bottom: 1px solid var(--border);">
+                        <div style="display: flex; align-items: center; gap: 8px;">
+                            <span style="font-size: 20px;">🕐</span>
+                            <span style="font-weight: 700; font-size: 18px; color: var(--accent);">${escapeHtml(time)}</span>
+                        </div>
+                        <div style="font-size: 12px; color: var(--text-muted);">
+                            ${markedCount > 0 ? `<span style="color: var(--success);">✓ ${markedCount}/${students.length}</span>` : `${students.length} уч.`}
+                        </div>
+                    </div>
+                    <div style="display: flex; flex-direction: column; gap: 8px;">
+                        ${students.map(s => {
+                            let statusIcon = '⏳';
+                            let statusColor = 'var(--text-muted)';
+                            let statusText = 'Не отмечен';
+                            if (s.status === 'present') {
+                                statusIcon = '✅';
+                                statusColor = 'var(--success)';
+                                statusText = 'Присутствовал';
+                            } else if (s.status === 'absent') {
+                                statusIcon = '❌';
+                                statusColor = 'var(--danger)';
+                                statusText = 'Отсутствовал';
+                            } else if (s.status === 'sick') {
+                                statusIcon = '🤒';
+                                statusColor = 'var(--warning)';
+                                statusText = 'Болел';
+                            }
+                            
+                            return `
+                                <div class="list-item" style="margin-bottom: 0; cursor: pointer; padding: 12px;" 
+                                     onclick="openStudentDetail(${s.student_id})">
+                                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                                        <div style="flex: 1;">
+                                            <div style="font-weight: 600; font-size: 15px; margin-bottom: 2px;">${escapeHtml(s.student_name)}</div>
+                                            <div style="font-size: 12px; color: var(--text-muted);">
+                                                📍 ${s.location || 'Зал'} • <span style="color: ${statusColor};">${statusText}</span>
+                                            </div>
+                                        </div>
+                                        <div style="font-size: 20px; margin-left: 8px;">${statusIcon}</div>
+                                    </div>
+                                </div>
+                            `;
+                        }).join('')}
+                    </div>
+                </div>
+            `;
         });
-
-        const result = await res.json();
-        if (result.success) {
-            showNotification('Посещаемость обновлена', 'success');
-            DataCache.clear();
-            await openLessonDetail(lessonId);
-            loadCalendar();
-            loadDashboard();
-        } else {
-            showNotification('Ошибка сохранения', 'error');
-        }
-    } catch (e) {
-        console.error('Lesson attendance update error:', e);
-        showNotification('Ошибка сохранения', 'error');
+        
+        container.innerHTML = html;
+    }
+    
+    // Highlight selected day
+    document.querySelectorAll('.calendar-day').forEach((el) => {
+        el.classList.remove('selected');
+    });
+    if (element) {
+        element.classList.add('selected');
     }
 }
 
@@ -1045,6 +1160,7 @@ function renderPayments(list) {
     container.innerHTML = list.map(p => {
         const statusClass = p.status;
         const statusText = {paid: 'Оплачено', pending: 'Ожидает', overdue: 'Просрочено'}[p.status];
+        const lessonsText = p.is_unlimited ? '♾️ Безлимит' : `${p.lessons_count || 0} занятий`;
         
         return `
             <div class="list-item">
@@ -1052,17 +1168,24 @@ function renderPayments(list) {
                     <span class="list-item-title">${escapeHtml(p.student_name)}</span>
                     <span class="payment-status ${statusClass}">${statusText}</span>
                 </div>
-                <div class="list-item-subtitle">${p.amount.toLocaleString()} Br • ${p.lessons_count} занятий</div>
+                <div class="list-item-subtitle">${p.amount.toLocaleString()} Br • ${lessonsText}</div>
                 <div class="list-item-meta">
                     ${p.period_start && p.period_end ? 
                         `<span>📅 ${formatDate(p.period_start)} — ${formatDate(p.period_end)}</span>` : ''}
                 </div>
-                ${p.status !== 'paid' ? `
-                    <button class="btn-primary" style="margin-top: 12px; width: 100%;" 
-                            onclick="markPaymentPaid(${p.id})">
-                        ✅ Отметить оплаченным
+                <div class="list-item-actions" style="display: flex; gap: 8px; margin-top: 12px;">
+                    ${p.status !== 'paid' ? `
+                        <button class="btn-primary" style="flex: 1;" onclick="markPaymentPaid(${p.id})">
+                            ✅ Оплачено
+                        </button>
+                    ` : ''}
+                    <button class="btn-secondary" style="flex: 1;" onclick="openEditPayment(${p.id})">
+                        ✏️ Редактировать
                     </button>
-                ` : ''}
+                    <button class="btn-danger" style="flex: 1;" onclick="deletePayment(${p.id})">
+                        🗑 Удалить
+                    </button>
+                </div>
             </div>
         `;
     }).join('');
@@ -1074,7 +1197,24 @@ function switchPaymentTab(status, btn) {
     loadPayments(status);
 }
 
+async function resetPaymentForm() {
+    editingPaymentId = null;
+    document.getElementById('pay-form-title').textContent = 'Новая оплата';
+    document.getElementById('payment-form').reset();
+    document.getElementById('pay-unlimited').checked = false;
+    togglePayUnlimited(false);
+    document.getElementById('pay-student').disabled = false;
+    
+    // Set default dates
+    const today = new Date();
+    const nextMonth = new Date(today.getFullYear(), today.getMonth() + 1, today.getDate());
+    document.getElementById('pay-start').value = today.toISOString().split('T')[0];
+    document.getElementById('pay-end').value = nextMonth.toISOString().split('T')[0];
+}
+
 async function openAddPayment() {
+    await resetPaymentForm();
+    
     // Load students for select
     const res = await fetch(`${API}/api/students`, {
         method: 'POST',
@@ -1087,13 +1227,78 @@ async function openAddPayment() {
     select.innerHTML = '<option value="">Выберите ученика</option>' + 
         studentsList.map(s => `<option value="${s.id}">${escapeHtml(s.name)}</option>`).join('');
     
-    // Set default dates
-    const today = new Date();
-    const nextMonth = new Date(today.getFullYear(), today.getMonth() + 1, today.getDate());
-    document.getElementById('pay-start').value = today.toISOString().split('T')[0];
-    document.getElementById('pay-end').value = nextMonth.toISOString().split('T')[0];
+    navigate('payment-form');
+}
+
+async function openEditPayment(paymentId) {
+    editingPaymentId = paymentId;
+    document.getElementById('pay-form-title').textContent = 'Редактировать оплату';
+    
+    // Load payment details from current list or fetch fresh
+    const paymentsRes = await fetch(`${API}/api/payments`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({initData})
+    });
+    const payments = await paymentsRes.json();
+    const payment = payments.find(p => p.id === paymentId);
+    
+    if (!payment) {
+        showNotification('Платёж не найден', 'error');
+        return;
+    }
+    
+    // Load students for select
+    const res = await fetch(`${API}/api/students`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({initData})
+    });
+    const studentsList = await res.json();
+    const select = document.getElementById('pay-student');
+    select.innerHTML = '<option value="">Выберите ученика</option>' + 
+        studentsList.map(s => `<option value="${s.id}">${escapeHtml(s.name)}</option>`).join('');
+    
+    // Fill form
+    select.value = payment.student_id;
+    select.disabled = true; // Don't allow changing student on edit
+    document.getElementById('pay-amount').value = payment.amount;
+    document.getElementById('pay-unlimited').checked = payment.is_unlimited || false;
+    togglePayUnlimited(payment.is_unlimited || false);
+    document.getElementById('pay-count').value = payment.lessons_count || 8;
+    document.getElementById('pay-start').value = payment.period_start || '';
+    document.getElementById('pay-end').value = payment.period_end || '';
+    document.getElementById('pay-status').value = payment.status || 'pending';
+    document.getElementById('pay-notes').value = payment.notes || '';
     
     navigate('payment-form');
+}
+
+async function deletePayment(paymentId) {
+    if (!confirm('Удалить платёж? Это пересчитает остаток занятий ученика.')) {
+        return;
+    }
+    
+    try {
+        const res = await fetch(`${API}/api/payments/${paymentId}/delete`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({initData})
+        });
+        
+        const result = await res.json();
+        
+        if (result.success) {
+            showNotification('Платёж удалён', 'success');
+            DataCache.clear();
+            loadPayments();
+        } else {
+            showNotification('Ошибка удаления', 'error');
+        }
+    } catch (e) {
+        console.error('Delete payment error:', e);
+        showNotification('Ошибка удаления', 'error');
+    }
 }
 
 function addPaymentForStudent(studentId) {
@@ -1102,42 +1307,78 @@ function addPaymentForStudent(studentId) {
     });
 }
 
+let paymentSubmitting = false;
+
 async function savePayment() {
-    const data = {
-        student_id: parseInt(document.getElementById('pay-student').value),
-        amount: parseInt(document.getElementById('pay-amount').value),
-        lessons_count: parseInt(document.getElementById('pay-count').value),
-        period_start: document.getElementById('pay-start').value,
-        period_end: document.getElementById('pay-end').value,
-        status: document.getElementById('pay-status').value,
-        notes: document.getElementById('pay-notes').value,
-    };
-    
-    if (!data.student_id || !data.amount) {
-        showNotification('Заполните обязательные поля', 'error');
+    if (paymentSubmitting) {
+        console.log('savePayment blocked: already submitting');
         return;
     }
+    paymentSubmitting = true;
     
     try {
-        const res = await fetch(`${API}/api/payments/create`, {
+        const isUnlimited = document.getElementById('pay-unlimited').checked;
+        const lessonsCount = parseInt(document.getElementById('pay-count').value, 10) || 0;
+        const data = {
+            student_id: parseInt(document.getElementById('pay-student').value),
+            amount: parseInt(document.getElementById('pay-amount').value),
+            lessons_count: isUnlimited ? 0 : lessonsCount,
+            period_start: document.getElementById('pay-start').value,
+            period_end: document.getElementById('pay-end').value,
+            status: document.getElementById('pay-status').value,
+            is_unlimited: isUnlimited,
+            notes: document.getElementById('pay-notes').value,
+        };
+        
+        console.log('savePayment payload JSON:', JSON.stringify(data), 'editingPaymentId:', editingPaymentId);
+        
+        if (!data.student_id || !data.amount) {
+            showNotification('Заполните обязательные поля', 'error');
+            return;
+        }
+
+        if (!isUnlimited && data.lessons_count <= 0) {
+            showNotification('Укажите количество занятий', 'error');
+            return;
+        }
+
+        if (!data.period_start || !data.period_end) {
+            showNotification('Укажите период действия абонемента', 'error');
+            return;
+        }
+
+        if (data.period_end < data.period_start) {
+            showNotification('Дата окончания не может быть раньше даты начала', 'error');
+            return;
+        }
+        
+        const url = editingPaymentId 
+            ? `${API}/api/payments/${editingPaymentId}/update`
+            : `${API}/api/payments/create`;
+        
+        console.log('savePayment fetching url:', url);
+        const res = await fetch(url, {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({initData, payment: data})
         });
+        console.log('savePayment response status:', res.status);
         
         const result = await res.json();
         
         if (result.success) {
-            showNotification('Оплата добавлена', 'success');
-            // Clear cache to force refresh
+            showNotification(editingPaymentId ? 'Оплата обновлена' : 'Оплата добавлена', 'success');
             DataCache.clear();
             goBack();
+            loadPayments();
         } else {
             showNotification('Ошибка сохранения', 'error');
         }
     } catch (e) {
         console.error('Save payment error:', e);
         showNotification('Ошибка сохранения', 'error');
+    } finally {
+        paymentSubmitting = false;
     }
 }
 
@@ -1169,112 +1410,347 @@ async function openQuickLesson() {
     navigate('quick-lesson');
 }
 
+// Quick attendance data
+let quickAttendanceData = {};
+
 async function loadQuickLesson() {
-    const lessonDate = document.getElementById('ql-date').value;
+    const dateInput = document.getElementById('ql-date');
+    const locationSelect = document.getElementById('ql-location');
+    
+    // Set default date if not set
+    if (!dateInput.value) {
+        dateInput.value = new Date().toISOString().split('T')[0];
+    }
+    
+    // Load locations for filter
+    if (locationSelect.options.length <= 1) {
+        try {
+            const locRes = await fetch(`${API}/api/locations`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({initData})
+            });
+            const locations = await locRes.json();
+            locationSelect.innerHTML = '<option value="">Все залы</option>' +
+                locations.map(l => `<option value="${l.id}">${escapeHtml(l.name)}</option>`).join('');
+        } catch (e) {
+            console.error('Load locations error:', e);
+        }
+    }
+    
+    const date = dateInput.value;
+    const locationId = locationSelect.value;
     
     try {
+        // Get students with their schedules for this date
         const res = await fetch(`${API}/api/students`, {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({initData})
+            body: JSON.stringify({initData, view_mode: 'my'})
         });
         
         const studentsList = await res.json();
-        const container = document.getElementById('quick-lesson-students');
-        const weekday = new Date(`${lessonDate}T12:00:00`).getDay();
-        const mondayBasedWeekday = (weekday + 6) % 7;
-        const scheduledStudents = studentsList
-            .filter(s => (s.lesson_days || '').split(',').includes(String(mondayBasedWeekday)))
-            .sort((a, b) => {
-                const timeA = getLessonTimeForDay(a, mondayBasedWeekday);
-                const timeB = getLessonTimeForDay(b, mondayBasedWeekday);
-                return timeA.localeCompare(timeB) || a.name.localeCompare(b.name);
-            });
-
-        if (scheduledStudents.length === 0) {
-            container.innerHTML = `
-                <div class="empty-state">
-                    <div class="empty-state-icon">рџ“…</div>
-                    <p>РќР° СЌС‚Сѓ РґР°С‚Сѓ РЅРµС‚ Р·Р°РїР»Р°РЅРёСЂРѕРІР°РЅРЅС‹С… Р·Р°РЅСЏС‚РёР№</p>
-                </div>
-            `;
-            return;
-        }
         
-        container.innerHTML = scheduledStudents.map(s => `
-            <div class="quick-student-item" data-student-id="${s.id}">
-                <div>
-                    <span class="quick-student-name">${escapeHtml(s.name)}</span>
-                    <div class="list-item-subtitle">${escapeHtml(getLessonTimeForDay(s, mondayBasedWeekday))}</div>
-                </div>
-                <div class="attendance-buttons">
-                    <button class="att-btn present" onclick="setAttendance(${s.id}, 'present')" title="Был">✓</button>
-                    <button class="att-btn absent" onclick="setAttendance(${s.id}, 'absent')" title="Не был">✗</button>
-                    <button class="att-btn sick" onclick="setAttendance(${s.id}, 'sick')" title="Болеет">🤒</button>
-                </div>
-            </div>
-        `).join('');
+        // Convert JS day (0=Sun, 1=Mon) to Python weekday (0=Mon, 6=Sun)
+        const jsDay = new Date(date).getDay();
+        const pythonDay = jsDay === 0 ? 6 : jsDay - 1;
+        
+        // Filter students who have lesson on this day with their schedule info
+        // IMPORTANT: Use ONLY schedules table, ignore legacy lesson_days to avoid format confusion
+        let studentsWithSchedules = [];
+        
+        studentsList.forEach(s => {
+            // Use only new schedules table
+            if (s.schedules && s.schedules.length > 0) {
+                s.schedules.forEach(sch => {
+                    if (sch.days) {
+                        const days = sch.days.split(',').map(d => d.trim());
+                        if (days.includes(String(pythonDay))) {
+                            // Check location filter
+                            if (!locationId || sch.location_id == locationId) {
+                                // Parse times JSON to get time for this day
+                                let time = '18:00';
+                                try {
+                                    const times = JSON.parse(sch.times || '{}');
+                                    // Try to get time for specific day, fallback to first available
+                                    time = times[String(pythonDay)] || times[Object.keys(times)[0]] || '18:00';
+                                } catch (e) {
+                                    time = '18:00';
+                                }
+                                
+                                studentsWithSchedules.push({
+                                    ...s,
+                                    schedule_time: time,
+                                    schedule_location: sch.location_name || 'Зал',
+                                    schedule_location_id: sch.location_id
+                                });
+                            }
+                        }
+                    }
+                });
+            }
+            // Note: NO fallback to lesson_days - it can be in inconsistent format
+            // If student has no schedules, they won't appear (need to edit and save to create schedules)
+        });
+        
+        // Group by time
+        const byTime = {};
+        studentsWithSchedules.forEach(s => {
+            const time = s.schedule_time || '18:00';
+            if (!byTime[time]) byTime[time] = [];
+            byTime[time].push(s);
+        });
+        
+        // Sort times
+        const sortedTimes = Object.keys(byTime).sort();
+        
+        // Initialize attendance data
+        quickAttendanceData = {};
+        studentsWithSchedules.forEach(s => {
+            quickAttendanceData[s.id] = {
+                student_id: s.id,
+                status: null,
+                student: s
+            };
+        });
+        
+        renderQuickLessonListGrouped(byTime, sortedTimes);
+        updateQuickStats(studentsWithSchedules.length);
+        
     } catch (e) {
         console.error('Quick lesson load error:', e);
+        document.getElementById('quick-lesson-students').innerHTML = `
+            <div class="empty-state">
+                <p>Ошибка загрузки</p>
+            </div>
+        `;
     }
 }
 
-function setAttendance(studentId, status) {
-    const row = document.querySelector(`[data-student-id="${studentId}"]`);
-    row.querySelectorAll('.att-btn').forEach(btn => btn.classList.remove('selected'));
-    row.querySelector(`.att-btn.${status}`).classList.add('selected');
-    row.dataset.status = status;
+function renderQuickLessonListGrouped(byTime, sortedTimes) {
+    const container = document.getElementById('quick-lesson-students');
+    
+    if (sortedTimes.length === 0) {
+        container.innerHTML = `
+            <div class="empty-state">
+                <div class="empty-state-icon">📅</div>
+                <p>Нет учеников на этот день</p>
+            </div>
+        `;
+        document.getElementById('ql-title').textContent = '✅ Отметка (0)';
+        return;
+    }
+    
+    let html = '';
+    const totalStudents = Object.values(byTime).reduce((sum, group) => sum + group.length, 0);
+    
+    sortedTimes.forEach(time => {
+        const students = byTime[time];
+        html += `
+            <div class="time-group">
+                <div class="time-group-header">
+                    <span class="time-badge">🕐 ${escapeHtml(time)}</span>
+                    <span class="count-badge">${students.length} уч.</span>
+                </div>
+                <div class="time-group-students">
+                    ${students.map((s, index) => {
+                        const remaining = getStudentRemainingLessons(s);
+                        let dotClass = 'ok';
+                        if (!s.is_unlimited && remaining <= 0) dotClass = 'none';
+                        else if (!s.is_unlimited && remaining <= 2) dotClass = 'low';
+                        
+                        const locationName = s.schedule_location || s.location || 'Зал';
+                        
+                        return `
+                            <div class="quick-student-item" data-student-id="${s.id}" onclick="toggleQuickStatus(${s.id})">
+                                <div class="quick-student-avatar">${s.name.charAt(0)}</div>
+                                <div class="quick-student-info">
+                                    <div class="quick-student-name">
+                                        ${index + 1}. ${escapeHtml(s.name)}
+                                        <span class="lessons-dot ${dotClass}"></span>
+                                    </div>
+                                    <div class="quick-student-meta">
+                                        ${getStudentLessonsMeta(s)} • 📍 ${escapeHtml(locationName)}
+                                    </div>
+                                </div>
+                                <div class="quick-student-status" id="status-${s.id}">⏳</div>
+                            </div>
+                        `;
+                    }).join('')}
+                </div>
+            </div>
+        `;
+    });
+    
+    container.innerHTML = html;
+    document.getElementById('ql-title').textContent = `✅ Отметка (${totalStudents})`;
 }
 
-async function saveQuickLesson() {
-    const date = document.getElementById('ql-date').value;
-    const rows = document.querySelectorAll('#quick-lesson-students .quick-student-item');
+// Legacy function - now calls the grouped version
+function renderQuickLessonList(students) {
+    const container = document.getElementById('quick-lesson-students');
     
-    const attendances = [];
-    rows.forEach(row => {
-        if (row.dataset.status) {
-            attendances.push({
-                student_id: parseInt(row.dataset.studentId),
-                status: row.dataset.status
-            });
-        }
+    if (students.length === 0) {
+        container.innerHTML = `
+            <div class="empty-state">
+                <div class="empty-state-icon">📅</div>
+                <p>Нет учеников на этот день</p>
+            </div>
+        `;
+        return;
+    }
+    
+    container.innerHTML = students.map((s, index) => {
+        const remaining = getStudentRemainingLessons(s);
+        let dotClass = 'ok';
+        if (!s.is_unlimited && remaining <= 0) dotClass = 'none';
+        else if (!s.is_unlimited && remaining <= 2) dotClass = 'low';
+        
+        return `
+            <div class="quick-student-item" data-student-id="${s.id}" onclick="toggleQuickStatus(${s.id})">
+                <div class="quick-student-avatar">${s.name.charAt(0)}</div>
+                <div class="quick-student-info">
+                    <div class="quick-student-name">
+                        ${index + 1}. ${escapeHtml(s.name)}
+                        <span class="lessons-dot ${dotClass}"></span>
+                    </div>
+                    <div class="quick-student-meta">${getStudentLessonsMeta(s)}</div>
+                </div>
+                <div class="quick-student-status" id="status-${s.id}">⏳</div>
+            </div>
+        `;
+    }).join('');
+    
+    document.getElementById('ql-title').textContent = `✅ Отметка (${students.length})`;
+}
+
+function toggleQuickStatus(studentId) {
+    const data = quickAttendanceData[studentId];
+    const item = document.querySelector(`[data-student-id="${studentId}"]`);
+    const statusEl = document.getElementById(`status-${studentId}`);
+    
+    // Cycle: null -> present -> absent -> sick -> null
+    const cycle = [null, 'present', 'absent', 'sick'];
+    const currentIndex = cycle.indexOf(data.status);
+    const nextStatus = cycle[(currentIndex + 1) % cycle.length];
+    
+    data.status = nextStatus;
+    
+    // Update UI
+    item.classList.remove('selected-present', 'selected-absent', 'selected-sick');
+    
+    if (nextStatus === 'present') {
+        item.classList.add('selected-present');
+        statusEl.textContent = '✅';
+    } else if (nextStatus === 'absent') {
+        item.classList.add('selected-absent');
+        statusEl.textContent = '❌';
+    } else if (nextStatus === 'sick') {
+        item.classList.add('selected-sick');
+        statusEl.textContent = '🤒';
+    } else {
+        statusEl.textContent = '⏳';
+    }
+    
+    updateQuickStats();
+}
+
+function selectAllQuick(status) {
+    Object.keys(quickAttendanceData).forEach(id => {
+        quickAttendanceData[id].status = status;
+        const item = document.querySelector(`[data-student-id="${id}"]`);
+        const statusEl = document.getElementById(`status-${id}`);
+        
+        item.classList.remove('selected-present', 'selected-absent', 'selected-sick');
+        item.classList.add(`selected-${status}`);
+        
+        if (status === 'present') statusEl.textContent = '✅';
+        else if (status === 'absent') statusEl.textContent = '❌';
+        else if (status === 'sick') statusEl.textContent = '🤒';
     });
+    
+    updateQuickStats();
+}
+
+function updateQuickStats(totalOverride) {
+    const total = totalOverride || Object.keys(quickAttendanceData).length;
+    const marked = Object.values(quickAttendanceData).filter(d => d.status !== null).length;
+    const present = Object.values(quickAttendanceData).filter(d => d.status === 'present').length;
+    
+    document.getElementById('quick-lesson-stats').innerHTML = `
+        <div class="quick-stat">
+            <span class="quick-stat-value">${marked}/${total}</span>
+            <span class="quick-stat-label">Отмечено</span>
+        </div>
+        <div class="quick-stat">
+            <span class="quick-stat-value" style="color: var(--success)">${present}</span>
+            <span class="quick-stat-label">Присутствуют</span>
+        </div>
+        <div class="quick-stat">
+            <span class="quick-stat-value">${total - marked}</span>
+            <span class="quick-stat-label">Осталось</span>
+        </div>
+    `;
+}
+
+async function saveQuickAttendance() {
+    const date = document.getElementById('ql-date').value;
+    const attendances = Object.values(quickAttendanceData)
+        .filter(d => d.status !== null)
+        .map(d => ({
+            student_id: d.student_id,
+            status: d.status,
+            time: d.student?.schedule_time || null
+        }));
     
     if (attendances.length === 0) {
         showNotification('Отметьте хотя бы одного ученика', 'error');
         return;
     }
     
-    // Create lessons with attendance
     try {
         const res = await fetch(`${API}/api/bulk-attendance`, {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({
-                    initData,
-                    date,
-                    attendance: attendances
-                })
-            });
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                initData,
+                date: date,
+                attendance: attendances
+            })
+        });
+        
         const result = await res.json();
-        if (!result.success) {
-            showNotification('Ошибка сохранения', 'error');
-            return;
-        }
-
-        DataCache.clear();
-        if (result.low_lessons_alert?.length) {
-            const names = result.low_lessons_alert.map(s => `${s.name} (${s.remaining})`).join(', ');
-            showNotification(`Отмечено: ${result.marked}. Мало занятий: ${names}`, 'success');
+        
+        if (result.success) {
+            showNotification(`Сохранено: ${result.marked} учеников`, 'success');
+            
+            // Show alert about low lessons if any
+            if (result.low_lessons_alert && result.low_lessons_alert.length > 0) {
+                const names = result.low_lessons_alert.map(s => s.name).join(', ');
+                setTimeout(() => {
+                    showNotification(`⚠️ Мало занятий: ${names}`, 'warning', 5000);
+                }, 1000);
+            }
+            
+            DataCache.clear();
+            goBack();
+            loadDashboard();
         } else {
-            showNotification(`Отмечено ${result.marked} занятий`, 'success');
+            showNotification('Ошибка сохранения', 'error');
         }
-        goBack();
-        loadDashboard();
     } catch (e) {
-        console.error('Save quick lesson error:', e);
-        showNotification('Ошибка сохранения', 'error');
+        console.error('Save quick attendance error:', e);
+        showNotification('Ошибка сети', 'error');
     }
+}
+
+// Legacy function for compatibility
+function setAttendance(studentId, status) {
+    toggleQuickStatus(studentId);
+}
+
+async function saveQuickLesson() {
+    await saveQuickAttendance();
 }
 
 // === Helpers ===
@@ -1290,41 +1766,6 @@ function formatDate(dateStr) {
     if (!dateStr) return '—';
     const date = new Date(dateStr);
     return date.toLocaleDateString('ru-RU', {day: '2-digit', month: '2-digit', year: 'numeric'});
-}
-
-function formatLessonTimes(student) {
-    if (!student?.lesson_times) return 'вЂ”';
-
-    try {
-        const daysMap = {0:'РџРЅ',1:'Р’С‚',2:'РЎСЂ',3:'Р§С‚',4:'РџС‚',5:'РЎР±',6:'Р’СЃ'};
-        const times = JSON.parse(student.lesson_times);
-        const entries = Object.entries(times)
-            .filter(([, time]) => Boolean(time))
-            .sort(([a], [b]) => Number(a) - Number(b))
-            .map(([day, time]) => `${daysMap[day] || day}: ${time}`);
-
-        return entries.length ? entries.join(', ') : 'вЂ”';
-    } catch (e) {
-        return 'вЂ”';
-    }
-}
-
-function getLessonTimeForDay(student, day) {
-    if (!student) return '18:00';
-
-    const fallback = student.lesson_time || '18:00';
-    if (!student.lesson_times) {
-        return fallback;
-    }
-
-    try {
-        const times = typeof student.lesson_times === 'string'
-            ? JSON.parse(student.lesson_times)
-            : student.lesson_times;
-        return times?.[day] || times?.[String(day)] || fallback;
-    } catch (e) {
-        return fallback;
-    }
 }
 
 function showNotification(message, type = 'info') {
@@ -1449,14 +1890,75 @@ async function saveExtraAttendance(studentId) {
             openStudentDetail(studentId);
         } else if (result.error === 'no_lessons_remaining') {
             showNotification('У ученика не осталось занятий в абонементе', 'error');
-        } else if (result.error === 'already_marked') {
-            showNotification('На эту дату и время посещаемость уже отмечена', 'error');
         } else {
             showNotification('Ошибка сохранения', 'error');
         }
     } catch (e) {
         console.error('Extra attendance error:', e);
         showNotification('Ошибка сохранения', 'error');
+    }
+}
+
+async function deactivateStudent(studentId) {
+    if (!confirm('Деактивировать ученика? Он будет скрыт из списков, но данные сохранятся.')) {
+        return;
+    }
+    
+    try {
+        const res = await fetch(`${API}/api/students/${studentId}/delete`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({initData})
+        });
+        
+        const result = await res.json();
+        
+        if (result.success) {
+            showNotification('Ученик деактивирован', 'success');
+            goBack();
+            loadStudents();
+        } else {
+            showNotification('Ошибка деактивации', 'error');
+        }
+    } catch (e) {
+        console.error('Deactivate error:', e);
+        showNotification('Ошибка сети', 'error');
+    }
+}
+
+async function destroyStudent(studentId, studentName) {
+    const confirmText = prompt(`ВНИМАНИЕ! Это действие НЕОБРАТИМО!\\n\\nДля подтверждения удаления ученика "${studentName}" введите его имя:`);
+    
+    if (confirmText !== studentName) {
+        showNotification('Удаление отменено - имя не совпадает', 'error');
+        return;
+    }
+    
+    if (!confirm(`УДАЛИТЬ УЧЕНИКА НАВСЕГДА?\\n\\nВсе занятия, оплаты и история будут безвозвратно удалены!`)) {
+        return;
+    }
+    
+    try {
+        const res = await fetch(`${API}/api/students/${studentId}/destroy`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({initData, confirm_destroy: true})
+        });
+        
+        const result = await res.json();
+        
+        if (result.success) {
+            showNotification(`Ученик ${studentName} удален навсегда`, 'success');
+            goBack();
+            loadStudents();
+        } else if (result.error === 'confirmation_required') {
+            showNotification('Требуется подтверждение', 'error');
+        } else {
+            showNotification('Ошибка удаления', 'error');
+        }
+    } catch (e) {
+        console.error('Destroy error:', e);
+        showNotification('Ошибка сети', 'error');
     }
 }
 
@@ -1482,8 +1984,9 @@ async function viewAttendanceHistory(studentId) {
         // Create modal
         const modal = document.createElement('div');
         modal.className = 'modal';
-        modal.style.alignItems = 'flex-start';
-        modal.style.paddingTop = '20px';
+        modal.onclick = (e) => {
+            if (e.target === modal) modal.remove();
+        };
         
         let attendanceHtml = '';
         if (attendance.length === 0) {
@@ -1524,7 +2027,7 @@ async function viewAttendanceHistory(studentId) {
         }
         
         modal.innerHTML = `
-            <div class="modal-content" style="max-height: 80vh; overflow-y: auto;">
+            <div class="modal-content" style="max-height: 85vh; overflow-y: auto; display: flex; flex-direction: column;">
                 <div class="modal-header">
                     <h3>📋 История посещений</h3>
                     <button class="close-btn" onclick="this.closest('.modal').remove()">✕</button>
@@ -1533,8 +2036,8 @@ async function viewAttendanceHistory(studentId) {
                 <div class="student-summary">
                     <div class="summary-row">
                         <span class="summary-name">${escapeHtml(student.name)}</span>
-                        <span class="summary-lessons ${student.lessons_remaining <= 2 ? 'warning' : ''}">
-                            ${student.lessons_remaining}/${student.lessons_count} занятий
+                        <span class="summary-lessons ${!student.is_unlimited && student.lessons_remaining <= 2 ? 'warning' : ''}">
+                            ${student.is_unlimited ? '♾️ Безлимитный абонемент' : `${student.lessons_remaining}/${student.lessons_count} занятий`}
                         </span>
                     </div>
                 </div>
@@ -1554,8 +2057,12 @@ async function viewAttendanceHistory(studentId) {
                     </div>
                 </div>
                 
-                <div class="attendance-history-list">
+                <div class="attendance-history-list" style="flex: 1; overflow-y: auto; max-height: 50vh;">
                     ${attendanceHtml}
+                </div>
+                
+                <div class="modal-actions" style="margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--border);">
+                    <button class="btn-secondary" onclick="this.closest('.modal').remove()">Закрыть</button>
                 </div>
             </div>
         `;
@@ -1707,10 +2214,6 @@ saveStudent = async function() {
         location_id: locationId,
         lesson_days: Array.from(selectedDays).join(','),
         lesson_times: times,
-        lesson_price: parseInt(document.getElementById('st-price').value) || 150,
-        lessons_count: parseInt(document.getElementById('st-count').value) || 8,
-        subscription_start: document.getElementById('st-sub-start').value,
-        subscription_end: document.getElementById('st-sub-end').value,
         notes: document.getElementById('st-notes').value,
         coach_id: coachId,
     };
@@ -1732,9 +2235,7 @@ saveStudent = async function() {
             showNotification(editingStudentId ? 'Ученик обновлен' : 'Ученик добавлен', 'success');
             DataCache.clear();
             goBack();
-            if (currentScreen === 'students') {
-                loadStudents();
-            }
+            loadStudents();
         } else {
             showNotification('Ошибка сохранения', 'error');
         }
@@ -1744,64 +2245,7 @@ saveStudent = async function() {
     }
 };
 
-// Override editStudent to load lesson_times
-const originalEditStudent = editStudent;
-editStudent = async function(id) {
-    editingStudentId = id;
-    
-    try {
-        const res = await fetch(`${API}/api/students/${id}`, {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({initData})
-        });
-        
-        const student = await res.json();
-        
-        // Load locations first
-        await loadLocations();
-        if (student.location_id) {
-            document.getElementById('st-location-id').value = student.location_id;
-        }
-        
-        document.getElementById('student-form-title').textContent = 'Редактировать ученика';
-        document.getElementById('st-name').value = student.name || '';
-        document.getElementById('st-nickname').value = student.nickname || '';
-        document.getElementById('st-phone').value = student.phone || '';
-        document.getElementById('st-parent-phone').value = student.parent_phone || '';
-        document.getElementById('st-age').value = student.age || '';
-        document.getElementById('st-location').value = student.location || 'Зал Break Wave';
-        document.getElementById('st-price').value = student.lesson_price || 150;
-        document.getElementById('st-count').value = student.lessons_count || 8;
-        document.getElementById('st-notes').value = student.notes || '';
-        
-        if (student.subscription_start) {
-            document.getElementById('st-sub-start').value = student.subscription_start;
-        }
-        if (student.subscription_end) {
-            document.getElementById('st-sub-end').value = student.subscription_end;
-        }
-        
-        // Set weekdays and times
-        selectedDays = new Set((student.lesson_days || '1,3').split(',').map(Number));
-        document.querySelectorAll('#weekdays-selector button').forEach(btn => {
-            const day = parseInt(btn.dataset.day);
-            btn.classList.toggle('active', selectedDays.has(day));
-        });
-        
-        // Parse lesson_times JSON
-        try {
-            lessonTimes = JSON.parse(student.lesson_times || '{}');
-        } catch {
-            lessonTimes = {};
-        }
-        generateLessonTimeInputs();
-        
-        navigate('student-form');
-    } catch (e) {
-        console.error('Edit student error:', e);
-    }
-};
+// Edit student function is defined above and works with new schedule system
 
 // === Statistics ===
 
@@ -1974,7 +2418,7 @@ function renderSearchResults(results) {
         <div class="list-item" onclick="openStudentDetail(${r.id})">
             <div class="list-item-header">
                 <span class="list-item-title">${escapeHtml(r.name)}</span>
-                <span class="lessons-indicator ${r.lessons_remaining <= 2 ? 'low' : ''}">${r.lessons_remaining}</span>
+                <span class="lessons-indicator ${!r.is_unlimited && r.lessons_remaining <= 2 ? 'low' : ''}">${getStudentLessonsDisplay(r)}</span>
             </div>
             <div class="list-item-subtitle">${escapeHtml(r.nickname || '')}</div>
             <div class="list-item-meta">
@@ -1985,3 +2429,726 @@ function renderSearchResults(results) {
         </div>
     `).join('');
 }
+
+
+// === Multiple Locations Management ===
+
+let currentLocationSchedules = [];
+let availableLocations = [];
+
+// Initialize with one default location
+function initLocationSchedules(schedules = null) {
+    if (schedules && schedules.length > 0) {
+        currentLocationSchedules = schedules.map(s => ({
+            id: s.id,
+            location_id: s.location_id,
+            days: s.days ? s.days.split(',').map(d => parseInt(d.trim())) : [],
+            times: typeof s.times === 'string' ? JSON.parse(s.times) : s.times,
+            duration: s.duration || 90,
+            is_primary: s.is_primary
+        }));
+    } else {
+        // Default schedule
+        currentLocationSchedules = [{
+            id: null,
+            location_id: null,
+            days: [1, 3], // Tue, Thu
+            times: {"1": "18:00", "3": "18:00"},
+            duration: 90,
+            is_primary: true
+        }];
+    }
+    renderLocationSchedules();
+}
+
+function addLocationSchedule() {
+    currentLocationSchedules.push({
+        id: null,
+        location_id: null,
+        days: [],
+        times: {},
+        duration: 90,
+        is_primary: false
+    });
+    renderLocationSchedules();
+}
+
+function removeLocationSchedule(index) {
+    if (currentLocationSchedules.length <= 1) {
+        showNotification('Нужен хотя бы один зал', 'error');
+        return;
+    }
+    currentLocationSchedules.splice(index, 1);
+    // Ensure at least one is primary
+    if (!currentLocationSchedules.some(s => s.is_primary)) {
+        currentLocationSchedules[0].is_primary = true;
+    }
+    renderLocationSchedules();
+}
+
+function setPrimaryLocation(index) {
+    currentLocationSchedules.forEach((s, i) => {
+        s.is_primary = (i === index);
+    });
+    renderLocationSchedules();
+}
+
+function toggleLocationDay(locationIndex, day) {
+    const schedule = currentLocationSchedules[locationIndex];
+    const dayIndex = schedule.days.indexOf(day);
+    
+    if (dayIndex > -1) {
+        schedule.days.splice(dayIndex, 1);
+        delete schedule.times[day];
+    } else {
+        schedule.days.push(day);
+        schedule.days.sort();
+        schedule.times[day] = '18:00';
+    }
+    renderLocationSchedules();
+}
+
+function updateLocationTime(locationIndex, day, time) {
+    currentLocationSchedules[locationIndex].times[day] = time;
+}
+
+function updateLocationField(locationIndex, field, value) {
+    currentLocationSchedules[locationIndex][field] = value;
+}
+
+function renderLocationSchedules() {
+    const container = document.getElementById('student-locations-container');
+    if (!container) return;
+    
+    container.innerHTML = currentLocationSchedules.map((schedule, index) => {
+        const locationOptions = availableLocations.map(loc => 
+            `<option value="${loc.id}" ${schedule.location_id == loc.id ? 'selected' : ''}>${escapeHtml(loc.name)}</option>`
+        ).join('');
+        
+        const dayButtons = [0, 1, 2, 3, 4, 5, 6].map(day => {
+            const dayNames = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
+            const isActive = schedule.days.includes(day);
+            return `<button type="button" class="${isActive ? 'active' : ''}" onclick="toggleLocationDay(${index}, ${day})">${dayNames[day]}</button>`;
+        }).join('');
+        
+        const timeInputs = schedule.days.map(day => {
+            const dayNames = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
+            const time = schedule.times[day] || '18:00';
+            return `
+                <div class="time-input-row">
+                    <span class="day-label">${dayNames[day]}</span>
+                    <input type="time" class="day-time" value="${time}" 
+                           onchange="updateLocationTime(${index}, ${day}, this.value)">
+                </div>
+            `;
+        }).join('');
+        
+        return `
+            <div class="location-schedule-card ${schedule.is_primary ? 'primary' : ''}">
+                <div class="location-header">
+                    <span class="location-number">${schedule.is_primary ? '⭐ Основной зал' : `Доп. зал #${index + 1}`}</span>
+                    <div class="location-actions">
+                        ${!schedule.is_primary ? `<button type="button" class="btn-set-primary" onclick="setPrimaryLocation(${index})">Сделать основным</button>` : ''}
+                        <button type="button" class="btn-icon" onclick="removeLocationSchedule(${index})">×</button>
+                    </div>
+                </div>
+                
+                <div class="location-select-wrapper">
+                    <select id="loc-select-${index}" onchange="handleLocationSelect(${index}, this.value)">
+                        <option value="">-- Выберите зал --</option>
+                        ${locationOptions}
+                        <option value="__new__" style="color: var(--accent); font-weight: 600;">+ Создать новый зал</option>
+                    </select>
+                    
+                    <!-- New location input (hidden by default) -->
+                    <div id="new-loc-${index}" class="new-location-input" style="display: none; margin-top: 8px;">
+                        <input type="text" id="new-loc-name-${index}" placeholder="Название зала (например: Зал на Ленина)" 
+                               style="width: 100%; padding: 10px; background: var(--bg-secondary); border: 1px solid var(--accent); border-radius: 8px; color: var(--text-primary);">
+                        <div style="display: flex; gap: 8px; margin-top: 8px;">
+                            <button type="button" class="btn-primary" onclick="createNewLocation(${index})" style="flex: 1; padding: 8px;">Создать</button>
+                            <button type="button" class="btn-secondary" onclick="cancelNewLocation(${index})" style="padding: 8px 12px;">Отмена</button>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="form-group">
+                    <label>Дни недели</label>
+                    <div class="weekdays-selector">
+                        ${dayButtons}
+                    </div>
+                </div>
+                
+                ${schedule.days.length > 0 ? `
+                    <div class="lesson-times-grid">
+                        <span class="section-label">Время занятий</span>
+                        <div class="times-grid">
+                            ${timeInputs}
+                        </div>
+                    </div>
+                ` : '<p style="color: var(--text-muted); font-size: 13px; margin: 12px 0;">Выберите дни недели</p>'}
+            </div>
+        `;
+    }).join('');
+    
+    // Set select values after render
+    setTimeout(() => {
+        currentLocationSchedules.forEach((schedule, index) => {
+            const select = document.getElementById(`loc-select-${index}`);
+            if (select && schedule.location_id) {
+                select.value = schedule.location_id;
+            }
+        });
+    }, 10);
+}
+
+function collectLocationSchedules() {
+    return currentLocationSchedules.map(s => ({
+        id: s.id,
+        location_id: s.location_id,
+        days: s.days.join(','),
+        times: JSON.stringify(s.times),
+        duration: s.duration,
+        is_primary: s.is_primary
+    }));
+}
+
+// Handle location select change
+function handleLocationSelect(index, value) {
+    if (value === '__new__') {
+        // Show new location input
+        document.getElementById(`new-loc-${index}`).style.display = 'block';
+        document.getElementById(`loc-select-${index}`).value = '';
+        setTimeout(() => document.getElementById(`new-loc-name-${index}`).focus(), 100);
+    } else {
+        updateLocationField(index, 'location_id', value ? parseInt(value) : null);
+    }
+}
+
+// Create new location
+async function createNewLocation(index) {
+    const nameInput = document.getElementById(`new-loc-name-${index}`);
+    const name = nameInput.value.trim();
+    
+    if (!name) {
+        showNotification('Введите название зала', 'error');
+        return;
+    }
+    
+    try {
+        const res = await fetch(`${API}/api/locations/create`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                initData,
+                location: {name: name}
+            })
+        });
+        
+        const result = await res.json();
+        
+        if (result.success) {
+            // Add to available locations
+            availableLocations.push({id: result.id, name: name});
+            
+            // Update schedule with new location
+            currentLocationSchedules[index].location_id = result.id;
+            
+            // Re-render
+            renderLocationSchedules();
+            
+            showNotification('Зал создан!', 'success');
+        } else {
+            showNotification('Ошибка создания зала', 'error');
+        }
+    } catch (e) {
+        console.error('Create location error:', e);
+        showNotification('Ошибка сети', 'error');
+    }
+}
+
+// Cancel new location creation
+function cancelNewLocation(index) {
+    document.getElementById(`new-loc-${index}`).style.display = 'none';
+    document.getElementById(`new-loc-name-${index}`).value = '';
+    document.getElementById(`loc-select-${index}`).value = '';
+}
+
+// Load locations for select
+async function loadLocationsForSelect() {
+    try {
+        const res = await fetch(`${API}/api/locations`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({initData})
+        });
+        availableLocations = await res.json();
+        renderLocationSchedules();
+    } catch (e) {
+        console.error('Load locations error:', e);
+    }
+}
+
+// Override openAddStudent to init locations
+openAddStudent = async function() {
+    editingStudentId = null;
+    document.getElementById('student-form-title').textContent = 'Новый ученик';
+    document.getElementById('student-form').reset();
+    
+    // Load locations first
+    await loadLocationsForSelect();
+    
+    // Init with default schedule
+    initLocationSchedules();
+    
+    // Load coaches for admin
+    await loadCoaches();
+    renderCoachSelect();
+    
+    showScreen('student-form');
+};
+
+// Toggle unlimited lessons
+function togglePayUnlimited(checked) {
+    const countGroup = document.getElementById('pay-count-group');
+    const countInput = document.getElementById('pay-count');
+    const hint = document.getElementById('pay-unlimited-hint');
+    if (checked) {
+        countGroup.style.display = 'none';
+        countInput.value = '';
+        countInput.disabled = true;
+        countInput.required = false;
+        if (hint) hint.style.display = 'block';
+    } else {
+        countGroup.style.display = 'block';
+        countInput.disabled = false;
+        countInput.required = true;
+        countInput.value = countInput.value || '8';
+        if (hint) hint.style.display = 'none';
+    }
+}
+
+// Override openEditStudent
+openEditStudent = async function(studentId) {
+    editingStudentId = studentId;
+    document.getElementById('student-form-title').textContent = 'Редактирование';
+    
+    // Load locations first
+    await loadLocationsForSelect();
+    
+    try {
+        const res = await fetch(`${API}/api/students/${studentId}`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({initData})
+        });
+        
+        const student = await res.json();
+        
+        // Fill basic fields
+        document.getElementById('st-name').value = student.name || '';
+        document.getElementById('st-nickname').value = student.nickname || '';
+        document.getElementById('st-phone').value = student.phone || '';
+        document.getElementById('st-parent-phone').value = student.parent_phone || '';
+        document.getElementById('st-age').value = student.age || '';
+        document.getElementById('st-notes').value = student.notes || '';
+        
+        // Load coaches for admin
+        await loadCoaches();
+        renderCoachSelect();
+        
+        // Set coach if admin
+        const coachSelect = document.getElementById('st-coach');
+        if (coachSelect && student.coach_id) {
+            coachSelect.value = student.coach_id;
+        }
+        
+        // Init schedules
+        if (student.schedules && student.schedules.length > 0) {
+            initLocationSchedules(student.schedules);
+        } else {
+            // Fallback to legacy data
+            const legacySchedule = {
+                id: null,
+                location_id: student.location_id,
+                days: student.lesson_days ? student.lesson_days.split(',').map(d => parseInt(d.trim())) : [1, 3],
+                times: student.lesson_times ? JSON.parse(student.lesson_times) : {"1": "18:00", "3": "18:00"},
+                duration: 90,
+                is_primary: true
+            };
+            initLocationSchedules([legacySchedule]);
+        }
+        
+        showScreen('student-form');
+    } catch (e) {
+        console.error('Edit student error:', e);
+        showNotification('Ошибка загрузки', 'error');
+    }
+};
+
+// Override saveStudent to include schedules
+saveStudent = async function() {
+    const schedules = collectLocationSchedules().filter(s => s.location_id && s.days);
+    if (schedules.length === 0) {
+        showNotification('Добавьте хотя бы одно расписание с залом и днями', 'error');
+        return;
+    }
+
+    const studentName = document.getElementById('st-name').value.trim();
+    if (!studentName) {
+        showNotification('Введите имя ученика', 'error');
+        return;
+    }
+
+    const studentData = {
+        name: studentName,
+        nickname: document.getElementById('st-nickname').value || null,
+        phone: document.getElementById('st-phone').value || null,
+        parent_phone: document.getElementById('st-parent-phone').value || null,
+        age: document.getElementById('st-age').value ? parseInt(document.getElementById('st-age').value) : null,
+        notes: document.getElementById('st-notes').value || null,
+        schedules: schedules
+    };
+    
+    // Add coach_id for admin
+    const coachSelect = document.getElementById('st-coach');
+    if (coachSelect && coachSelect.style.display !== 'none') {
+        studentData.coach_id = parseInt(coachSelect.value);
+    }
+    
+    try {
+        const url = editingStudentId 
+            ? `${API}/api/students/${editingStudentId}/update`
+            : `${API}/api/students/create`;
+        
+        const res = await fetch(url, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({initData, student: studentData})
+        });
+        
+        const result = await res.json();
+        
+        if (result.success) {
+            showNotification(editingStudentId ? 'Сохранено!' : 'Ученик добавлен!', 'success');
+            DataCache.clear();
+            goBack();
+            if (currentScreen === 'students') {
+                loadStudents();
+            }
+        } else if (result.error === 'coach_not_found') {
+            showNotification('Тренер не найден', 'error');
+        } else {
+            showNotification('Ошибка сохранения', 'error');
+        }
+    } catch (e) {
+        console.error('Save student error:', e);
+        showNotification('Ошибка сети', 'error');
+    }
+};
+
+// Update renderStudentDetail to show multiple locations
+function renderStudentDetailLocations(student) {
+    if (!student.schedules || student.schedules.length === 0) {
+        // Fallback to legacy display
+        return `
+            <div class="detail-locations">
+                <div class="detail-location-item primary">
+                    <div class="detail-location-icon">📍</div>
+                    <div class="detail-location-info">
+                        <div class="detail-location-name">${escapeHtml(student.location || 'Зал Break Wave')}</div>
+                        <div class="detail-location-schedule">${formatDays(student.lesson_days)} ${formatTimes(student.lesson_times)}</div>
+                    </div>
+                </div>
+            </div>
+        `;
+    }
+    
+    return `
+        <div class="detail-locations">
+            ${student.schedules.map(schedule => `
+                <div class="detail-location-item ${schedule.is_primary ? 'primary' : ''}">
+                    <div class="detail-location-icon">📍</div>
+                    <div class="detail-location-info">
+                        <div class="detail-location-name">${escapeHtml(schedule.location_name || 'Зал')}</div>
+                        <div class="detail-location-schedule">${formatDays(schedule.days)} ${formatTimes(schedule.times)}</div>
+                    </div>
+                    ${schedule.is_primary ? '<span class="detail-location-primary-badge">ОСНОВНОЙ</span>' : ''}
+                </div>
+            `).join('')}
+        </div>
+    `;
+}
+
+// Helper functions
+function formatDays(daysStr) {
+    if (!daysStr) return '';
+    const dayNames = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
+    return daysStr.split(',').map(d => dayNames[parseInt(d.trim())]).join(', ');
+}
+
+function formatTimes(timesStr) {
+    if (!timesStr) return '';
+    try {
+        const times = typeof timesStr === 'string' ? JSON.parse(timesStr) : timesStr;
+        const uniqueTimes = [...new Set(Object.values(times))];
+        return uniqueTimes.join(', ');
+    } catch {
+        return '';
+    }
+}
+
+function getStudentRemainingLessons(student) {
+    if (student.is_unlimited) {
+        return Infinity;
+    }
+    if (student.lessons_remaining !== undefined && student.lessons_remaining !== null) {
+        return student.lessons_remaining;
+    }
+    return student.lessons_count || 0;
+}
+
+function getStudentLessonsDisplay(student) {
+    if (student.is_unlimited) {
+        return '♾️ Безлимит';
+    }
+
+    const remaining = getStudentRemainingLessons(student);
+    const total = student.lessons_count || 0;
+    return total > 0 ? `${remaining}/${total}` : `${remaining}`;
+}
+
+function getStudentLessonsMeta(student) {
+    if (student.is_unlimited) {
+        return '♾️ Безлимитный абонемент';
+    }
+
+    const remaining = getStudentRemainingLessons(student);
+    if (remaining <= 0) return 'Нет занятий';
+    if (remaining === 1) return '1 занятие';
+    return `${remaining} занятия`;
+}
+
+window.editStudent = openEditStudent;
+
+
+// === Finance ===
+
+let currentFinancePeriod = 'month';
+
+async function loadFinance() {
+    const container = document.getElementById('finance-content');
+    container.innerHTML = `
+        <div class="loading-container">
+            <div class="spinner"></div>
+            <p>Загрузка...</p>
+        </div>
+    `;
+    
+    try {
+        // Load summary
+        const summaryRes = await fetch(`${API}/api/finance/summary`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({initData, period: currentFinancePeriod})
+        });
+        const summary = await summaryRes.json();
+        
+        // Load debtors
+        const debtorsRes = await fetch(`${API}/api/finance/debtors`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({initData})
+        });
+        const debtors = await debtorsRes.json();
+        
+        renderFinance(summary, debtors);
+    } catch (e) {
+        console.error('Finance load error:', e);
+        document.getElementById('finance-content').innerHTML = `
+            <div class="empty-state">
+                <p>Ошибка загрузки данных</p>
+            </div>
+        `;
+    }
+}
+
+function switchFinancePeriod(period, btn) {
+    currentFinancePeriod = period;
+    
+    // Update tabs
+    btn.parentElement.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    btn.classList.add('active');
+    
+    loadFinance();
+}
+
+function renderFinance(summary, debtors) {
+    const container = document.getElementById('finance-content');
+    
+    // Summary cards
+    const periodLabel = currentFinancePeriod === 'month' ? 'за месяц' : 
+                        currentFinancePeriod === 'year' ? 'за год' : 'всего';
+    
+    // By coach chart
+    let byCoachHtml = '';
+    if (summary.by_coach && summary.by_coach.length > 1) {
+        byCoachHtml = summary.by_coach.map(c => `
+            <div class="finance-row">
+                <span class="label">${escapeHtml(c.coach_name)}</span>
+                <span class="value positive">${c.revenue.toLocaleString()} Br</span>
+            </div>
+        `).join('');
+    }
+    
+    // By location chart
+    let byLocationHtml = '';
+    if (summary.by_location && summary.by_location.length > 0) {
+        byLocationHtml = summary.by_location.map(l => `
+            <div class="finance-row">
+                <span class="label">${escapeHtml(l.location_name)}</span>
+                <span class="value positive">${l.revenue.toLocaleString()} Br</span>
+            </div>
+        `).join('');
+    }
+    
+    // Monthly trend
+    let trendHtml = '';
+    if (summary.monthly_trend) {
+        const maxRevenue = Math.max(...summary.monthly_trend.map(m => m.revenue), 1);
+        trendHtml = summary.monthly_trend.map(m => `
+            <div class="trend-item">
+                <span class="trend-month">${m.month}</span>
+                <div class="trend-bar-wrapper">
+                    <div class="trend-bar" style="height: ${Math.max(10, (m.revenue / maxRevenue) * 100)}px"></div>
+                </div>
+                <span class="trend-count">${m.revenue >= 1000 ? (m.revenue / 1000).toFixed(1) + 'k' : m.revenue}</span>
+            </div>
+        `).join('');
+    }
+    
+    // Debtors sections
+    let debtorsHtml = '';
+    
+    // Expired subscriptions
+    if (debtors.debtors.expired_subscription.length > 0) {
+        debtorsHtml += `
+            <div class="finance-section">
+                <h3>🚨 Просроченные абонементы (${debtors.debtors.expired_subscription.length})</h3>
+                ${debtors.debtors.expired_subscription.map(d => `
+                    <div class="debtor-item critical" onclick="openStudentDetail(${d.id})">
+                        <div class="debtor-info">
+                            <div class="debtor-name">${escapeHtml(d.name)}</div>
+                            <div class="debtor-meta">Просрочено ${d.days_overdue} дн.</div>
+                        </div>
+                        <span class="debtor-badge critical">Просрочен</span>
+                    </div>
+                `).join('')}
+            </div>
+        `;
+    }
+    
+    // Ending soon
+    if (debtors.debtors.ending_soon.length > 0) {
+        debtorsHtml += `
+            <div class="finance-section">
+                <h3>⏰ Заканчивается скоро (${debtors.debtors.ending_soon.length})</h3>
+                ${debtors.debtors.ending_soon.map(d => `
+                    <div class="debtor-item warning" onclick="openStudentDetail(${d.id})">
+                        <div class="debtor-info">
+                            <div class="debtor-name">${escapeHtml(d.name)}</div>
+                            <div class="debtor-meta">Осталось ${d.days_left} дн.</div>
+                        </div>
+                        <span class="debtor-badge warning">${d.days_left} дн.</span>
+                    </div>
+                `).join('')}
+            </div>
+        `;
+    }
+    
+    // No lessons
+    if (debtors.debtors.no_lessons.length > 0) {
+        debtorsHtml += `
+            <div class="finance-section">
+                <h3>❌ Закончились занятия (${debtors.debtors.no_lessons.length})</h3>
+                ${debtors.debtors.no_lessons.map(d => `
+                    <div class="debtor-item critical" onclick="openStudentDetail(${d.id})">
+                        <div class="debtor-info">
+                            <div class="debtor-name">${escapeHtml(d.name)}</div>
+                            <div class="debtor-meta">Нет доступных занятий</div>
+                        </div>
+                        <span class="debtor-badge critical">0 занятий</span>
+                    </div>
+                `).join('')}
+            </div>
+        `;
+    }
+    
+    // Low lessons
+    if (debtors.debtors.low_lessons.length > 0) {
+        debtorsHtml += `
+            <div class="finance-section">
+                <h3>⚠️ Мало занятий (${debtors.debtors.low_lessons.length})</h3>
+                ${debtors.debtors.low_lessons.map(d => `
+                    <div class="debtor-item warning" onclick="openStudentDetail(${d.id})">
+                        <div class="debtor-info">
+                            <div class="debtor-name">${escapeHtml(d.name)}</div>
+                            <div class="debtor-meta">Осталось ${d.remaining} занятия</div>
+                        </div>
+                        <span class="debtor-badge warning">${d.remaining} занятия</span>
+                    </div>
+                `).join('')}
+            </div>
+        `;
+    }
+    
+    container.innerHTML = `
+        <div class="finance-summary-cards">
+            <div class="finance-card revenue">
+                <span class="finance-value">${summary.summary.total_revenue.toLocaleString()} Br</span>
+                <span class="finance-label">Доход ${periodLabel}</span>
+            </div>
+            <div class="finance-card pending">
+                <span class="finance-value">${summary.summary.pending_amount.toLocaleString()} Br</span>
+                <span class="finance-label">Ожидается</span>
+            </div>
+            <div class="finance-card overdue">
+                <span class="finance-value">${summary.summary.overdue_total.toLocaleString()} Br</span>
+                <span class="finance-label">Просрочено</span>
+            </div>
+            <div class="finance-card">
+                <span class="finance-value">${debtors.counts.total}</span>
+                <span class="finance-label">Должников</span>
+            </div>
+        </div>
+        
+        ${byCoachHtml ? `
+            <div class="finance-section">
+                <h3>👥 По тренерам</h3>
+                ${byCoachHtml}
+            </div>
+        ` : ''}
+        
+        ${byLocationHtml ? `
+            <div class="finance-section">
+                <h3>📍 По залам</h3>
+                ${byLocationHtml}
+            </div>
+        ` : ''}
+        
+        <div class="finance-section">
+            <h3>📈 Динамика доходов (6 мес)</h3>
+            <div class="trend-chart">${trendHtml}</div>
+        </div>
+        
+        ${debtorsHtml}
+    `;
+}
+
+// Add finance to navigation
+const originalNavigate = navigate;
+navigate = function(screen) {
+    if (screen === 'finance') {
+        loadFinance();
+    }
+    return originalNavigate(screen);
+};
