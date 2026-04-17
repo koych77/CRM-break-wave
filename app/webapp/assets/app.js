@@ -5,7 +5,7 @@ const tg = window.Telegram?.WebApp;
 
 // Cache busting - force reload if version changed
 const APP_VERSION_KEY = 'crm_bw_version';
-const CURRENT_VERSION = '37'; // Version 37: merge audit fixes after deep backend/frontend alignment
+const CURRENT_VERSION = '38'; // Version 38: instant payment refresh, quick attendance persistence, lighter student loads
 
 // Check version on load
 const savedVersion = localStorage.getItem(APP_VERSION_KEY);
@@ -60,7 +60,9 @@ let calendarData = {};
 let currentCalendarDate = new Date();
 let editingStudentId = null;
 let editingPaymentId = null;
+let currentStudentDetailId = null;
 let selectedDays = new Set([1, 3]); // Default Mon, Wed
+let currentPaymentsFilter = 'all';
 
 // === Init ===
 document.addEventListener('DOMContentLoaded', async () => {
@@ -161,7 +163,6 @@ async function authenticate() {
             is_admin: data.is_admin
         }));
         
-        await loadDashboard();
         showScreen('dashboard');
     } catch (e) {
         console.error('Auth error:', e);
@@ -608,7 +609,9 @@ async function openAddStudent() {
     navigate('student-form');
 }
 
-async function openStudentDetail(id) {
+async function openStudentDetail(id, options = {}) {
+    const { navigateToScreen = true } = options;
+    currentStudentDetailId = id;
     try {
         const res = await fetch(`${API}/api/students/${id}`, {
             method: 'POST',
@@ -808,11 +811,37 @@ async function openStudentDetail(id) {
             </div>
         `;
         
-        navigate('student-detail');
+        if (navigateToScreen) {
+            navigate('student-detail');
+        }
     } catch (e) {
         console.error('Student detail error:', e);
         showNotification('Ошибка загрузки', 'error');
     }
+}
+
+async function refreshVisibleData(studentId = null) {
+    DataCache.clear();
+
+    const refreshTasks = [loadDashboard()];
+
+    if (currentScreen === 'payments') {
+        refreshTasks.push(loadPayments(currentPaymentsFilter));
+    }
+
+    if (currentScreen === 'students') {
+        refreshTasks.push(loadStudents());
+    }
+
+    if (currentScreen === 'quick-lesson') {
+        refreshTasks.push(loadQuickLesson());
+    }
+
+    if (studentId && currentScreen === 'student-detail' && currentStudentDetailId === studentId) {
+        refreshTasks.push(openStudentDetail(studentId, { navigateToScreen: false }));
+    }
+
+    await Promise.all(refreshTasks);
 }
 
 async function editStudent(id) {
@@ -1260,11 +1289,13 @@ async function saveLessonAttendanceFromCalendar(day, lessonIndex, status) {
 
 // === Payments ===
 
-async function loadPayments(status = 'all') {
+async function loadPayments(status = currentPaymentsFilter) {
+    currentPaymentsFilter = status || 'all';
+
     try {
         const body = {initData};
-        if (status !== 'all') {
-            body.status = status;
+        if (currentPaymentsFilter !== 'all') {
+            body.status = currentPaymentsFilter;
         }
         
         const res = await fetch(`${API}/api/payments`, {
@@ -1330,6 +1361,7 @@ function renderPayments(list) {
 function switchPaymentTab(status, btn) {
     document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
     btn.classList.add('active');
+    currentPaymentsFilter = status;
     loadPayments(status);
 }
 
@@ -1426,8 +1458,7 @@ async function deletePayment(paymentId) {
         
         if (result.success) {
             showNotification('Платёж удалён', 'success');
-            DataCache.clear();
-            loadPayments();
+            await refreshVisibleData(result.student_id || null);
         } else {
             showNotification('Ошибка удаления', 'error');
         }
@@ -1504,9 +1535,10 @@ async function savePayment() {
         
         if (result.success) {
             showNotification(editingPaymentId ? 'Оплата обновлена' : 'Оплата добавлена', 'success');
-            DataCache.clear();
+            const affectedStudentId = result.student_id || data.student_id;
+            editingPaymentId = null;
             goBack();
-            loadPayments();
+            await refreshVisibleData(affectedStudentId);
         } else {
             showNotification('Ошибка сохранения', 'error');
         }
@@ -1530,10 +1562,7 @@ async function markPaymentPaid(id) {
         
         if (result.success) {
             showNotification('Оплачено!', 'success');
-            // Clear cache to force refresh
-            DataCache.clear();
-            loadPayments();
-            loadDashboard();
+            await refreshVisibleData(result.student_id || null);
         }
     } catch (e) {
         console.error('Mark paid error:', e);
@@ -1548,6 +1577,28 @@ async function openQuickLesson() {
 
 // Quick attendance data
 let quickAttendanceData = {};
+
+function buildQuickAttendanceKey(studentId, scheduleTime, locationId) {
+    const normalizedTime = (scheduleTime || '00:00').replace(':', '-');
+    return `${studentId}__${normalizedTime}__${locationId || 0}`;
+}
+
+function getQuickStatusIcon(status) {
+    if (status === 'present') return '✅';
+    if (status === 'absent') return '❌';
+    if (status === 'sick') return '🤒';
+    return '⏳';
+}
+
+function applyQuickStatusUI(item, statusEl, status) {
+    if (!item || !statusEl) return;
+
+    item.classList.remove('selected-present', 'selected-absent', 'selected-sick');
+    if (status) {
+        item.classList.add(`selected-${status}`);
+    }
+    statusEl.textContent = getQuickStatusIcon(status);
+}
 
 async function loadQuickLesson() {
     const dateInput = document.getElementById('ql-date');
@@ -1578,14 +1629,34 @@ async function loadQuickLesson() {
     const locationId = locationSelect.value;
     
     try {
-        // Get students with their schedules for this date
-        const res = await fetch(`${API}/api/students`, {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({initData, view_mode: 'my'})
-        });
+        const [studentsRes, dayStatusRes] = await Promise.all([
+            fetch(`${API}/api/students`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({initData, view_mode: 'my'})
+            }),
+            fetch(`${API}/api/attendance/day-status`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({initData, date, location_id: locationId || null})
+            })
+        ]);
         
-        const studentsList = await res.json();
+        const studentsList = await studentsRes.json();
+        const dayStatus = await dayStatusRes.json();
+        const savedStatusMap = new Map();
+
+        (dayStatus.attendance || []).forEach(entry => {
+            const entryKey = buildQuickAttendanceKey(entry.student_id, entry.time, entry.location_id);
+            savedStatusMap.set(entryKey, entry.status || null);
+
+            if (!entry.location_id) {
+                savedStatusMap.set(
+                    buildQuickAttendanceKey(entry.student_id, entry.time, 0),
+                    entry.status || null
+                );
+            }
+        });
         
         // Convert JS day (0=Sun, 1=Mon) to Python weekday (0=Mon, 6=Sun)
         const jsDay = new Date(date).getDay();
@@ -1618,6 +1689,7 @@ async function loadQuickLesson() {
                                     ...s,
                                     schedule_time: time,
                                     schedule_location: sch.location_name || 'Зал',
+                                    quick_key: buildQuickAttendanceKey(s.id, time, sch.location_id),
                                     schedule_location_id: sch.location_id
                                 });
                             }
@@ -1643,9 +1715,15 @@ async function loadQuickLesson() {
         // Initialize attendance data
         quickAttendanceData = {};
         studentsWithSchedules.forEach(s => {
-            quickAttendanceData[s.id] = {
+            const savedStatus =
+                savedStatusMap.get(s.quick_key) ??
+                savedStatusMap.get(buildQuickAttendanceKey(s.id, s.schedule_time, 0)) ??
+                null;
+
+            quickAttendanceData[s.quick_key] = {
+                key: s.quick_key,
                 student_id: s.id,
-                status: null,
+                status: savedStatus,
                 student: s
             };
         });
@@ -1695,10 +1773,13 @@ function renderQuickLessonListGrouped(byTime, sortedTimes) {
                         if (!s.is_unlimited && remaining <= 0) dotClass = 'none';
                         else if (!s.is_unlimited && remaining <= 2) dotClass = 'low';
                         
+                        const currentStatus = quickAttendanceData[s.quick_key]?.status || null;
+                        const selectedClass = currentStatus ? `selected-${currentStatus}` : '';
+                        
                         const locationName = s.schedule_location || s.location || 'Зал';
                         
                         return `
-                            <div class="quick-student-item" data-student-id="${s.id}" onclick="toggleQuickStatus(${s.id})">
+                            <div class="quick-student-item ${selectedClass}" data-attendance-key="${s.quick_key}" onclick="toggleQuickStatus('${s.quick_key}')">
                                 <div class="quick-student-avatar">${s.name.charAt(0)}</div>
                                 <div class="quick-student-info">
                                     <div class="quick-student-name">
@@ -1709,7 +1790,7 @@ function renderQuickLessonListGrouped(byTime, sortedTimes) {
                                         ${getStudentLessonsMeta(s)} • 📍 ${escapeHtml(locationName)}
                                     </div>
                                 </div>
-                                <div class="quick-student-status" id="status-${s.id}">⏳</div>
+                                <div class="quick-student-status" id="status-${s.quick_key}">${getQuickStatusIcon(currentStatus)}</div>
                             </div>
                         `;
                     }).join('')}
@@ -1760,10 +1841,21 @@ function renderQuickLessonList(students) {
     document.getElementById('ql-title').textContent = `✅ Отметка (${students.length})`;
 }
 
-function toggleQuickStatus(studentId) {
-    const data = quickAttendanceData[studentId];
-    const item = document.querySelector(`[data-student-id="${studentId}"]`);
-    const statusEl = document.getElementById(`status-${studentId}`);
+function toggleQuickStatus(attendanceKey) {
+    let resolvedKey = attendanceKey;
+    let data = quickAttendanceData[resolvedKey];
+    if (!data) {
+        const fallbackEntry = Object.entries(quickAttendanceData).find(([, value]) => value.student_id == attendanceKey);
+        if (fallbackEntry) {
+            [resolvedKey, data] = fallbackEntry;
+        }
+    }
+    if (!data) {
+        return;
+    }
+
+    const item = document.querySelector(`[data-attendance-key="${resolvedKey}"]`);
+    const statusEl = document.getElementById(`status-${resolvedKey}`);
     
     // Cycle: null -> present -> absent -> sick -> null
     const cycle = [null, 'present', 'absent', 'sick'];
@@ -1771,38 +1863,16 @@ function toggleQuickStatus(studentId) {
     const nextStatus = cycle[(currentIndex + 1) % cycle.length];
     
     data.status = nextStatus;
-    
-    // Update UI
-    item.classList.remove('selected-present', 'selected-absent', 'selected-sick');
-    
-    if (nextStatus === 'present') {
-        item.classList.add('selected-present');
-        statusEl.textContent = '✅';
-    } else if (nextStatus === 'absent') {
-        item.classList.add('selected-absent');
-        statusEl.textContent = '❌';
-    } else if (nextStatus === 'sick') {
-        item.classList.add('selected-sick');
-        statusEl.textContent = '🤒';
-    } else {
-        statusEl.textContent = '⏳';
-    }
-    
+    applyQuickStatusUI(item, statusEl, nextStatus);
     updateQuickStats();
 }
 
 function selectAllQuick(status) {
-    Object.keys(quickAttendanceData).forEach(id => {
-        quickAttendanceData[id].status = status;
-        const item = document.querySelector(`[data-student-id="${id}"]`);
-        const statusEl = document.getElementById(`status-${id}`);
-        
-        item.classList.remove('selected-present', 'selected-absent', 'selected-sick');
-        item.classList.add(`selected-${status}`);
-        
-        if (status === 'present') statusEl.textContent = '✅';
-        else if (status === 'absent') statusEl.textContent = '❌';
-        else if (status === 'sick') statusEl.textContent = '🤒';
+    Object.keys(quickAttendanceData).forEach(key => {
+        quickAttendanceData[key].status = status;
+        const item = document.querySelector(`[data-attendance-key="${key}"]`);
+        const statusEl = document.getElementById(`status-${key}`);
+        applyQuickStatusUI(item, statusEl, status);
     });
     
     updateQuickStats();
@@ -1868,9 +1938,8 @@ async function saveQuickAttendance() {
                 }, 1000);
             }
             
-            DataCache.clear();
             goBack();
-            loadDashboard();
+            await refreshVisibleData();
         } else {
             showNotification('Ошибка сохранения', 'error');
         }
@@ -3290,3 +3359,6 @@ navigate = function(screen) {
     }
     return originalNavigate(screen);
 };
+
+
+

@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import json
+import os
 from aiogram import Bot, Dispatcher, Router, types, F
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (
@@ -68,6 +69,72 @@ DAILY_SUMMARY_MINUTE = 0
 def build_lesson_reminder_log_key(reminder_date: date, time_str: str) -> str:
     """Stable key for deduplicating reminder notifications in the DB."""
     return f"[lesson_reminder:{reminder_date.isoformat()}:{time_str}]"
+
+
+def get_runtime_version_label() -> str | None:
+    """Build a stable version label for deploy/update notifications."""
+    commit_sha = os.getenv("RAILWAY_GIT_COMMIT_SHA") or os.getenv("RENDER_GIT_COMMIT")
+    if commit_sha:
+        return commit_sha[:7]
+
+    deployment_id = os.getenv("RAILWAY_DEPLOYMENT_ID") or os.getenv("APP_VERSION")
+    if deployment_id:
+        return deployment_id[:12]
+
+    return None
+
+
+async def notify_version_update() -> None:
+    """Notify active coaches once per deployed version that the bot was updated."""
+    if not bot:
+        return
+
+    version_label = get_runtime_version_label()
+    if not version_label:
+        logger.info("Skip version update notification: runtime version label not available")
+        return
+
+    sent_at = datetime.now(BELARUS_TZ)
+    log_key = f"[version_update:{version_label}]"
+    message_text = (
+        "🔄 CRM Break Wave обновлена\n"
+        f"Версия: {version_label}\n"
+        f"Время: {sent_at.strftime('%d.%m.%Y %H:%M')}\n"
+        "Бот и mini app запущены."
+    )
+
+    async with async_session() as s:
+        result = await s.execute(
+            select(Coach).where(Coach.is_active == True)
+        )
+        coaches = result.scalars().all()
+        if not coaches:
+            logger.info("Skip version update notification: no active coaches")
+            return
+
+        for coach in coaches:
+            existing_notification = await s.execute(
+                select(Notification).where(
+                    Notification.coach_id == coach.id,
+                    Notification.type == "version_update",
+                    Notification.message.like(f"{log_key}%")
+                )
+            )
+            if existing_notification.scalar_one_or_none():
+                continue
+
+            try:
+                await bot.send_message(coach.telegram_id, message_text)
+                s.add(Notification(
+                    coach_id=coach.id,
+                    student_id=None,
+                    type="version_update",
+                    message=f"{log_key} {message_text}"
+                ))
+            except Exception as exc:
+                logger.warning(f"Failed to send version update notification to coach {coach.id}: {exc}")
+
+        await s.commit()
 
 
 def create_bot() -> Bot:

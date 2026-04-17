@@ -147,6 +147,17 @@ def normalize_lesson_times_payload(lesson_times, lesson_days: str, fallback_time
     return json.dumps(normalized)
 
 
+def normalize_bool(value) -> bool:
+    """Normalize booleans coming from JSON or string form payloads."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return False
+
+
 def normalize_schedule_days_payload(days, fallback_days: str = "1,3") -> str:
     """Normalize schedule day payloads to comma-separated weekday values."""
     if isinstance(days, list):
@@ -524,6 +535,8 @@ async def api_students(request: Request):
     view_mode = body.get("view_mode", "all")  # "all" or "my"
     coach_filter = body.get("coach_id")  # Filter by specific coach
     
+    refresh_subscriptions = normalize_bool(body.get("refresh_subscriptions", False))
+
     async with async_session() as s:
         # Build query with eager loading for schedules
         query = select(Student, Coach).join(Coach).options(
@@ -541,22 +554,22 @@ async def api_students(request: Request):
         query = query.where(Student.is_active == True).order_by(Student.name)
         result = await s.execute(query)
         rows = result.all()
-        
-        # Recalculate subscriptions for all students to ensure consistency
-        for st, _ in rows:
-            await recalculate_student_subscription(st.id, s)
-        await s.commit()
-        
-        # Clear identity map and reload all students fresh from DB
-        s.expunge_all()
-        student_ids = [st.id for st, _ in rows]
-        if student_ids:
-            result = await s.execute(
-                select(Student, Coach).join(Coach).options(
-                    selectinload(Student.schedules).selectinload(StudentSchedule.location)
-                ).where(Student.id.in_(student_ids)).order_by(Student.name)
-            )
-            rows = result.all()
+
+        # Full recalculation is expensive on every list open, so do it only explicitly.
+        if refresh_subscriptions:
+            for st, _ in rows:
+                await recalculate_student_subscription(st.id, s)
+            await s.commit()
+
+            s.expunge_all()
+            student_ids = [st.id for st, _ in rows]
+            if student_ids:
+                result = await s.execute(
+                    select(Student, Coach).join(Coach).options(
+                        selectinload(Student.schedules).selectinload(StudentSchedule.location)
+                    ).where(Student.id.in_(student_ids)).order_by(Student.name)
+                )
+                rows = result.all()
         
         # Format response with schedules
         result_list = []
@@ -737,9 +750,6 @@ async def api_get_student(student_id: int, request: Request):
                 "date": lesson.date.isoformat(),
                 "status": att.status,
             })
-        
-        # Recalculate subscription to ensure consistency before returning
-        await recalculate_student_subscription(student_id, s)
         
         # Get payments
         payments_result = await s.execute(
@@ -1401,7 +1411,7 @@ async def api_create_payment(request: Request):
         if not student:
             return JSONResponse({"error": "student_not_found"}, 404)
 
-        is_unlimited = bool(data.get("is_unlimited", False))
+        is_unlimited = normalize_bool(data.get("is_unlimited", False))
         lessons_count = int(data.get("lessons_count", 0)) if not is_unlimited else 0
         
         payment = Payment(
@@ -1420,13 +1430,11 @@ async def api_create_payment(request: Request):
             payment.paid_at = datetime.utcnow()
         
         s.add(payment)
-        await s.commit()
-        
-        # Recalculate student subscription based on all paid payments
+        await s.flush()
         await recalculate_student_subscription(payment.student_id, s)
         await s.commit()
         
-        return {"success": True, "id": payment.id}
+        return {"success": True, "id": payment.id, "student_id": payment.student_id}
 
 
 @app.post("/api/payments/{payment_id}/mark-paid")
@@ -1452,7 +1460,7 @@ async def api_mark_payment_paid(payment_id: int, request: Request):
         await recalculate_student_subscription(payment.student_id, s)
         
         await s.commit()
-        return {"success": True}
+        return {"success": True, "student_id": payment.student_id}
 
 
 @app.post("/api/payments/{payment_id}/update")
@@ -1474,11 +1482,15 @@ async def api_update_payment(payment_id: int, request: Request):
             return JSONResponse({"error": "not_found"}, 404)
         
         logger.info(f"api_update_payment id={payment_id} received data: {data}")
+        student_id = payment.student_id
         
         if "amount" in data:
             payment.amount = int(data["amount"])
+        incoming_is_unlimited = payment.is_unlimited
+        if "is_unlimited" in data:
+            incoming_is_unlimited = normalize_bool(data["is_unlimited"])
         if "lessons_count" in data:
-            payment.lessons_count = int(data["lessons_count"])
+            payment.lessons_count = int(data["lessons_count"] or 0)
         if "status" in data:
             old_status = payment.status
             payment.status = data["status"]
@@ -1490,25 +1502,24 @@ async def api_update_payment(payment_id: int, request: Request):
             payment.period_start = date.fromisoformat(data["period_start"]) if data["period_start"] else None
         if "period_end" in data:
             payment.period_end = date.fromisoformat(data["period_end"]) if data["period_end"] else None
-        if "is_unlimited" in data:
-            payment.is_unlimited = bool(data["is_unlimited"])
-            if payment.is_unlimited:
-                payment.lessons_count = 0
+        payment.is_unlimited = incoming_is_unlimited
+        if payment.is_unlimited:
+            payment.lessons_count = 0
         if "notes" in data:
             payment.notes = data["notes"] or None
         
+        await s.flush()
+        await s.refresh(payment)
+        logger.info(
+            f"api_update_payment id={payment_id} after flush: "
+            f"is_unlimited={payment.is_unlimited}, lessons_count={payment.lessons_count}"
+        )
+
+        # Recalculate student subscription against the just-updated payment state.
+        await recalculate_student_subscription(student_id, s)
         await s.commit()
         
-        logger.info(f"api_update_payment id={payment_id} after commit: is_unlimited={payment.is_unlimited}, lessons_count={payment.lessons_count}")
-        
-        # Clear SQLAlchemy identity map to force fresh DB read
-        s.expunge_all()
-        
-        # Recalculate student subscription
-        await recalculate_student_subscription(payment.student_id, s)
-        await s.commit()
-        
-        return {"success": True}
+        return {"success": True, "student_id": student_id}
 
 
 @app.post("/api/payments/{payment_id}/delete")
@@ -1529,13 +1540,11 @@ async def api_delete_payment(payment_id: int, request: Request):
         
         student_id = payment.student_id
         await s.delete(payment)
-        await s.commit()
-        
-        # Recalculate student subscription
+        await s.flush()
         await recalculate_student_subscription(student_id, s)
         await s.commit()
         
-        return {"success": True}
+        return {"success": True, "student_id": student_id}
 
 
 # === Current Lesson & Quick Attendance ===
@@ -1766,6 +1775,56 @@ async def api_bulk_attendance(request: Request):
             "success": True, 
             "marked": marked_count,
             "low_lessons_alert": students_with_low_lessons if students_with_low_lessons else None
+        }
+
+
+@app.post("/api/attendance/day-status")
+async def api_attendance_day_status(request: Request):
+    """Get saved attendance statuses for one day so quick lesson can restore them."""
+    body = await request.json()
+    coach = await get_current_coach(body.get("initData", ""))
+    if not coach:
+        return JSONResponse({"error": "unauthorized"}, 403)
+
+    target_date_raw = body.get("date")
+    if not target_date_raw:
+        return JSONResponse({"error": "date_required"}, 400)
+
+    try:
+        target_date = date.fromisoformat(target_date_raw)
+    except ValueError:
+        return JSONResponse({"error": "invalid_date"}, 400)
+
+    location_id = body.get("location_id")
+    location_id = int(location_id) if location_id not in (None, "", "null") else None
+
+    async with async_session() as s:
+        query = select(Lesson, Attendance).join(
+            Attendance,
+            Lesson.id == Attendance.lesson_id,
+            isouter=True
+        ).where(
+            Lesson.coach_id == coach.id,
+            Lesson.date == target_date
+        )
+        if location_id is not None:
+            query = query.where(Lesson.location_id == location_id)
+
+        result = await s.execute(query)
+        attendance_items = []
+        for lesson, att in result.all():
+            attendance_items.append({
+                "lesson_id": lesson.id,
+                "student_id": lesson.student_id,
+                "time": lesson.time or (att.attendance_time if att else None),
+                "location_id": lesson.location_id or (att.location_id if att else None),
+                "status": att.status if att else None,
+                "is_marked": bool(att and att.status),
+            })
+
+        return {
+            "date": target_date.isoformat(),
+            "attendance": attendance_items,
         }
 
 
