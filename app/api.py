@@ -1288,15 +1288,15 @@ async def api_update_attendance(lesson_id: int, request: Request):
 # === Payments ===
 
 async def recalculate_student_subscription(student_id: int, session):
-    """Recalculate student's subscription based on all paid payments using raw UPDATE."""
+    """Recalculate student's subscription from the latest paid subscription window."""
     from sqlalchemy import func
     
-    # Get all paid payments for this student (newest first by created_at, then by id)
+    # Use the latest paid payment as the active subscription.
     payments_result = await session.execute(
         select(Payment).where(
             Payment.student_id == student_id,
             Payment.status == "paid"
-        ).order_by(desc(Payment.created_at), desc(Payment.id))
+        ).order_by(desc(Payment.paid_at), desc(Payment.created_at), desc(Payment.id))
     )
     paid_payments = payments_result.scalars().all()
     
@@ -1318,14 +1318,24 @@ async def recalculate_student_subscription(student_id: int, session):
             )
             logger.info(f"Student {student_id} set to UNLIMITED")
         else:
-            used_result = await session.execute(
-                select(func.count(Attendance.id)).where(
-                    Attendance.student_id == student_id,
-                    Attendance.status == "present"
-                )
+            effective_start = (
+                last_payment.period_start
+                or (last_payment.paid_at.date() if last_payment.paid_at else None)
+                or last_payment.created_at.date()
             )
+            effective_end = last_payment.period_end
+
+            used_query = select(func.count(Attendance.id)).where(
+                Attendance.student_id == student_id,
+                Attendance.status == "present",
+                Attendance.attendance_date >= effective_start
+            )
+            if effective_end:
+                used_query = used_query.where(Attendance.attendance_date <= effective_end)
+
+            used_result = await session.execute(used_query)
             used_lessons = used_result.scalar() or 0
-            total_lessons = sum(p.lessons_count or 0 for p in paid_payments)
+            total_lessons = last_payment.lessons_count or 0
             remaining_lessons = max(0, total_lessons - used_lessons)
             await session.execute(
                 update(Student).where(Student.id == student_id).values(
@@ -1336,7 +1346,10 @@ async def recalculate_student_subscription(student_id: int, session):
                     subscription_end=last_payment.period_end
                 )
             )
-            logger.info(f"Student {student_id} set to regular: {remaining_lessons} remaining")
+            logger.info(
+                f"Student {student_id} set to regular: {remaining_lessons} remaining "
+                f"(used={used_lessons}, start={effective_start}, end={effective_end})"
+            )
     else:
         await session.execute(
             update(Student).where(Student.id == student_id).values(
