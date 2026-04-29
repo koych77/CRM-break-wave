@@ -262,7 +262,15 @@ async def run_migrations():
         except:
             logger.info("Migrating: Adding attendance_time to attendance")
             await conn.execute(text("ALTER TABLE attendance ADD COLUMN attendance_time VARCHAR(10)"))
-        
+
+        # 5e. Check and add is_extra to attendance
+        try:
+            await conn.execute(text("SELECT is_extra FROM attendance LIMIT 1"))
+        except:
+            logger.info("Migrating: Adding is_extra to attendance")
+            await conn.execute(text("ALTER TABLE attendance ADD COLUMN is_extra BOOLEAN DEFAULT 0"))
+            await conn.execute(text("UPDATE attendance SET is_extra = 0 WHERE is_extra IS NULL"))
+
         # 6. Check and add lesson_duration to students
         try:
             await conn.execute(text("SELECT lesson_duration FROM students LIMIT 1"))
