@@ -684,6 +684,38 @@ async function openStudentDetail(id, options = {}) {
             `;
         }
         
+        const attendanceStats = student.attendance_summary || null;
+        if (attendanceStats) {
+            attendanceSummary = `
+                <div class="attendance-summary">
+                    <div class="attendance-stat">
+                        <span class="stat-number success">${attendanceStats.scheduled_present || 0}</span>
+                        <span class="stat-label">Посещено</span>
+                    </div>
+                    <div class="attendance-stat">
+                        <span class="stat-number">${attendanceStats.scheduled_sick || 0}</span>
+                        <span class="stat-label">Болел</span>
+                    </div>
+                    <div class="attendance-stat">
+                        <span class="stat-number">${attendanceStats.scheduled_absent || 0}</span>
+                        <span class="stat-label">Пропустил</span>
+                    </div>
+                    <div class="attendance-stat">
+                        <span class="stat-number success">${attendanceStats.extra_present || 0}</span>
+                        <span class="stat-label">Отработал</span>
+                    </div>
+                    <div class="attendance-stat">
+                        <span class="stat-number ${attendanceStats.makeup_needed > 0 ? 'text-warning' : 'success'}">${attendanceStats.makeup_needed || 0}</span>
+                        <span class="stat-label">Отработать</span>
+                    </div>
+                    <div class="attendance-stat">
+                        <span class="stat-number">${attendanceStats.attendance_rate || 0}%</span>
+                        <span class="stat-label">Посещаемость</span>
+                    </div>
+                </div>
+            `;
+        }
+
         const content = document.getElementById('student-detail-content');
         content.innerHTML = `
             <div class="student-header">
@@ -2009,7 +2041,166 @@ if (quickLessonContent) {
 
 // === Extra Attendance & Attendance History ===
 
+async function openExtraAttendanceModal(studentId = null) {
+    const now = new Date();
+    const quickDateInput = document.getElementById('ql-date');
+    const quickLocationSelect = document.getElementById('ql-location');
+    const defaultDate = currentScreen === 'quick-lesson' && quickDateInput?.value
+        ? quickDateInput.value
+        : now.toISOString().split('T')[0];
+    const defaultTime = now.toTimeString().slice(0, 5);
+    const defaultLocationId = currentScreen === 'quick-lesson' && quickLocationSelect?.value
+        ? quickLocationSelect.value
+        : '';
+
+    const [studentsRes, locationsRes] = await Promise.all([
+        fetch(`${API}/api/students`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({initData, view_mode: 'my'})
+        }),
+        fetch(`${API}/api/locations`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({initData})
+        })
+    ]);
+
+    const studentsList = await studentsRes.json();
+    const locationsList = await locationsRes.json();
+    const selectedStudent = studentId ? studentsList.find(s => s.id === studentId) : null;
+
+    const studentFieldHtml = studentId && selectedStudent
+        ? `
+            <div class="form-group">
+                <label>Ученик</label>
+                <div style="padding: 12px; border-radius: 10px; background: var(--bg-secondary); font-weight: 600;">
+                    ${escapeHtml(selectedStudent.name)}
+                </div>
+                <input type="hidden" id="extra-student-id" value="${studentId}">
+            </div>
+        `
+        : `
+            <div class="form-group">
+                <label>Ученик</label>
+                <select id="extra-student-id">
+                    <option value="">Выберите ученика</option>
+                    ${studentsList.map(s => `<option value="${s.id}">${escapeHtml(s.name)}</option>`).join('')}
+                </select>
+            </div>
+        `;
+
+    const modal = document.createElement('div');
+    modal.className = 'modal';
+    modal.innerHTML = `
+        <div class="modal-content">
+            <h3>⭐ Внеплановое занятие</h3>
+            <p style="margin-bottom: 16px; color: var(--text-secondary);">
+                Отметьте отработку или дополнительное занятие в любой день. При необходимости урок сразу спишется из абонемента.
+            </p>
+            ${studentFieldHtml}
+            <div class="form-group">
+                <label>Дата</label>
+                <input type="date" id="extra-date" value="${defaultDate}">
+            </div>
+            <div class="form-group">
+                <label>Время</label>
+                <input type="time" id="extra-time" value="${defaultTime}">
+            </div>
+            <div class="form-group">
+                <label>Зал</label>
+                <select id="extra-location-id">
+                    <option value="">Без зала</option>
+                    ${locationsList.map(loc => `<option value="${loc.id}" ${String(loc.id) === String(defaultLocationId) ? 'selected' : ''}>${escapeHtml(loc.name)}</option>`).join('')}
+                </select>
+            </div>
+            <div class="form-group">
+                <label>Статус</label>
+                <select id="extra-status">
+                    <option value="present">✅ Присутствовал</option>
+                    <option value="absent">❌ Отсутствовал</option>
+                    <option value="sick">🤒 Болел</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>Заметки</label>
+                <input type="text" id="extra-notes" placeholder="Например: отработка за пропуск 21.04">
+            </div>
+            <div class="form-group">
+                <label>
+                    <input type="checkbox" id="extra-deduct" checked>
+                    Списать занятие с абонемента
+                </label>
+            </div>
+            <div class="modal-actions">
+                <button class="btn-secondary" onclick="this.closest('.modal').remove()">Отмена</button>
+                <button class="btn-primary" onclick="saveExtraAttendance()">Сохранить</button>
+            </div>
+        </div>
+    `;
+
+    document.body.appendChild(modal);
+}
+
+async function submitExtraAttendance() {
+    const studentId = parseInt(document.getElementById('extra-student-id')?.value, 10);
+    const date = document.getElementById('extra-date').value;
+    const time = document.getElementById('extra-time').value;
+    const locationId = document.getElementById('extra-location-id')?.value || null;
+    const status = document.getElementById('extra-status').value;
+    const notes = document.getElementById('extra-notes').value;
+    const deduct = document.getElementById('extra-deduct').checked;
+
+    if (!studentId) {
+        showNotification('Выберите ученика', 'error');
+        return;
+    }
+
+    const res = await fetch(`${API}/api/extra-attendance`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+            initData,
+            student_id: studentId,
+            date,
+            time,
+            location_id: locationId,
+            status,
+            notes,
+            deduct_lesson: deduct
+        })
+    });
+
+    const result = await res.json();
+
+    if (result.success) {
+        showNotification(result.message, 'success');
+        document.querySelector('.modal')?.remove();
+        await refreshVisibleData(result.student_id || studentId);
+        return;
+    }
+
+    if (result.error === 'already_marked') {
+        showNotification('На это время посещаемость уже отмечена', 'warning');
+        return;
+    }
+
+    if (result.error === 'no_lessons_remaining') {
+        showNotification('У ученика не осталось занятий в абонементе', 'error');
+        return;
+    }
+
+    showNotification('Ошибка сохранения', 'error');
+}
+
 async function markExtraAttendance(studentId) {
+    try {
+        return await openExtraAttendanceModal(studentId);
+    } catch (e) {
+        console.error('Open extra attendance modal error:', e);
+        showNotification('Ошибка загрузки формы', 'error');
+        return;
+    }
     // Show confirmation dialog with options
     const now = new Date();
     const today = now.toISOString().split('T')[0];
@@ -2065,6 +2256,13 @@ async function markExtraAttendance(studentId) {
 }
 
 async function saveExtraAttendance(studentId) {
+    try {
+        return await submitExtraAttendance();
+    } catch (e) {
+        console.error('Extra attendance error:', e);
+        showNotification('Ошибка сохранения', 'error');
+        return;
+    }
     const date = document.getElementById('extra-date').value;
     const time = document.getElementById('extra-time').value;
     const status = document.getElementById('extra-status').value;

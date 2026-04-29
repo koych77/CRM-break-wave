@@ -738,18 +738,31 @@ async def api_get_student(student_id: int, request: Request):
         if not st:
             return JSONResponse({"error": "not_found"}, 404)
         
-        # Get recent attendance
         attendance_result = await s.execute(
-            select(Attendance, Lesson).join(Lesson).where(
+            select(Attendance).where(
                 Attendance.student_id == student_id
-            ).order_by(desc(Lesson.date)).limit(10)
+            ).order_by(desc(Attendance.attendance_date), desc(Attendance.created_at))
         )
+        attendance_records = attendance_result.scalars().all()
         attendance = []
-        for att, lesson in attendance_result.all():
+        for att in attendance_records[:10]:
             attendance.append({
-                "date": lesson.date.isoformat(),
+                "date": att.attendance_date.isoformat(),
                 "status": att.status,
+                "is_extra": att.is_extra,
+                "time": att.attendance_time,
             })
+
+        counted_records = [att for att in attendance_records if att.status != "excused"]
+        scheduled_present = sum(1 for att in counted_records if not att.is_extra and att.status == "present")
+        scheduled_absent = sum(1 for att in counted_records if not att.is_extra and att.status == "absent")
+        scheduled_sick = sum(1 for att in counted_records if not att.is_extra and att.status == "sick")
+        extra_present = sum(1 for att in counted_records if att.is_extra and att.status == "present")
+        missed_total = scheduled_absent + scheduled_sick
+        makeup_needed = max(0, missed_total - extra_present)
+        attendance_rate = round(
+            scheduled_present / (scheduled_present + missed_total) * 100
+        ) if (scheduled_present + missed_total) else 0
         
         # Get payments
         payments_result = await s.execute(
@@ -845,6 +858,14 @@ async def api_get_student(student_id: int, request: Request):
             "notes": st.notes,
             "is_active": st.is_active,
             "attendance": attendance,
+            "attendance_summary": {
+                "scheduled_present": scheduled_present,
+                "scheduled_absent": scheduled_absent,
+                "scheduled_sick": scheduled_sick,
+                "extra_present": extra_present,
+                "makeup_needed": makeup_needed,
+                "attendance_rate": attendance_rate,
+            },
             "payments": payments,
         }
 
@@ -2021,6 +2042,8 @@ async def api_extra_attendance(request: Request):
     status = body.get("status", "present")
     notes = body.get("notes", "")
     deduct_lesson = body.get("deduct_lesson", True)  # Whether to deduct from subscription
+    location_id = body.get("location_id")
+    location_id = int(location_id) if location_id not in (None, "", "null") else None
     
     async with async_session() as s:
         # Verify student belongs to coach
@@ -2055,7 +2078,7 @@ async def api_extra_attendance(request: Request):
         att = Attendance(
             lesson_id=None,  # No scheduled lesson
             student_id=student_id,
-            location_id=student.location_id,
+            location_id=location_id if location_id is not None else student.location_id,
             status=status,
             is_extra=True,
             attendance_date=date.fromisoformat(attendance_date),
@@ -2072,6 +2095,7 @@ async def api_extra_attendance(request: Request):
         
         return {
             "success": True,
+            "student_id": student.id,
             "lessons_remaining": student.lessons_remaining,
             "message": f"Отмечено: {student.name}. Осталось занятий: {student.lessons_remaining}"
         }
@@ -2129,6 +2153,10 @@ async def api_student_attendance_history(student_id: int, request: Request):
         total_lessons = len([a for a in counted_attendance if not a["is_extra"]])
         extra_lessons = len([a for a in attendance if a["is_extra"]])
         present_count = len([a for a in counted_attendance if a["status"] == "present"])
+        absent_count = len([a for a in counted_attendance if not a["is_extra"] and a["status"] == "absent"])
+        sick_count = len([a for a in counted_attendance if not a["is_extra"] and a["status"] == "sick"])
+        extra_present = len([a for a in attendance if a["is_extra"] and a["status"] == "present"])
+        makeup_needed = max(0, absent_count + sick_count - extra_present)
         
         return {
             "student": {
@@ -2142,7 +2170,11 @@ async def api_student_attendance_history(student_id: int, request: Request):
                 "total_scheduled": total_lessons,
                 "extra_lessons": extra_lessons,
                 "total_present": present_count,
-                "attendance_rate": round(present_count / len(counted_attendance) * 100) if counted_attendance else 0
+                "attendance_rate": round(present_count / len(counted_attendance) * 100) if counted_attendance else 0,
+                "absent_count": absent_count,
+                "sick_count": sick_count,
+                "extra_present": extra_present,
+                "makeup_needed": makeup_needed,
             }
         }
 
