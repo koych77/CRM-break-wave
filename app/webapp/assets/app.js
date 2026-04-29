@@ -686,31 +686,61 @@ async function openStudentDetail(id, options = {}) {
         
         const attendanceStats = student.attendance_summary || null;
         if (attendanceStats) {
+            const attendanceCards = [
+                {
+                    label: 'Посетил',
+                    value: attendanceStats.scheduled_present || 0,
+                    hint: 'Регулярные занятия',
+                    numberClass: 'success'
+                },
+                {
+                    label: 'Болел',
+                    value: attendanceStats.scheduled_sick || 0,
+                    hint: 'По болезни',
+                    numberClass: ''
+                },
+                {
+                    label: 'Пропустил',
+                    value: attendanceStats.scheduled_absent || 0,
+                    hint: 'Без посещения',
+                    numberClass: ''
+                },
+                {
+                    label: 'Отработал',
+                    value: attendanceStats.extra_present || 0,
+                    hint: 'Внеплановые занятия',
+                    numberClass: 'success'
+                },
+                {
+                    label: 'К отработке',
+                    value: attendanceStats.makeup_needed || 0,
+                    hint: 'Осталось закрыть',
+                    numberClass: attendanceStats.makeup_needed > 0 ? 'text-warning' : 'success'
+                },
+                {
+                    label: 'Посещаемость',
+                    value: `${attendanceStats.attendance_rate || 0}%`,
+                    hint: 'По регулярным занятиям',
+                    numberClass: ''
+                }
+            ];
+
             attendanceSummary = `
                 <div class="attendance-summary">
-                    <div class="attendance-stat">
-                        <span class="stat-number success">${attendanceStats.scheduled_present || 0}</span>
-                        <span class="stat-label">Посещено</span>
+                    <div class="attendance-summary-header">
+                        <div>
+                            <div class="attendance-summary-title">Кратко по занятиям</div>
+                            <div class="attendance-summary-subtitle">Отработать = Болел + Пропустил - Отработал</div>
+                        </div>
                     </div>
-                    <div class="attendance-stat">
-                        <span class="stat-number">${attendanceStats.scheduled_sick || 0}</span>
-                        <span class="stat-label">Болел</span>
-                    </div>
-                    <div class="attendance-stat">
-                        <span class="stat-number">${attendanceStats.scheduled_absent || 0}</span>
-                        <span class="stat-label">Пропустил</span>
-                    </div>
-                    <div class="attendance-stat">
-                        <span class="stat-number success">${attendanceStats.extra_present || 0}</span>
-                        <span class="stat-label">Отработал</span>
-                    </div>
-                    <div class="attendance-stat">
-                        <span class="stat-number ${attendanceStats.makeup_needed > 0 ? 'text-warning' : 'success'}">${attendanceStats.makeup_needed || 0}</span>
-                        <span class="stat-label">Отработать</span>
-                    </div>
-                    <div class="attendance-stat">
-                        <span class="stat-number">${attendanceStats.attendance_rate || 0}%</span>
-                        <span class="stat-label">Посещаемость</span>
+                    <div class="attendance-summary-grid">
+                        ${attendanceCards.map((card) => `
+                            <div class="attendance-stat">
+                                <span class="stat-label">${card.label}</span>
+                                <span class="stat-number ${card.numberClass}">${card.value}</span>
+                                <span class="stat-hint">${card.hint}</span>
+                            </div>
+                        `).join('')}
                     </div>
                 </div>
             `;
