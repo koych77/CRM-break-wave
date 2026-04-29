@@ -210,6 +210,40 @@ async def resolve_legacy_schedule_fields(
     }
 
 
+async def create_extra_lesson_record(
+    session,
+    coach_id: int,
+    student: Student,
+    lesson_date: date,
+    lesson_time: str,
+    location_id: int | None = None,
+    topic: str = "Внеплановое занятие",
+    notes: str | None = None,
+) -> Lesson:
+    """Persist a lesson row for extra attendance so legacy DBs with NOT NULL lesson_id still work."""
+    resolved_location_id = location_id if location_id is not None else student.location_id
+    location_name = student.location or "Зал"
+
+    if resolved_location_id:
+        location = await session.get(Location, resolved_location_id)
+        if location and location.coach_id == coach_id:
+            location_name = location.name
+
+    lesson = Lesson(
+        coach_id=coach_id,
+        student_id=student.id,
+        date=lesson_date,
+        time=lesson_time,
+        location=location_name,
+        location_id=resolved_location_id,
+        topic=topic,
+        notes=notes,
+    )
+    session.add(lesson)
+    await session.flush()
+    return lesson
+
+
 def apply_attendance_to_balance(student: Student, old_status: str | None, new_status: str) -> None:
     """Keep lessons_remaining consistent when attendance changes."""
     if getattr(student, "is_unlimited", False):
@@ -2045,6 +2079,8 @@ async def api_extra_attendance(request: Request):
     location_id = body.get("location_id")
     location_id = int(location_id) if location_id not in (None, "", "null") else None
     
+    attendance_date_obj = date.fromisoformat(attendance_date)
+
     async with async_session() as s:
         # Verify student belongs to coach
         student_result = await s.execute(
@@ -2067,23 +2103,35 @@ async def api_extra_attendance(request: Request):
             select(Attendance).where(
                 Attendance.student_id == student_id,
                 Attendance.is_extra == True,
-                Attendance.attendance_date == date.fromisoformat(attendance_date),
+                Attendance.attendance_date == attendance_date_obj,
                 Attendance.attendance_time == attendance_time
             )
         )
         if duplicate_result.scalar_one_or_none():
             return JSONResponse({"error": "already_marked", "message": "Посещаемость уже отмечена"}, 409)
 
-        # Create extra attendance record (no lesson entry - this is out-of-schedule)
+        extra_notes = notes or "Внеплановое посещение"
+        resolved_location_id = location_id if location_id is not None else student.location_id
+        extra_lesson = await create_extra_lesson_record(
+            s,
+            coach.id,
+            student,
+            attendance_date_obj,
+            attendance_time,
+            location_id=resolved_location_id,
+            topic="Внеплановое занятие",
+            notes=extra_notes,
+        )
+
         att = Attendance(
-            lesson_id=None,  # No scheduled lesson
+            lesson_id=extra_lesson.id,
             student_id=student_id,
-            location_id=location_id if location_id is not None else student.location_id,
+            location_id=resolved_location_id,
             status=status,
             is_extra=True,
-            attendance_date=date.fromisoformat(attendance_date),
+            attendance_date=attendance_date_obj,
             attendance_time=attendance_time,
-            notes=notes or "Внеплановое посещение"
+            notes=extra_notes
         )
         s.add(att)
         
@@ -2312,27 +2360,39 @@ async def api_add_student_to_current_lesson(request: Request):
         lesson_day = date.fromisoformat(lesson_date).weekday()
         original_time = student.get_lesson_time_for_day(lesson_day)
         if target_time and target_time != original_time:
+            lesson_date_obj = date.fromisoformat(lesson_date)
             duplicate_result = await s.execute(
                 select(Attendance).where(
                     Attendance.student_id == student_id,
                     Attendance.is_extra == True,
-                    Attendance.attendance_date == date.fromisoformat(lesson_date),
+                    Attendance.attendance_date == lesson_date_obj,
                     Attendance.attendance_time == target_time
                 )
             )
             if duplicate_result.scalar_one_or_none():
                 return JSONResponse({"error": "already_marked"}, 409)
 
-            # Create extra attendance for this specific session
+            extra_notes = f"Добавлен к группе {target_time} (обычное время: {original_time})"
+            extra_lesson = await create_extra_lesson_record(
+                s,
+                coach.id,
+                student,
+                lesson_date_obj,
+                target_time,
+                location_id=student.location_id,
+                topic="Внеплановое занятие",
+                notes=extra_notes,
+            )
+
             att = Attendance(
-                lesson_id=None,
+                lesson_id=extra_lesson.id,
                 student_id=student_id,
                 location_id=student.location_id,
                 status="present",
                 is_extra=True,
-                attendance_date=date.fromisoformat(lesson_date),
+                attendance_date=lesson_date_obj,
                 attendance_time=target_time,
-                notes=f"Добавлен к группе {target_time} (обычное время: {original_time})"
+                notes=extra_notes
             )
             s.add(att)
             
