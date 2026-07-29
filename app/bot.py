@@ -3,15 +3,13 @@ import hmac
 import logging
 import json
 import os
-from aiogram import Bot, Dispatcher, Router, types, F
+from aiogram import Bot, Dispatcher, Router, F
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton,
     WebAppInfo, CallbackQuery, Message
 )
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
-from sqlalchemy import select, func, and_, or_
+from sqlalchemy import select, and_
 from sqlalchemy.orm import selectinload
 from datetime import datetime, date, timedelta
 from zoneinfo import ZoneInfo
@@ -20,37 +18,6 @@ from app.database import async_session
 BELARUS_TZ = ZoneInfo('Europe/Minsk')
 from app.models import Coach, Student, Lesson, Attendance, Payment, AdminUser, StudentSchedule, Notification
 from app.config import BOT_TOKEN, ADMIN_IDS, ADMIN_SECRET, WEBAPP_URL
-
-
-# Helper function to get lesson time for a specific day (using new schedule system)
-def get_lesson_time_for_day(student: Student, day_of_week: int) -> str:
-    """Get lesson time for specific day from student schedules."""
-    # First check new schedules table
-    if student.schedules:
-        for schedule in student.schedules:
-            if schedule.has_lesson_on_day(day_of_week):
-                return schedule.get_time_for_day(day_of_week)
-    
-    # Fallback to legacy lesson_times
-    try:
-        times = json.loads(student.lesson_times or '{}')
-        return times.get(str(day_of_week), times.get('default', '18:00'))
-    except:
-        return '18:00'
-
-
-def student_has_lesson_on_day(student: Student, day_of_week: int) -> bool:
-    """Check if student has lesson on given day using new schedule system."""
-    # First check new schedules table
-    if student.schedules:
-        return any(schedule.has_lesson_on_day(day_of_week) for schedule in student.schedules)
-    
-    # Fallback to legacy lesson_days
-    if student.lesson_days:
-        days = [d.strip() for d in student.lesson_days.split(",")]
-        return str(day_of_week) in days
-    
-    return False
 
 
 def get_remaining_lessons(student: Student) -> int:
@@ -165,12 +132,6 @@ async def is_admin(user_id: int) -> bool:
         return result.scalar_one_or_none() is not None
 
 
-async def is_coach(user_id: int) -> bool:
-    async with async_session() as s:
-        result = await s.execute(select(Coach).where(Coach.telegram_id == user_id))
-        return result.scalar_one_or_none() is not None
-
-
 async def get_coach(user_id: int):
     async with async_session() as s:
         result = await s.execute(select(Coach).where(Coach.telegram_id == user_id))
@@ -189,26 +150,6 @@ async def register_coach(user_id: int, first_name: str = None, username: str = N
         return True
 
 
-# === FSM States ===
-
-class StudentForm(StatesGroup):
-    name = State()
-    phone = State()
-    lesson_price = State()
-    lessons_count = State()
-    location = State()
-    lesson_days = State()
-    lesson_time = State()
-    confirm = State()
-
-
-class PaymentForm(StatesGroup):
-    select_student = State()
-    amount = State()
-    period = State()
-    confirm = State()
-
-
 # === Commands ===
 
 @router.message(CommandStart())
@@ -219,45 +160,36 @@ async def cmd_start(message: Message):
     # Check roles
     is_admin_user = await is_admin(user_id)
     coach = await get_coach(user_id)
+    if is_admin_user and not coach:
+        await register_coach(
+            user_id,
+            message.from_user.first_name,
+            message.from_user.username,
+        )
+        coach = await get_coach(user_id)
     
-    # If admin - show admin panel + coach interface if registered
+    # Admins get the same operational CRM entry point plus admin commands.
     if is_admin_user:
         admin_text = (
             "👑 <b>Админ-панель CRM Break Wave</b>\n\n"
-            "Вы администратор системы.\n"
             "Админ-команды:\n"
             "/coaches - список тренеров\n"
             "/stats - общая статистика\n\n"
         )
-        
-        if coach:
-            # Admin is also a coach - show both interfaces
-            webapp_url = WEBAPP_URL or "https://your-app.up.railway.app"
-            
-            kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(
-                    text="📱 Открыть CRM (как тренер)",
-                    web_app=WebAppInfo(url=f"{webapp_url}/")
-                )],
-                [InlineKeyboardButton(text="👥 Мои ученики", callback_data="my_students")],
-                [InlineKeyboardButton(text="⚠️ Проверить оплаты", callback_data="check_payments")],
-            ])
-            
-            await message.answer(
-                admin_text + 
-                f"✅ Вы также зарегистрированы как тренер: {coach.first_name or 'Тренер'}\n\n"
-                "Быстрые действия:",
-                parse_mode="HTML",
-                reply_markup=kb
+
+        webapp_url = WEBAPP_URL or "https://your-app.up.railway.app"
+        kb = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(
+                text="📱 Открыть CRM",
+                web_app=WebAppInfo(url=f"{webapp_url}/"),
             )
-        else:
-            # Admin but not a coach
-            await message.answer(
-                admin_text + 
-                "❌ Вы не зарегистрированы как тренер.\n"
-                "Используйте /coach <код> чтобы стать тренером.",
-                parse_mode="HTML"
-            )
+        ]])
+
+        await message.answer(
+            admin_text + "Ученики, расписание, посещаемость и деньги собраны в одном приложении.",
+            parse_mode="HTML",
+            reply_markup=kb,
+        )
         return
     
     # Check if coach
@@ -355,16 +287,13 @@ async def cmd_start(message: Message):
         [InlineKeyboardButton(
             text="📱 Открыть CRM",
             web_app=WebAppInfo(url=f"{webapp_url}/")
-        )],
-        [InlineKeyboardButton(text="👥 Мои ученики", callback_data="my_students")],
-        [InlineKeyboardButton(text="⚠️ Проверить оплаты", callback_data="check_payments")],
+        )]
     ])
     
     await message.answer(
         f"👋 Привет, {coach.first_name or 'тренер'}!\n\n"
-        "<b>CRM Break Wave</b> — управление учениками, посещаемостью и оплатой.\n\n"
-        f"📅 Сейчас активных тренировок нет.\n"
-        f"🕐 Текущее время: {now.strftime('%H:%M')}",
+        "<b>CRM Break Wave</b> — ученики, расписание, посещаемость и деньги в одном месте.\n\n"
+        f"Сейчас активных тренировок нет · {now.strftime('%H:%M')}",
         parse_mode="HTML",
         reply_markup=kb
     )
@@ -626,7 +555,8 @@ async def cb_my_students(callback: CallbackQuery):
         text += f"• <b>{st.name}</b>\n"
         for info in schedules_info:
             text += f"  {info}\n"
-        text += f"  💰 {st.lesson_price} Br/{st.lessons_count} занятий\n\n"
+        balance = "безлимит" if st.is_unlimited else f"осталось {get_remaining_lessons(st)}"
+        text += f"  🎟 {balance}\n\n"
     
     await callback.message.edit_text(text, parse_mode="HTML")
 
@@ -1056,61 +986,7 @@ async def cmd_stats(message: Message):
     await message.answer(text, parse_mode="HTML")
 
 
-# === Notification helpers ===
-
-async def notify_coach_payment_due(coach_id: int, student_name: str, days_left: int):
-    """Send notification to coach about ending subscription."""
-    if bot is None:
-        logger.warning("Bot is not initialized; skipping payment due notification")
-        return
-    async with async_session() as s:
-        coach = await s.get(Coach, coach_id)
-        if not coach:
-            return
-        
-        try:
-            if days_left < 0:
-                text = f"⚠️ Абонемент <b>{student_name}</b> просрочен!"
-            else:
-                text = f"⏳ У <b>{student_name}</b> осталось {days_left} дн. абонемента"
-            
-            await bot.send_message(coach.telegram_id, text, parse_mode="HTML")
-        except Exception as e:
-            logger.error(f"Failed to notify coach {coach_id}: {e}")
-
-
 # === Daily Notifications ===
-
-async def should_send_daily_notification(coach_id: int, notification_type: str) -> bool:
-    """Check if daily notification was already sent today."""
-    from app.models import DailyNotificationLog
-    
-    today = datetime.now(BELARUS_TZ).date()
-    
-    async with async_session() as s:
-        result = await s.execute(
-            select(DailyNotificationLog).where(
-                DailyNotificationLog.coach_id == coach_id,
-                DailyNotificationLog.notification_type == notification_type,
-                DailyNotificationLog.date == today
-            )
-        )
-        return result.scalar_one_or_none() is None
-
-
-async def mark_notification_sent(coach_id: int, notification_type: str):
-    """Mark notification as sent for today."""
-    from app.models import DailyNotificationLog
-    
-    log = DailyNotificationLog(
-        coach_id=coach_id,
-        notification_type=notification_type,
-        date=datetime.now(BELARUS_TZ).date()
-    )
-    async with async_session() as s:
-        s.add(log)
-        await s.commit()
-
 
 async def _deprecated_send_daily_summary(coach_id: int = None):
     """Deprecated duplicate preserved temporarily during migration."""
