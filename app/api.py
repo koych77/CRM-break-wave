@@ -1,6 +1,6 @@
 from fastapi import FastAPI, UploadFile, File, Query, Request, Form, Depends
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse, HTMLResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, HTMLResponse, RedirectResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from sqlalchemy import select, func, and_, or_, desc, delete, update
@@ -337,6 +337,21 @@ async def root():
             "Expires": "0"
         })
     return HTMLResponse(content="<h1>CRM Break Wave</h1><p>Mini App is loading...</p>")
+
+
+@app.get("/webapp", include_in_schema=False)
+@app.get("/webapp/", include_in_schema=False)
+async def legacy_webapp_redirect():
+    """Keep previously configured Telegram Mini App buttons working."""
+    return RedirectResponse(
+        url="/",
+        status_code=307,
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
 
 
 # === Auth ===

@@ -134,6 +134,15 @@ def test_telegram_init_data_accepts_fresh_signature():
     assert verified["id"] == 1001
 
 
+def test_legacy_webapp_route_redirects_to_current_mini_app():
+    with TestClient(app) as client:
+        response = client.get("/webapp/", follow_redirects=False)
+
+    assert response.status_code == 307
+    assert response.headers["location"] == "/"
+    assert response.headers["cache-control"] == "no-cache, no-store, must-revalidate"
+
+
 def test_telegram_init_data_rejects_stale_signature():
     stale = telegram_init_data(1001, int(time.time()) - 3601)
     assert verify_telegram_init_data(stale) is None
