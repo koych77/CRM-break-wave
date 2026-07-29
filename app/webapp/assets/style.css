@@ -35,6 +35,364 @@ body {
     overflow-x: hidden;
 }
 
+/* === Family cabinet and request center === */
+
+.family-hero {
+    padding: 28px 20px 20px;
+    background:
+        radial-gradient(circle at 88% 0%, rgba(0, 212, 255, 0.16), transparent 42%),
+        linear-gradient(180deg, rgba(21, 40, 64, 0.76), rgba(10, 22, 40, 0));
+}
+
+.family-hero h2 {
+    margin: 7px 0 8px;
+    font-size: clamp(25px, 7vw, 34px);
+    line-height: 1.08;
+    letter-spacing: -0.035em;
+}
+
+.family-hero p,
+.privacy-note,
+.muted-copy {
+    color: var(--text-secondary);
+    line-height: 1.5;
+}
+
+.family-form,
+.family-content,
+.request-center {
+    padding: 0 16px 28px;
+}
+
+.family-section-title {
+    align-items: flex-end;
+    margin: 24px 0 12px;
+}
+
+.family-section-title p {
+    margin-top: 4px;
+    color: var(--text-secondary);
+    font-size: 13px;
+}
+
+.schedule-editor {
+    display: grid;
+    gap: 10px;
+    margin-bottom: 20px;
+}
+
+.schedule-editor-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 112px 40px;
+    gap: 8px;
+    align-items: center;
+}
+
+.schedule-editor-row select,
+.schedule-editor-row input,
+.inline-select select,
+.inline-select input {
+    width: 100%;
+    min-height: 44px;
+    padding: 0 12px;
+    color: var(--text-primary);
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+}
+
+.btn-block {
+    width: 100%;
+    justify-content: center;
+}
+
+.privacy-note {
+    margin: 14px 4px 0;
+    font-size: 12px;
+    text-align: center;
+}
+
+.family-content {
+    display: grid;
+    gap: 16px;
+}
+
+.family-student-card,
+.request-section,
+.family-status-card {
+    border: 1px solid rgba(139, 163, 190, 0.18);
+    border-radius: 20px;
+    background: linear-gradient(150deg, rgba(21, 40, 64, 0.96), rgba(15, 32, 53, 0.94));
+    box-shadow: 0 18px 46px rgba(0, 0, 0, 0.16);
+}
+
+.family-student-card {
+    padding: 16px;
+}
+
+.family-card-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 14px;
+}
+
+.family-card-head h3 {
+    margin-top: 5px;
+    font-size: 23px;
+    letter-spacing: -0.025em;
+}
+
+.balance-pill,
+.status-chip,
+.count-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 30px;
+    padding: 5px 10px;
+    border-radius: 999px;
+    background: rgba(0, 212, 255, 0.11);
+    color: var(--accent);
+    font-weight: 750;
+    white-space: nowrap;
+}
+
+.family-panel {
+    margin-top: 14px;
+    padding: 14px;
+    border: 1px solid rgba(139, 163, 190, 0.14);
+    border-radius: 16px;
+    background: rgba(7, 17, 31, 0.42);
+}
+
+.family-panel h4,
+.request-card h4 {
+    font-size: 17px;
+}
+
+.family-row,
+.makeup-item,
+.invite-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 11px 0;
+    border-bottom: 1px solid rgba(139, 163, 190, 0.12);
+}
+
+.family-row:last-child,
+.makeup-item:last-child,
+.invite-row:last-child {
+    border-bottom: 0;
+}
+
+.family-row small,
+.makeup-item small,
+.invite-row small,
+.family-toggle small {
+    display: block;
+    margin-top: 3px;
+    color: var(--text-secondary);
+    line-height: 1.35;
+}
+
+.family-toggle {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+    margin-top: 10px;
+    padding-top: 14px;
+    border-top: 1px solid rgba(139, 163, 190, 0.12);
+}
+
+.family-toggle input {
+    width: 46px;
+    height: 26px;
+    accent-color: var(--accent);
+}
+
+.invoice-panel.is-overdue {
+    border-color: rgba(255, 107, 53, 0.48);
+    background: linear-gradient(155deg, rgba(255, 107, 53, 0.10), rgba(7, 17, 31, 0.48));
+}
+
+.status-paid,
+.status-reported {
+    color: #87E7A2;
+    background: rgba(76, 175, 80, 0.14);
+}
+
+.status-overdue,
+.status-rejected {
+    color: #FF9A7A;
+    background: rgba(255, 82, 82, 0.13);
+}
+
+.status-awaiting_receipt {
+    color: #FFD86A;
+    background: rgba(255, 193, 7, 0.13);
+}
+
+.money-breakdown {
+    display: grid;
+    gap: 8px;
+    margin: 14px 0;
+    color: var(--text-secondary);
+}
+
+.money-breakdown span {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.money-breakdown strong {
+    color: var(--text-primary);
+}
+
+.money-total {
+    padding-top: 8px;
+    border-top: 1px solid rgba(139, 163, 190, 0.15);
+    font-size: 17px;
+}
+
+.inline-select {
+    display: grid;
+    gap: 7px;
+    margin: 12px 0;
+    color: var(--text-secondary);
+    font-size: 13px;
+}
+
+.family-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 9px;
+    margin-top: 13px;
+}
+
+.compact-btn {
+    min-height: 36px;
+    padding: 7px 10px;
+    font-size: 12px;
+}
+
+.danger-action,
+.danger-copy {
+    color: #FF8F8F !important;
+}
+
+.success-copy {
+    color: #87E7A2;
+}
+
+.warning-copy {
+    color: #FFD86A;
+}
+
+.status-note {
+    margin-top: 11px;
+    line-height: 1.45;
+}
+
+.family-status-card {
+    display: grid;
+    gap: 5px;
+    padding: 16px;
+}
+
+.family-status-card span,
+.family-status-card small {
+    color: var(--text-secondary);
+}
+
+.family-status-card.is-rejected {
+    border-color: rgba(255, 82, 82, 0.36);
+}
+
+.request-center {
+    display: grid;
+    gap: 14px;
+    padding-top: 16px;
+}
+
+.request-summary {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    padding: 4px 3px;
+    color: var(--text-secondary);
+}
+
+.request-summary strong {
+    color: var(--accent);
+    font-size: 30px;
+}
+
+.request-section {
+    padding: 15px;
+}
+
+.request-card {
+    margin-top: 12px;
+    padding: 14px;
+    border-radius: 15px;
+    background: rgba(7, 17, 31, 0.46);
+    border: 1px solid rgba(139, 163, 190, 0.13);
+}
+
+.request-card p {
+    margin: 6px 0;
+    color: var(--text-secondary);
+}
+
+.request-card > small {
+    display: block;
+    line-height: 1.45;
+    color: var(--text-secondary);
+}
+
+.role-list {
+    display: grid;
+    gap: 8px;
+    margin: 14px 0;
+}
+
+.role-row {
+    display: grid;
+    grid-template-columns: minmax(90px, 1fr) auto auto;
+    gap: 8px 12px;
+    align-items: center;
+    padding: 11px;
+    border-radius: 13px;
+    background: rgba(7, 17, 31, 0.44);
+}
+
+.role-row label,
+.role-row small {
+    color: var(--text-secondary);
+    font-size: 12px;
+}
+
+.role-row .compact-btn,
+.role-row > small {
+    grid-column: 2 / -1;
+    justify-self: end;
+}
+
+@media (max-width: 370px) {
+    .schedule-editor-row {
+        grid-template-columns: minmax(0, 1fr) 100px 38px;
+    }
+
+    .family-actions {
+        grid-template-columns: 1fr;
+    }
+}
+
 #app {
     max-width: 500px;
     margin: 0 auto;

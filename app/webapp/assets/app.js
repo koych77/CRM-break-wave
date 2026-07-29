@@ -7,6 +7,11 @@ let currentScreen = 'loading';
 let screenHistory = [];
 let initData = '';
 let currentCoach = null;
+let currentRole = null;
+let currentParent = null;
+let parentData = null;
+let guestInvitation = null;
+let registrationScheduleRows = [];
 let coaches = [];
 let students = [];
 let payments = [];
@@ -195,6 +200,11 @@ function initializeDialogAccessibility() {
 }
 
 function setupForms() {
+    document.getElementById('parent-registration-form')?.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        await submitParentRegistration();
+    });
+
     // Student form
     document.getElementById('student-form')?.addEventListener('submit', async (e) => {
         e.preventDefault();
@@ -217,10 +227,12 @@ async function authenticate() {
             return;
         }
 
+        const urlInvitation = new URLSearchParams(window.location.search).get('invite');
+        const startParam = urlInvitation || tg?.initDataUnsafe?.start_param || '';
         const res = await fetch(`${API}/api/auth`, {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({initData})
+            body: JSON.stringify({initData, startParam})
         });
         
         if (!res.ok) {
@@ -231,13 +243,34 @@ async function authenticate() {
             throw new Error(`Authentication failed with ${res.status}`);
         }
         const data = await res.json();
-        
-        if (data.error === 'not_registered') {
-            showScreen('auth');
+
+        currentRole = data.role;
+        const subtitle = document.querySelector('.app-subtitle');
+        const context = document.querySelector('.brand-context');
+
+        if (data.role === 'guest') {
+            guestInvitation = data;
+            if (subtitle) subtitle.textContent = 'Регистрация';
+            if (context) context.textContent = 'Семья';
+            document.getElementById('reg-child-name').value = data.preliminary_child_name || '';
+            document.getElementById('reg-parent-name').value = data.existing_parent?.full_name || '';
+            document.getElementById('reg-parent-phone').value = data.existing_parent?.phone || '';
+            initializeRegistrationSchedule();
+            showScreen('registration');
             return;
         }
-        
+
+        if (data.role === 'parent') {
+            currentParent = data;
+            if (subtitle) subtitle.textContent = 'Семейный кабинет';
+            if (context) context.textContent = 'Семья';
+            showScreen('parent');
+            return;
+        }
+
         currentCoach = data;
+        if (subtitle) subtitle.textContent = data.is_admin ? 'CRM руководителя' : 'CRM тренера';
+        if (context) context.textContent = data.is_admin ? 'Админ' : 'CRM';
         
         // Store coach info for auto-fill forms
         localStorage.setItem('crm_coach_info', JSON.stringify({
@@ -247,7 +280,9 @@ async function authenticate() {
             is_admin: data.is_admin
         }));
         
-        showScreen('dashboard');
+        const requestedScreen = new URLSearchParams(window.location.search).get('screen');
+        const allowedEntryScreens = new Set(['dashboard', 'students', 'calendar', 'quick-lesson', 'finance', 'requests']);
+        showScreen(allowedEntryScreens.has(requestedScreen) ? requestedScreen : 'dashboard');
     } catch (e) {
         console.error('Auth error:', e);
         showApplicationError('Не удалось связаться с сервером. Проверьте интернет и повторите попытку.');
@@ -284,7 +319,7 @@ function goBack() {
         const prev = screenHistory.pop();
         showScreen(prev);
     } else {
-        showScreen('dashboard');
+        showScreen(currentRole === 'parent' ? 'parent' : 'dashboard');
     }
 }
 
@@ -303,7 +338,7 @@ function showScreen(screen) {
     if (content) content.scrollTop = 0;
 
     const bottomNav = document.getElementById('bottom-nav');
-    const navigationVisible = ROOT_SCREENS.has(screen);
+    const navigationVisible = ['admin', 'coach'].includes(currentRole) && ROOT_SCREENS.has(screen);
     if (bottomNav) {
         bottomNav.hidden = !navigationVisible;
         bottomNav.querySelectorAll('button').forEach((button) => {
@@ -333,6 +368,12 @@ function showScreen(screen) {
             break;
         case 'finance':
             loadFinance();
+            break;
+        case 'parent':
+            loadParentContext();
+            break;
+        case 'requests':
+            loadAdminRequests();
             break;
     }
 }
@@ -934,7 +975,6 @@ async function openStudentDetail(id, options = {}) {
             
             <div class="action-buttons-grid">
                 <button class="btn-primary" onclick="openEditStudent(${student.id})">Редактировать</button>
-                <button class="btn-secondary" onclick="addPaymentForStudent(${student.id})">Добавить оплату</button>
                 <button class="btn-secondary" onclick="markExtraAttendance(${student.id})">Внеплановое занятие</button>
                 <button class="btn-secondary" onclick="viewAttendanceHistory(${student.id})">История посещений</button>
             </div>
@@ -1500,7 +1540,6 @@ let paymentSubmitting = false;
 
 async function savePayment() {
     if (paymentSubmitting) {
-        console.log('savePayment blocked: already submitting');
         return;
     }
     paymentSubmitting = true;
@@ -1518,8 +1557,6 @@ async function savePayment() {
             is_unlimited: isUnlimited,
             notes: document.getElementById('pay-notes').value,
         };
-        
-        console.log('savePayment payload JSON:', JSON.stringify(data), 'editingPaymentId:', editingPaymentId);
         
         if (!data.student_id || !data.amount) {
             showNotification('Заполните обязательные поля', 'error');
@@ -1545,14 +1582,11 @@ async function savePayment() {
             ? `${API}/api/payments/${editingPaymentId}/update`
             : `${API}/api/payments/create`;
         
-        console.log('savePayment fetching url:', url);
         const res = await fetch(url, {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({initData, payment: data})
         });
-        console.log('savePayment response status:', res.status);
-        
         const result = await res.json();
         
         if (result.success) {
@@ -2133,7 +2167,7 @@ async function openExtraAttendanceModal(studentId = null) {
             <div class="form-group">
                 <label>
                     <input type="checkbox" id="extra-deduct" checked>
-                    Списать занятие с абонемента
+                    Списать занятие с абонемента (снимите только для подтверждённой отработки)
                 </label>
             </div>
             <div class="modal-actions">
@@ -2515,6 +2549,7 @@ async function loadDailySummary() {
 
 let currentLocationSchedules = [];
 let availableLocations = [];
+let availableGroups = [];
 
 // Initialize with one default location
 function initLocationSchedules(schedules = null) {
@@ -2522,6 +2557,7 @@ function initLocationSchedules(schedules = null) {
         currentLocationSchedules = schedules.map(s => ({
             id: s.id,
             location_id: s.location_id,
+            group_id: s.group_id || null,
             days: s.days ? s.days.split(',').map(d => parseInt(d.trim())) : [],
             times: typeof s.times === 'string' ? JSON.parse(s.times) : s.times,
             duration: s.duration || 90,
@@ -2532,6 +2568,7 @@ function initLocationSchedules(schedules = null) {
         currentLocationSchedules = [{
             id: null,
             location_id: null,
+            group_id: null,
             days: [1, 3], // Tue, Thu
             times: {"1": "18:00", "3": "18:00"},
             duration: 90,
@@ -2545,6 +2582,7 @@ function addLocationSchedule() {
     currentLocationSchedules.push({
         id: null,
         location_id: null,
+        group_id: null,
         days: [],
         times: {},
         duration: 90,
@@ -2604,6 +2642,9 @@ function renderLocationSchedules() {
         const locationOptions = availableLocations.map(loc => 
             `<option value="${loc.id}" ${schedule.location_id == loc.id ? 'selected' : ''}>${escapeHtml(loc.name)}</option>`
         ).join('');
+        const groupOptions = availableGroups.map(group =>
+            `<option value="${group.id}" ${schedule.group_id == group.id ? 'selected' : ''}>${escapeHtml(group.name)}</option>`
+        ).join('');
         
         const dayButtons = [0, 1, 2, 3, 4, 5, 6].map(day => {
             const dayNames = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
@@ -2650,6 +2691,13 @@ function renderLocationSchedules() {
                         </div>
                     </div>
                 </div>
+
+                <div class="location-select-wrapper">
+                    <select aria-label="Группа" onchange="updateLocationField(${index}, 'group_id', this.value ? Number(this.value) : null)">
+                        <option value="">-- Без группы --</option>
+                        ${groupOptions}
+                    </select>
+                </div>
                 
                 <div class="form-group">
                     <label>Дни недели</label>
@@ -2685,6 +2733,7 @@ function collectLocationSchedules() {
     return currentLocationSchedules.map(s => ({
         id: s.id,
         location_id: s.location_id,
+        group_id: s.group_id,
         days: s.days.join(','),
         times: JSON.stringify(s.times),
         duration: s.duration,
@@ -2756,12 +2805,20 @@ function cancelNewLocation(index) {
 // Load locations for select
 async function loadLocationsForSelect() {
     try {
-        const res = await fetch(`${API}/api/locations`, {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({initData})
-        });
-        availableLocations = await res.json();
+        const [locationsResponse, groupsResponse] = await Promise.all([
+            fetch(`${API}/api/locations`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({initData})
+            }),
+            fetch(`${API}/api/training-groups`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({initData})
+            })
+        ]);
+        availableLocations = await locationsResponse.json();
+        availableGroups = groupsResponse.ok ? await groupsResponse.json() : [];
         renderLocationSchedules();
     } catch (e) {
         console.error('Load locations error:', e);
@@ -2946,7 +3003,7 @@ function renderStudentDetailLocations(student) {
                     <div class="detail-location-icon">📍</div>
                     <div class="detail-location-info">
                         <div class="detail-location-name">${escapeHtml(schedule.location_name || 'Зал')}</div>
-                        <div class="detail-location-schedule">${formatDays(schedule.days)} ${formatTimes(schedule.times)}</div>
+                        <div class="detail-location-schedule">${formatDays(schedule.days)} ${formatTimes(schedule.times)}${schedule.group_name ? ` · ${escapeHtml(schedule.group_name)}` : ''}</div>
                     </div>
                     ${schedule.is_primary ? '<span class="detail-location-primary-badge">ОСНОВНОЙ</span>' : ''}
                 </div>
@@ -3161,5 +3218,686 @@ function renderFinance(summary, debtors) {
         
         ${debtorsHtml}
     `;
+}
+
+// === Family cabinet and shared request queue ===
+
+async function apiPost(path, payload = {}) {
+    const response = await fetch(`${API}${path}`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({initData, ...payload})
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+        const error = new Error(data.message || data.error || `Ошибка ${response.status}`);
+        error.payload = data;
+        throw error;
+    }
+    return data;
+}
+
+function initializeRegistrationSchedule() {
+    if (!registrationScheduleRows.length) {
+        registrationScheduleRows = [
+            {day: '0', time: '18:00'},
+            {day: '2', time: '18:00'}
+        ];
+    }
+    renderRegistrationSchedule();
+}
+
+function addRegistrationScheduleRow() {
+    registrationScheduleRows.push({day: '0', time: '18:00'});
+    renderRegistrationSchedule();
+}
+
+function updateRegistrationScheduleRow(index, field, value) {
+    if (registrationScheduleRows[index]) registrationScheduleRows[index][field] = value;
+}
+
+function removeRegistrationScheduleRow(index) {
+    if (registrationScheduleRows.length <= 1) {
+        showNotification('Нужен хотя бы один день тренировки', 'error');
+        return;
+    }
+    registrationScheduleRows.splice(index, 1);
+    renderRegistrationSchedule();
+}
+
+function renderRegistrationSchedule() {
+    const container = document.getElementById('registration-schedule-list');
+    if (!container) return;
+    const weekdays = ['Понедельник', 'Вторник', 'Среда', 'Четверг', 'Пятница', 'Суббота', 'Воскресенье'];
+    container.innerHTML = registrationScheduleRows.map((row, index) => `
+        <div class="schedule-editor-row">
+            <select aria-label="День тренировки" onchange="updateRegistrationScheduleRow(${index}, 'day', this.value)">
+                ${weekdays.map((name, day) => `<option value="${day}" ${String(day) === row.day ? 'selected' : ''}>${name}</option>`).join('')}
+            </select>
+            <input type="time" aria-label="Время тренировки" value="${escapeHtml(row.time)}"
+                onchange="updateRegistrationScheduleRow(${index}, 'time', this.value)">
+            <button type="button" class="btn-icon" aria-label="Удалить день" onclick="removeRegistrationScheduleRow(${index})">×</button>
+        </div>
+    `).join('');
+}
+
+async function submitParentRegistration() {
+    if (!guestInvitation) return;
+    const proposedSchedule = registrationScheduleRows.map((row, index) => ({
+        days: row.day,
+        times: {[row.day]: row.time},
+        duration: 90,
+        is_primary: index === 0
+    }));
+    const submitButton = document.querySelector('#parent-registration-form button[type="submit"]');
+    if (submitButton) submitButton.disabled = true;
+    try {
+        await apiPost('/api/parent/register', {
+            invite_token: guestInvitation.invite_token,
+            parent: {
+                full_name: document.getElementById('reg-parent-name').value.trim(),
+                phone: document.getElementById('reg-parent-phone').value.trim()
+            },
+            child: {
+                name: document.getElementById('reg-child-name').value.trim(),
+                birthday: document.getElementById('reg-child-birthday').value,
+                phone: document.getElementById('reg-child-phone').value.trim()
+            },
+            proposed_schedule: proposedSchedule
+        });
+        currentRole = 'parent';
+        guestInvitation = null;
+        showNotification('Анкета отправлена тренерам');
+        showScreen('parent');
+    } catch (error) {
+        showNotification(error.message || 'Не удалось отправить анкету', 'error');
+    } finally {
+        if (submitButton) submitButton.disabled = false;
+    }
+}
+
+async function loadParentContext() {
+    const container = document.getElementById('parent-content');
+    if (!container) return;
+    renderScreenState(container, 'Загружаем семейный кабинет…', {icon: 'BW'});
+    try {
+        parentData = await apiPost('/api/parent/context');
+        document.getElementById('parent-greeting').textContent = `Здравствуйте, ${parentData.parent.full_name}`;
+        renderParentContext();
+    } catch (error) {
+        renderScreenState(container, error.message || 'Не удалось загрузить данные', {
+            retry: 'loadParentContext()'
+        });
+    }
+}
+
+function parentPaymentStatus(invoice) {
+    const labels = {
+        paid: 'Оплачено',
+        pending: 'Ожидает оплаты',
+        overdue: 'Есть задолженность',
+        reported: 'На проверке',
+        awaiting_receipt: 'Нужен чек',
+        rejected: 'Отклонено',
+        written_off: 'Списано'
+    };
+    return labels[invoice?.status] || 'Ожидает';
+}
+
+function renderParentContext() {
+    const container = document.getElementById('parent-content');
+    if (!container || !parentData) return;
+    const studentsHtml = parentData.students.map(student => {
+        const invoice = student.invoice;
+        const schedules = student.schedules.length
+            ? student.schedules.map(item => `
+                <div class="family-row">
+                    <span>${escapeHtml(formatDays(item.days))} · ${escapeHtml(formatTimes(JSON.stringify(item.times)))}</span>
+                    <small>${escapeHtml(item.location)}${item.group ? ` · ${escapeHtml(item.group)}` : ''}</small>
+                </div>
+            `).join('')
+            : '<p class="muted-copy">Расписание назначит тренер.</p>';
+        const makeups = student.makeups.length
+            ? student.makeups.map(item => `
+                <div class="makeup-item">
+                    <div>
+                        <strong>До ${formatDate(item.expires_at)}</strong>
+                        <small>${item.status === 'scheduled'
+                            ? `Назначено: ${formatDate(item.scheduled_date)} ${escapeHtml(item.scheduled_time || '')}`
+                            : item.status === 'requested' ? 'Ожидает подтверждения' : 'Можно запросить день'}</small>
+                        ${item.rejection_reason ? `<small class="danger-copy">${escapeHtml(item.rejection_reason)}</small>` : ''}
+                    </div>
+                    ${item.status === 'available' ? `<button type="button" class="btn-secondary compact-btn" onclick="requestMakeupDate(${item.id})">Выбрать день</button>` : ''}
+                </div>
+            `).join('')
+            : '<p class="muted-copy">Активных отработок нет.</p>';
+        const paymentActions = invoice.stored_status === 'paid'
+            ? ''
+            : invoice.stored_status === 'reported'
+                ? '<p class="status-note success-copy">Оплата отправлена на проверку.</p>'
+                : invoice.stored_status === 'awaiting_receipt'
+                    ? '<p class="status-note warning-copy">Пришлите чек фотографией в чат с ботом.</p>'
+                    : `
+                        <div class="family-actions">
+                            <button type="button" class="btn-primary" onclick="reportParentPayment(${invoice.id}, 'online')">Оплатил онлайн</button>
+                            <button type="button" class="btn-secondary" onclick="reportParentPayment(${invoice.id}, 'cash')">Оплатил наличными</button>
+                        </div>
+                    `;
+        return `
+            <article class="family-student-card">
+                <div class="family-card-head">
+                    <div>
+                        <span class="page-eyebrow">${escapeHtml(student.coach_name || 'Тренер назначается')}</span>
+                        <h3>${escapeHtml(student.name)}</h3>
+                    </div>
+                    <span class="balance-pill">${student.lessons_remaining} / ${student.lessons_count}</span>
+                </div>
+
+                <section class="family-panel">
+                    <div class="section-heading-row">
+                        <h4>Расписание</h4>
+                        <button type="button" class="section-link" onclick="requestParentSchedule(${student.id})">Изменить</button>
+                    </div>
+                    ${schedules}
+                    <label class="family-toggle">
+                        <span><strong>Напоминание за сутки</strong><small>Ежедневно в 18:00, только перед тренировкой</small></span>
+                        <input type="checkbox" ${student.training_reminders_enabled ? 'checked' : ''}
+                            onchange="toggleParentReminders(${student.id}, this.checked)">
+                    </label>
+                </section>
+
+                <section class="family-panel invoice-panel ${invoice.status === 'overdue' ? 'is-overdue' : ''}">
+                    <div class="family-card-head">
+                        <div>
+                            <span class="page-eyebrow">Абонемент ${formatMonthLabel(String(invoice.period_start || '').slice(0, 7))}</span>
+                            <h4>${escapeHtml(invoice.tariff?.label || 'Выберите тариф')}</h4>
+                        </div>
+                        <span class="status-chip status-${escapeHtml(invoice.status)}">${parentPaymentStatus(invoice)}</span>
+                    </div>
+                    <div class="money-breakdown">
+                        <span>Стоимость <strong>${invoice.base_amount} Br</strong></span>
+                        <span>Доплата <strong>${invoice.late_fee_amount} Br</strong></span>
+                        <span class="money-total">Итого <strong>${invoice.amount} Br</strong></span>
+                    </div>
+                    ${invoice.rejection_reason ? `<p class="danger-copy">Причина: ${escapeHtml(invoice.rejection_reason)}</p>` : ''}
+                    ${!['reported', 'awaiting_receipt', 'paid'].includes(invoice.stored_status) ? `
+                        <label class="inline-select">
+                            <span>Тариф до 5 числа</span>
+                            <select onchange="chooseParentTariff(${student.id}, this.value)">
+                                ${Object.entries(parentData.tariffs).map(([code, tariff]) =>
+                                    `<option value="${code}" ${code === invoice.tariff_code ? 'selected' : ''}>${escapeHtml(tariff.label)} · ${tariff.price} Br</option>`
+                                ).join('')}
+                            </select>
+                        </label>
+                    ` : ''}
+                    ${paymentActions}
+                </section>
+
+                <section class="family-panel">
+                    <div class="section-heading-row">
+                        <h4>Отработки</h4>
+                        <span class="count-badge">${student.makeups.length}</span>
+                    </div>
+                    ${makeups}
+                </section>
+            </article>
+        `;
+    }).join('');
+
+    const pendingRegistrations = parentData.registration_requests.filter(item => item.status !== 'approved');
+    container.innerHTML = `
+        ${pendingRegistrations.map(item => `
+            <div class="family-status-card ${item.status === 'rejected' ? 'is-rejected' : ''}">
+                <strong>${escapeHtml(item.child_name)}</strong>
+                <span>${item.status === 'pending' ? 'Анкета ожидает подтверждения тренера' : 'Анкета отклонена'}</span>
+                ${item.rejection_reason ? `<small>Причина: ${escapeHtml(item.rejection_reason)}</small>` : ''}
+            </div>
+        `).join('')}
+        ${studentsHtml || (pendingRegistrations.length ? '' : `
+            <div class="family-status-card">
+                <strong>Пока нет детей в кабинете</strong>
+                <span>Откройте персональную ссылку-приглашение от тренера.</span>
+            </div>
+        `)}
+        <p class="privacy-note">Обязательные сообщения об оплате, отменах и решениях тренера остаются включёнными.</p>
+    `;
+}
+
+async function toggleParentReminders(studentId, enabled) {
+    try {
+        await apiPost('/api/parent/reminders', {student_id: studentId, enabled});
+        showNotification(enabled ? 'Напоминания включены' : 'Напоминания отключены');
+    } catch (error) {
+        showNotification(error.message, 'error');
+        await loadParentContext();
+    }
+}
+
+async function chooseParentTariff(studentId, tariffCode) {
+    try {
+        await apiPost('/api/parent/tariff', {student_id: studentId, tariff_code: tariffCode});
+        showNotification('Тариф сохранён');
+        await loadParentContext();
+    } catch (error) {
+        showNotification(error.message, 'error');
+        await loadParentContext();
+    }
+}
+
+async function reportParentPayment(paymentId, method) {
+    try {
+        const result = await apiPost(`/api/parent/payments/${paymentId}/report`, {
+            payment_method: method
+        });
+        showNotification(result.message);
+        await loadParentContext();
+    } catch (error) {
+        showNotification(error.message, 'error');
+    }
+}
+
+function parseSimpleSchedule(value) {
+    const weekdayMap = {
+        'пн': '0', 'понедельник': '0',
+        'вт': '1', 'вторник': '1',
+        'ср': '2', 'среда': '2',
+        'чт': '3', 'четверг': '3',
+        'пт': '4', 'пятница': '4',
+        'сб': '5', 'суббота': '5',
+        'вс': '6', 'воскресенье': '6'
+    };
+    return String(value || '').split(',').map(part => {
+        const match = part.trim().toLowerCase().match(/^([а-яё]+)\s+(\d{1,2}:\d{2})$/i);
+        if (!match || weekdayMap[match[1]] === undefined) return null;
+        const day = weekdayMap[match[1]];
+        return {days: day, times: {[day]: match[2]}, duration: 90};
+    }).filter(Boolean);
+}
+
+async function requestParentSchedule(studentId) {
+    const value = window.prompt('Новое расписание, например: Пн 18:00, Ср 18:00');
+    if (!value) return;
+    const proposedSchedule = parseSimpleSchedule(value);
+    if (!proposedSchedule.length) {
+        showNotification('Формат: Пн 18:00, Ср 18:00', 'error');
+        return;
+    }
+    try {
+        await apiPost('/api/parent/schedule-request', {
+            student_id: studentId,
+            proposed_schedule: proposedSchedule
+        });
+        showNotification('Запрос отправлен тренерам');
+        await loadParentContext();
+    } catch (error) {
+        showNotification(error.message, 'error');
+    }
+}
+
+async function requestMakeupDate(makeupId) {
+    const requestedDate = window.prompt('Желаемая дата отработки в формате ГГГГ-ММ-ДД');
+    if (!requestedDate) return;
+    try {
+        await apiPost(`/api/parent/makeups/${makeupId}/request`, {
+            requested_date: requestedDate
+        });
+        showNotification('Запрос на отработку отправлен');
+        await loadParentContext();
+    } catch (error) {
+        showNotification(error.message, 'error');
+    }
+}
+
+async function createParentInvitation() {
+    const childName = window.prompt('Предварительное ФИО ребёнка');
+    if (!childName?.trim()) return;
+    try {
+        const result = await apiPost('/api/admin/invitations/create', {child_name: childName.trim()});
+        try {
+            await navigator.clipboard.writeText(result.invite_url);
+            showNotification('Ссылка приглашения скопирована');
+        } catch {
+            window.prompt('Скопируйте персональную ссылку', result.invite_url);
+        }
+        if (currentScreen === 'requests') await loadAdminRequests();
+    } catch (error) {
+        showNotification(error.message || 'Не удалось создать приглашение', 'error');
+    }
+}
+
+async function loadAdminRequests() {
+    const container = document.getElementById('requests-content');
+    if (!container) return;
+    renderScreenState(container, 'Собираем запросы…', {icon: '◎'});
+    try {
+        const [requests, invitations] = await Promise.all([
+            apiPost('/api/admin/requests'),
+            apiPost('/api/admin/invitations')
+        ]);
+        renderAdminRequests(requests, invitations);
+    } catch (error) {
+        renderScreenState(container, error.message || 'Не удалось загрузить запросы', {
+            retry: 'loadAdminRequests()'
+        });
+    }
+}
+
+function describeProposedSchedule(items) {
+    return (items || []).map(item =>
+        `${formatDays(String(item.days || ''))} · ${formatTimes(typeof item.times === 'string' ? item.times : JSON.stringify(item.times || {}))}`
+    ).join('; ') || 'Не указано';
+}
+
+function syncSchoolResourceLocations() {
+    const coachId = document.getElementById('school-resource-coach')?.value;
+    const select = document.getElementById('school-resource-location');
+    if (!select) return;
+    select.value = '';
+    [...select.options].forEach(option => {
+        if (!option.dataset.coachId) return;
+        const matches = option.dataset.coachId === coachId;
+        option.disabled = !matches;
+        option.hidden = !matches;
+    });
+}
+
+async function updateCoachRoles(coachId) {
+    const isAdmin = document.getElementById(`coach-admin-${coachId}`)?.checked || false;
+    const isManager = document.getElementById(`coach-manager-${coachId}`)?.checked || false;
+    try {
+        await apiPost(`/api/admin/coaches/${coachId}/roles`, {
+            is_admin: isAdmin,
+            is_manager: isManager
+        });
+        showNotification('Права тренера обновлены');
+        await loadAdminRequests();
+    } catch (error) {
+        showNotification(error.message, 'error');
+    }
+}
+
+async function createSchoolLocation() {
+    const name = window.prompt('Название нового зала');
+    if (!name?.trim()) return;
+    const address = window.prompt('Адрес зала (необязательно)') || '';
+    const coachId = Number(document.getElementById('school-resource-coach')?.value || currentCoach.coach_id);
+    try {
+        await apiPost('/api/admin/locations/create', {
+            name: name.trim(),
+            address: address.trim(),
+            coach_id: coachId
+        });
+        showNotification('Зал добавлен');
+        await loadAdminRequests();
+    } catch (error) {
+        showNotification(error.message, 'error');
+    }
+}
+
+async function createSchoolGroup() {
+    const name = window.prompt('Название новой группы');
+    if (!name?.trim()) return;
+    const coachId = Number(document.getElementById('school-resource-coach')?.value || currentCoach.coach_id);
+    const locationId = Number(document.getElementById('school-resource-location')?.value) || null;
+    try {
+        await apiPost('/api/training-groups/create', {
+            name: name.trim(),
+            coach_id: coachId,
+            location_id: locationId
+        });
+        showNotification('Группа добавлена');
+        await loadAdminRequests();
+    } catch (error) {
+        showNotification(error.message, 'error');
+    }
+}
+
+async function cancelSchoolTraining() {
+    const coachId = Number(document.getElementById('school-resource-coach')?.value || currentCoach.coach_id);
+    const trainingDate = window.prompt('Дата отмены ГГГГ-ММ-ДД', new Date().toISOString().slice(0, 10));
+    if (!trainingDate) return;
+    const trainingTime = window.prompt('Время группы, например 18:00. Оставьте пустым, чтобы отменить все тренировки дня.', '') || '';
+    const reason = window.prompt('Причина отмены, которую увидят родители')?.trim();
+    if (!reason) return;
+    if (!window.confirm('Отменить тренировку? Занятия не спишутся, каждому ребёнку добавится отработка.')) return;
+    try {
+        const result = await apiPost('/api/skip-lesson', {
+            coach_id: coachId,
+            date: trainingDate,
+            time: trainingTime,
+            reason
+        });
+        showNotification(`Отменено слотов: ${result.skipped}`);
+    } catch (error) {
+        showNotification(error.message, 'error');
+    }
+}
+
+function renderAdminRequests(requests, invitations) {
+    const container = document.getElementById('requests-content');
+    if (!container) return;
+    const total = requests.registrations.length + requests.schedules.length + requests.makeups.length + requests.payments.length;
+    const resources = requests.resources || {coaches: [], locations: [], groups: []};
+    const coachOptions = resources.coaches.map(coach =>
+        `<option value="${coach.id}" ${coach.id === currentCoach?.coach_id ? 'selected' : ''}>${escapeHtml(coach.name || 'Тренер')}</option>`
+    ).join('');
+    const locationOptions = resources.locations.map(item =>
+        `<option value="${item.id}" data-coach-id="${item.coach_id}" ${item.coach_id !== currentCoach?.coach_id ? 'disabled hidden' : ''}>${escapeHtml(item.name)}</option>`
+    ).join('');
+    const groupOptions = resources.groups.map(item =>
+        `<option value="${item.id}" data-coach-id="${item.coach_id}" ${item.coach_id !== currentCoach?.coach_id ? 'disabled hidden' : ''}>${escapeHtml(item.name)}</option>`
+    ).join('');
+    const sections = [];
+
+    sections.push(`
+        <section class="request-section">
+            <div class="section-heading-row"><h3>Структура школы</h3><span class="count-badge">${resources.locations.length} / ${resources.groups.length}</span></div>
+            <p class="muted-copy">Залы и группы можно менять без создания новых разделов или ботов.</p>
+            <div class="role-list">
+                ${resources.coaches.map(coach => `
+                    <div class="role-row">
+                        <strong>${escapeHtml(coach.name || 'Тренер')}</strong>
+                        <label><input id="coach-admin-${coach.id}" type="checkbox" ${coach.is_admin ? 'checked' : ''} ${coach.is_configured_owner ? 'disabled' : ''}> Админ</label>
+                        <label><input id="coach-manager-${coach.id}" type="checkbox" ${coach.is_manager ? 'checked' : ''} ${coach.is_configured_owner ? 'disabled' : ''}> Руководитель</label>
+                        ${coach.is_configured_owner ? '<small>Главный</small>' : `<button class="btn-secondary compact-btn" onclick="updateCoachRoles(${coach.id})">Сохранить</button>`}
+                    </div>
+                `).join('')}
+            </div>
+            <label class="inline-select"><span>Тренер</span><select id="school-resource-coach" onchange="syncSchoolResourceLocations()">${coachOptions}</select></label>
+            <label class="inline-select"><span>Зал для новой группы</span><select id="school-resource-location"><option value="">Без зала</option>${locationOptions}</select></label>
+            <div class="family-actions">
+                <button class="btn-secondary" onclick="createSchoolLocation()">+ Новый зал</button>
+                <button class="btn-primary" onclick="createSchoolGroup()">+ Новая группа</button>
+                <button class="btn-secondary danger-action" onclick="cancelSchoolTraining()">Отменить тренировку</button>
+            </div>
+        </section>
+    `);
+
+    sections.push(`
+        <section class="request-section">
+            <div class="section-heading-row"><h3>Новые регистрации</h3><span class="count-badge">${requests.registrations.length}</span></div>
+            ${requests.registrations.map(item => `
+                <article class="request-card">
+                    <span class="page-eyebrow">Родитель: ${escapeHtml(item.parent_name)} · ${escapeHtml(item.parent_phone)}</span>
+                    <h4>${escapeHtml(item.child_name)}</h4>
+                    <p>${formatDate(item.birthday)}${item.child_phone ? ` · ${escapeHtml(item.child_phone)}` : ''}</p>
+                    <small>${escapeHtml(describeProposedSchedule(item.proposed_schedule))}</small>
+                    <label class="inline-select"><span>Назначить тренера</span><select id="registration-coach-${item.id}" onchange="syncRegistrationResources(${item.id})">${coachOptions}</select></label>
+                    <label class="inline-select"><span>Зал</span><select id="registration-location-${item.id}"><option value="">Назначить позже</option>${locationOptions}</select></label>
+                    <label class="inline-select"><span>Группа</span><select id="registration-group-${item.id}"><option value="">Без группы</option>${groupOptions}</select></label>
+                    <label class="inline-select"><span>Начало занятий</span><input id="registration-start-${item.id}" type="date" value="${new Date().toISOString().slice(0, 10)}"></label>
+                    <div class="family-actions">
+                        <button class="btn-primary" onclick="reviewRegistration(${item.id}, 'approve')">Подтвердить</button>
+                        <button class="btn-secondary danger-action" onclick="reviewRegistration(${item.id}, 'reject')">Отклонить</button>
+                    </div>
+                </article>
+            `).join('') || '<p class="muted-copy">Новых анкет нет.</p>'}
+        </section>
+    `);
+    sections.push(`
+        <section class="request-section">
+            <div class="section-heading-row"><h3>Расписание</h3><span class="count-badge">${requests.schedules.length}</span></div>
+            ${requests.schedules.map(item => `
+                <article class="request-card">
+                    <h4>${escapeHtml(item.student_name)}</h4>
+                    <p>${escapeHtml(describeProposedSchedule(item.proposed_schedule))}</p>
+                    <div class="family-actions">
+                        <button class="btn-primary" onclick="reviewScheduleRequest(${item.id}, 'approve')">Подтвердить</button>
+                        <button class="btn-secondary danger-action" onclick="reviewScheduleRequest(${item.id}, 'reject')">Отклонить</button>
+                    </div>
+                </article>
+            `).join('') || '<p class="muted-copy">Запросов на изменение нет.</p>'}
+        </section>
+    `);
+    sections.push(`
+        <section class="request-section">
+            <div class="section-heading-row"><h3>Отработки</h3><span class="count-badge">${requests.makeups.length}</span></div>
+            ${requests.makeups.map(item => `
+                <article class="request-card">
+                    <h4>${escapeHtml(item.student_name)}</h4>
+                    <p>Желаемая дата: ${formatDate(item.requested_date)} · право до ${formatDate(item.expires_at)}</p>
+                    <label class="inline-select"><span>Зал</span><select id="makeup-location-${item.id}"><option value="">Без зала</option>${resources.locations.filter(location => location.coach_id === item.coach_id).map(location => `<option value="${location.id}">${escapeHtml(location.name)}</option>`).join('')}</select></label>
+                    <label class="inline-select"><span>Группа</span><select id="makeup-group-${item.id}"><option value="">Без группы</option>${resources.groups.filter(group => group.coach_id === item.coach_id).map(group => `<option value="${group.id}">${escapeHtml(group.name)}</option>`).join('')}</select></label>
+                    <div class="family-actions">
+                        <button class="btn-primary" onclick="reviewMakeupRequest(${item.id}, 'approve', '${escapeHtml(item.requested_date || '')}')">Назначить</button>
+                        <button class="btn-secondary danger-action" onclick="reviewMakeupRequest(${item.id}, 'reject')">Отклонить</button>
+                    </div>
+                </article>
+            `).join('') || '<p class="muted-copy">Запросов на отработку нет.</p>'}
+        </section>
+    `);
+    sections.push(`
+        <section class="request-section">
+            <div class="section-heading-row"><h3>Оплаты и чеки</h3><span class="count-badge">${requests.payments.length}</span></div>
+            ${requests.payments.map(item => `
+                <article class="request-card">
+                    <span class="page-eyebrow">${item.method === 'cash' ? 'Наличные' : 'Онлайн'}${item.receipt_attached ? ' · чек прикреплён в чате' : ''}</span>
+                    <h4>${escapeHtml(item.student_name)}</h4>
+                    <p>${item.amount} Br</p>
+                    ${item.method === 'cash' ? `<label class="inline-select"><span>Кто принял наличные</span><select id="payment-receiver-${item.id}">${coachOptions}</select></label>` : ''}
+                    <div class="family-actions">
+                        <button class="btn-primary" onclick="reviewParentPayment(${item.id}, 'approve')">Подтвердить</button>
+                        <button class="btn-secondary danger-action" onclick="reviewParentPayment(${item.id}, 'reject')">Отклонить</button>
+                    </div>
+                </article>
+            `).join('') || '<p class="muted-copy">Оплат на проверке нет.</p>'}
+        </section>
+    `);
+    sections.push(`
+        <section class="request-section invite-history">
+            <div class="section-heading-row"><h3>Приглашения</h3><span class="count-badge">${invitations.length}</span></div>
+            ${invitations.slice(0, 10).map(item => `
+                <article class="invite-row">
+                    <div><strong>${escapeHtml(item.child_name)}</strong><small>${item.status === 'active' ? `до ${formatDate(item.expires_at)}` : item.status}</small></div>
+                    ${item.status === 'active' ? `<button class="btn-secondary compact-btn" onclick="copyInvitation('${escapeHtml(item.invite_url)}')">Копировать</button>` : ''}
+                </article>
+            `).join('') || '<p class="muted-copy">Приглашений пока нет.</p>'}
+        </section>
+    `);
+    container.innerHTML = `
+        <div class="request-summary"><strong>${total}</strong><span>запросов требуют решения</span></div>
+        ${sections.join('')}
+    `;
+}
+
+async function copyInvitation(url) {
+    try {
+        await navigator.clipboard.writeText(url);
+        showNotification('Ссылка скопирована');
+    } catch {
+        window.prompt('Скопируйте ссылку', url);
+    }
+}
+
+function rejectionReason() {
+    return window.prompt('Укажите причину — родитель увидит её в кабинете')?.trim() || '';
+}
+
+function syncRegistrationResources(requestId) {
+    const coachId = document.getElementById(`registration-coach-${requestId}`)?.value;
+    ['location', 'group'].forEach(type => {
+        const select = document.getElementById(`registration-${type}-${requestId}`);
+        if (!select) return;
+        select.value = '';
+        [...select.options].forEach(option => {
+            if (!option.dataset.coachId) return;
+            const matches = option.dataset.coachId === coachId;
+            option.disabled = !matches;
+            option.hidden = !matches;
+        });
+    });
+}
+
+async function reviewRegistration(requestId, decision) {
+    const payload = {decision};
+    if (decision === 'approve') {
+        payload.coach_id = Number(document.getElementById(`registration-coach-${requestId}`)?.value || currentCoach.coach_id);
+        payload.location_id = Number(document.getElementById(`registration-location-${requestId}`)?.value) || null;
+        payload.group_id = Number(document.getElementById(`registration-group-${requestId}`)?.value) || null;
+        payload.training_start_date = document.getElementById(`registration-start-${requestId}`)?.value;
+    } else {
+        payload.reason = rejectionReason();
+        if (!payload.reason) return;
+    }
+    try {
+        await apiPost(`/api/admin/registrations/${requestId}/review`, payload);
+        showNotification(decision === 'approve' ? 'Ребёнок зарегистрирован' : 'Отказ отправлен родителю');
+        await loadAdminRequests();
+    } catch (error) {
+        showNotification(error.message, 'error');
+    }
+}
+
+async function reviewScheduleRequest(requestId, decision) {
+    const payload = {decision};
+    if (decision === 'reject') {
+        payload.reason = rejectionReason();
+        if (!payload.reason) return;
+    }
+    try {
+        await apiPost(`/api/admin/schedule-requests/${requestId}/review`, payload);
+        showNotification('Решение сохранено');
+        await loadAdminRequests();
+    } catch (error) {
+        showNotification(error.message, 'error');
+    }
+}
+
+async function reviewMakeupRequest(requestId, decision, proposedDate = '') {
+    const payload = {decision};
+    if (decision === 'approve') {
+        payload.scheduled_date = window.prompt('Дата отработки ГГГГ-ММ-ДД', proposedDate) || '';
+        payload.scheduled_time = window.prompt('Время', '18:00') || '';
+        payload.location_id = Number(document.getElementById(`makeup-location-${requestId}`)?.value) || null;
+        payload.group_id = Number(document.getElementById(`makeup-group-${requestId}`)?.value) || null;
+        if (!payload.scheduled_date || !payload.scheduled_time) return;
+    } else {
+        payload.reason = rejectionReason();
+        if (!payload.reason) return;
+    }
+    try {
+        await apiPost(`/api/admin/makeups/${requestId}/review`, payload);
+        showNotification('Решение по отработке отправлено');
+        await loadAdminRequests();
+    } catch (error) {
+        showNotification(error.message, 'error');
+    }
+}
+
+async function reviewParentPayment(paymentId, decision) {
+    const payload = {decision};
+    const receiverSelect = document.getElementById(`payment-receiver-${paymentId}`);
+    if (receiverSelect) payload.received_by_coach_id = Number(receiverSelect.value);
+    if (decision === 'reject') {
+        payload.reason = rejectionReason();
+        if (!payload.reason) return;
+    }
+    try {
+        await apiPost(`/api/admin/payments/${paymentId}/review`, payload);
+        showNotification(decision === 'approve' ? 'Оплата подтверждена' : 'Отказ отправлен родителю');
+        await loadAdminRequests();
+    } catch (error) {
+        showNotification(error.message, 'error');
+    }
 }
 

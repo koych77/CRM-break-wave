@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, Date, ForeignKey, Text, BigInteger
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, Date, ForeignKey, Text, BigInteger, UniqueConstraint
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from app.database import Base
@@ -13,13 +13,21 @@ class Coach(Base):
     username = Column(String(200))
     phone = Column(String(50))
     is_active = Column(Boolean, default=True)
+    is_admin = Column(Boolean, default=False)
+    is_manager = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     
     students = relationship("Student", back_populates="coach", cascade="all, delete-orphan")
     lessons = relationship("Lesson", back_populates="coach", cascade="all, delete-orphan")
-    payments = relationship("Payment", back_populates="coach", cascade="all, delete-orphan")
+    payments = relationship(
+        "Payment",
+        back_populates="coach",
+        cascade="all, delete-orphan",
+        foreign_keys="Payment.coach_id",
+    )
     notifications = relationship("Notification", back_populates="coach", cascade="all, delete-orphan")
     locations = relationship("Location", back_populates="coach", cascade="all, delete-orphan")
+    groups = relationship("TrainingGroup", back_populates="coach", cascade="all, delete-orphan")
 
 
 class Location(Base):
@@ -36,6 +44,36 @@ class Location(Base):
     coach = relationship("Coach", back_populates="locations")
 
 
+class TrainingGroup(Base):
+    """A mutable training group assigned to a trainer and, optionally, a hall."""
+    __tablename__ = "training_groups"
+
+    id = Column(Integer, primary_key=True)
+    coach_id = Column(Integer, ForeignKey("coaches.id"), nullable=False)
+    location_id = Column(Integer, ForeignKey("locations.id"), nullable=True)
+    name = Column(String(200), nullable=False)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    coach = relationship("Coach", back_populates="groups")
+    location = relationship("Location")
+
+
+class ParentAccount(Base):
+    """Telegram account of the only registering parent for one or more children."""
+    __tablename__ = "parent_accounts"
+
+    id = Column(Integer, primary_key=True)
+    telegram_id = Column(BigInteger, unique=True, nullable=False)
+    full_name = Column(String(200), nullable=False)
+    phone = Column(String(50), nullable=False)
+    training_reminders_enabled = Column(Boolean, default=True)
+    bot_blocked_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    students = relationship("Student", back_populates="parent")
+
+
 class StudentSchedule(Base):
     """Student can have multiple locations with different schedules."""
     __tablename__ = "student_schedules"
@@ -43,6 +81,7 @@ class StudentSchedule(Base):
     id = Column(Integer, primary_key=True)
     student_id = Column(Integer, ForeignKey("students.id"), nullable=False)
     location_id = Column(Integer, ForeignKey("locations.id"), nullable=True)  # Allow null until location is selected
+    group_id = Column(Integer, ForeignKey("training_groups.id"), nullable=True)
     days = Column(String(100), default="1,3")  # Days of week (0=Mon, 6=Sun)
     times = Column(String(500), default='{"1": "18:00", "3": "18:00"}')  # JSON: {"day": "time"}
     duration = Column(Integer, default=90)  # Minutes
@@ -51,6 +90,7 @@ class StudentSchedule(Base):
     
     student = relationship("Student", back_populates="schedules")
     location = relationship("Location")
+    group = relationship("TrainingGroup")
     
     def get_time_for_day(self, day_of_week):
         """Get lesson time for specific day at this location."""
@@ -82,6 +122,7 @@ class Student(Base):
     
     id = Column(Integer, primary_key=True)
     coach_id = Column(Integer, ForeignKey("coaches.id"), nullable=False)
+    parent_id = Column(Integer, ForeignKey("parent_accounts.id"), nullable=True)
     name = Column(String(200), nullable=False)
     nickname = Column(String(100))
     phone = Column(String(50))
@@ -104,11 +145,15 @@ class Student(Base):
     is_unlimited = Column(Boolean, default=False)  # Unlimited subscription (month-based)
     subscription_start = Column(Date, nullable=True)
     subscription_end = Column(Date, nullable=True)
+    training_start_date = Column(Date, nullable=True)
     
     is_active = Column(Boolean, default=True)
+    training_reminders_enabled = Column(Boolean, default=True)
+    deleted_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     
     coach = relationship("Coach", back_populates="students")
+    parent = relationship("ParentAccount", back_populates="students")
     location_ref = relationship("Location")
     lessons = relationship("Lesson", back_populates="student", cascade="all, delete-orphan")
     attendance_records = relationship("Attendance", back_populates="student", cascade="all, delete-orphan")
@@ -246,6 +291,9 @@ class Attendance(Base):
     location_id = Column(Integer, ForeignKey("locations.id"), nullable=True)
     status = Column(String(20), default="present")
     is_extra = Column(Boolean, default=False)
+    source = Column(String(20), default="scheduled")  # scheduled, extra, makeup, coach_cancelled
+    makeup_credit_id = Column(Integer, ForeignKey("makeup_credits.id"), nullable=True)
+    deducted = Column(Boolean, default=False)
     attendance_date = Column(Date, nullable=False)
     attendance_time = Column(String(10))
     notes = Column(String(500))
@@ -265,6 +313,16 @@ class Payment(Base):
     amount = Column(Integer, nullable=False)
     lessons_count = Column(Integer, default=8)
     status = Column(String(20), default="pending")  # paid, pending, overdue
+    tariff_code = Column(String(20), nullable=True)
+    base_amount = Column(Integer, nullable=True)
+    late_fee_amount = Column(Integer, default=0)
+    due_date = Column(Date, nullable=True)
+    payment_method = Column(String(20), nullable=True)  # online, cash
+    receipt_file_id = Column(String(500), nullable=True)
+    reported_at = Column(DateTime, nullable=True)
+    confirmed_by_coach_id = Column(Integer, ForeignKey("coaches.id"), nullable=True)
+    cash_received_by_coach_id = Column(Integer, ForeignKey("coaches.id"), nullable=True)
+    rejection_reason = Column(String(500), nullable=True)
     period_start = Column(Date)
     period_end = Column(Date)
     is_unlimited = Column(Boolean, default=False)
@@ -272,8 +330,113 @@ class Payment(Base):
     notes = Column(String(500))
     created_at = Column(DateTime, default=datetime.utcnow)
     
-    coach = relationship("Coach", back_populates="payments")
+    coach = relationship("Coach", back_populates="payments", foreign_keys=[coach_id])
     student = relationship("Student", back_populates="payments")
+
+
+class RegistrationInvite(Base):
+    """One-time, seven-day invitation created by an administrator."""
+    __tablename__ = "registration_invites"
+
+    id = Column(Integer, primary_key=True)
+    token = Column(String(100), unique=True, nullable=False)
+    preliminary_child_name = Column(String(200), nullable=False)
+    created_by_coach_id = Column(Integer, ForeignKey("coaches.id"), nullable=False)
+    expires_at = Column(DateTime, nullable=False)
+    used_at = Column(DateTime, nullable=True)
+    status = Column(String(20), default="active")  # active, used, cancelled
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class RegistrationRequest(Base):
+    """Parent-submitted child registration waiting for administrator approval."""
+    __tablename__ = "registration_requests"
+
+    id = Column(Integer, primary_key=True)
+    invite_id = Column(Integer, ForeignKey("registration_invites.id"), unique=True, nullable=False)
+    parent_id = Column(Integer, ForeignKey("parent_accounts.id"), nullable=False)
+    student_id = Column(Integer, ForeignKey("students.id"), nullable=True)
+    child_name = Column(String(200), nullable=False)
+    child_birthday = Column(Date, nullable=False)
+    child_phone = Column(String(50), nullable=True)
+    proposed_schedule = Column(Text, nullable=False)
+    status = Column(String(20), default="pending")
+    rejection_reason = Column(String(500), nullable=True)
+    reviewed_by_coach_id = Column(Integer, ForeignKey("coaches.id"), nullable=True)
+    reviewed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class ScheduleRequest(Base):
+    """A parent request to change the agreed schedule."""
+    __tablename__ = "schedule_requests"
+
+    id = Column(Integer, primary_key=True)
+    student_id = Column(Integer, ForeignKey("students.id"), nullable=False)
+    parent_id = Column(Integer, ForeignKey("parent_accounts.id"), nullable=False)
+    proposed_schedule = Column(Text, nullable=False)
+    status = Column(String(20), default="pending")
+    rejection_reason = Column(String(500), nullable=True)
+    reviewed_by_coach_id = Column(Integer, ForeignKey("coaches.id"), nullable=True)
+    reviewed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class MakeupCredit(Base):
+    """Right to one makeup training after an absence or trainer cancellation."""
+    __tablename__ = "makeup_credits"
+
+    id = Column(Integer, primary_key=True)
+    student_id = Column(Integer, ForeignKey("students.id"), nullable=False)
+    source_attendance_id = Column(Integer, ForeignKey("attendance.id"), nullable=True)
+    source_date = Column(Date, nullable=False)
+    source_type = Column(String(30), default="absence")
+    expires_at = Column(Date, nullable=False)
+    status = Column(String(20), default="available")
+    requested_date = Column(Date, nullable=True)
+    scheduled_date = Column(Date, nullable=True)
+    scheduled_time = Column(String(10), nullable=True)
+    location_id = Column(Integer, ForeignKey("locations.id"), nullable=True)
+    group_id = Column(Integer, ForeignKey("training_groups.id"), nullable=True)
+    approved_by_coach_id = Column(Integer, ForeignKey("coaches.id"), nullable=True)
+    rejection_reason = Column(String(500), nullable=True)
+    used_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class TrainingResponse(Base):
+    """Parent response to the day-before training reminder."""
+    __tablename__ = "training_responses"
+    __table_args__ = (
+        UniqueConstraint(
+            "student_id",
+            "training_date",
+            "training_time",
+            "location_id",
+            name="uq_training_response_slot",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True)
+    student_id = Column(Integer, ForeignKey("students.id"), nullable=False)
+    training_date = Column(Date, nullable=False)
+    training_time = Column(String(10), nullable=False)
+    location_id = Column(Integer, ForeignKey("locations.id"), nullable=True)
+    response = Column(String(20), nullable=False)  # attending, absent
+    responded_at = Column(DateTime, default=datetime.utcnow)
+
+
+class AuditLog(Base):
+    """Compact audit trail for sensitive CRM actions."""
+    __tablename__ = "audit_logs"
+
+    id = Column(Integer, primary_key=True)
+    actor_telegram_id = Column(BigInteger, nullable=True)
+    action = Column(String(100), nullable=False)
+    entity_type = Column(String(50), nullable=False)
+    entity_id = Column(Integer, nullable=True)
+    details = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
 
 
 class AdminUser(Base):
@@ -294,7 +457,10 @@ class Notification(Base):
     student_id = Column(Integer, ForeignKey("students.id"), nullable=True)
     type = Column(String(50), nullable=False)  # payment_due, subscription_ending, lesson_reminder, daily_digest
     message = Column(Text, nullable=False)
+    recipient_telegram_id = Column(BigInteger, nullable=True)
     is_read = Column(Boolean, default=False)
+    sent_at = Column(DateTime, nullable=True)
+    delivery_error = Column(String(500), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     
     coach = relationship("Coach", back_populates="notifications")

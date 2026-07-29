@@ -9,15 +9,40 @@ from aiogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton,
     WebAppInfo, CallbackQuery, Message
 )
-from sqlalchemy import select, and_
+from aiogram.exceptions import TelegramForbiddenError
+from sqlalchemy import select, and_, desc, or_, func
 from sqlalchemy.orm import selectinload
 from datetime import datetime, date, timedelta
 from zoneinfo import ZoneInfo
 from app.database import async_session
 
 BELARUS_TZ = ZoneInfo('Europe/Minsk')
-from app.models import Coach, Student, Lesson, Attendance, Payment, AdminUser, StudentSchedule, Notification
+from app.models import (
+    Coach,
+    Student,
+    Lesson,
+    Attendance,
+    Payment,
+    AdminUser,
+    StudentSchedule,
+    Notification,
+    ParentAccount,
+    RegistrationInvite,
+    RegistrationRequest,
+    ScheduleRequest,
+    TrainingResponse,
+    MakeupCredit,
+)
 from app.config import BOT_TOKEN, ADMIN_IDS, ADMIN_SECRET, WEBAPP_URL
+from app.family import (
+    ATTENDANCE_STATUSES,
+    TARIFFS,
+    is_payment_reminder_day,
+    month_bounds,
+    payment_due_date,
+    payment_total,
+    reconcile_attendance,
+)
 
 
 def get_remaining_lessons(student: Student) -> int:
@@ -32,6 +57,8 @@ LESSON_REMINDER_WINDOW_MINUTES = 10
 LESSON_REMINDER_POLL_SECONDS = 60
 DAILY_SUMMARY_HOUR = 10
 DAILY_SUMMARY_MINUTE = 0
+PARENT_REMINDER_HOUR = 18
+FAMILY_SCHEDULER_POLL_SECONDS = 60
 
 
 def build_lesson_reminder_log_key(reminder_date: date, time_str: str) -> str:
@@ -129,12 +156,29 @@ async def is_admin(user_id: int) -> bool:
         return True
     async with async_session() as s:
         result = await s.execute(select(AdminUser).where(AdminUser.telegram_id == user_id))
-        return result.scalar_one_or_none() is not None
+        if result.scalar_one_or_none() is not None:
+            return True
+        coach_result = await s.execute(
+            select(Coach).where(
+                Coach.telegram_id == user_id,
+                Coach.is_active == True,
+                Coach.is_admin == True,
+            )
+        )
+        return coach_result.scalar_one_or_none() is not None
 
 
 async def get_coach(user_id: int):
     async with async_session() as s:
         result = await s.execute(select(Coach).where(Coach.telegram_id == user_id))
+        return result.scalar_one_or_none()
+
+
+async def get_parent(user_id: int):
+    async with async_session() as s:
+        result = await s.execute(
+            select(ParentAccount).where(ParentAccount.telegram_id == user_id)
+        )
         return result.scalar_one_or_none()
 
 
@@ -156,6 +200,60 @@ async def register_coach(user_id: int, first_name: str = None, username: str = N
 async def cmd_start(message: Message):
     user_id = message.from_user.id
     logger.info(f"Start command from user: {user_id} ({message.from_user.first_name})")
+
+    start_parts = (message.text or "").split(maxsplit=1)
+    start_payload = start_parts[1].strip() if len(start_parts) > 1 else ""
+    if start_payload.startswith("invite_"):
+        invite_token = start_payload.removeprefix("invite_")
+        async with async_session() as s:
+            invite_result = await s.execute(
+                select(RegistrationInvite).where(
+                    RegistrationInvite.token == invite_token,
+                    RegistrationInvite.status == "active",
+                    RegistrationInvite.expires_at > datetime.utcnow(),
+                )
+            )
+            invite = invite_result.scalar_one_or_none()
+        if not invite:
+            await message.answer(
+                "Ссылка уже использована или истекла. Попросите тренера создать новое приглашение."
+            )
+            return
+        webapp_url = WEBAPP_URL or "https://your-app.up.railway.app"
+        await message.answer(
+            "👋 <b>Регистрация в Break Wave</b>\n\n"
+            f"Ребёнок: <b>{invite.preliminary_child_name}</b>\n"
+            "Заполните короткую анкету и согласованное с тренером расписание.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(
+                    text="Заполнить анкету",
+                    web_app=WebAppInfo(url=f"{webapp_url}/?invite={invite_token}"),
+                )
+            ]]),
+        )
+        return
+
+    parent = await get_parent(user_id)
+    if parent:
+        if parent.bot_blocked_at:
+            async with async_session() as s:
+                stored_parent = await s.get(ParentAccount, parent.id)
+                if stored_parent:
+                    stored_parent.bot_blocked_at = None
+                    await s.commit()
+        webapp_url = WEBAPP_URL or "https://your-app.up.railway.app"
+        await message.answer(
+            f"👋 {parent.full_name}, семейный кабинет Break Wave готов.\n\n"
+            "Здесь доступны расписание, абонементы, оплаты и отработки.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(
+                    text="Открыть семейный кабинет",
+                    web_app=WebAppInfo(url=f"{webapp_url}/"),
+                )
+            ]]),
+        )
+        return
     
     # Check roles
     is_admin_user = await is_admin(user_id)
@@ -388,6 +486,9 @@ async def cmd_help(message: Message):
         text += "👑 <b>Админ-команды:</b>\n"
         text += "/coaches - список тренеров\n"
         text += "/stats - общая статистика\n\n"
+        text += "/requests - заявки, расписание и чеки\n"
+        text += "/payments - оплаты и долги\n"
+        text += "/makeups - отработки\n\n"
     
     if coach or is_admin_user:
         text += "📱 <b>Тренерские команды:</b>\n"
@@ -406,6 +507,114 @@ async def cmd_help(message: Message):
     
     text += "/help - эта справка"
     await message.answer(text, parse_mode="HTML")
+
+
+async def _send_admin_mini_app_entry(message: Message, screen: str, title: str) -> None:
+    if not await is_admin(message.from_user.id):
+        await message.answer("⛔ Только для руководителей школы")
+        return
+    webapp_url = WEBAPP_URL or "https://your-app.up.railway.app"
+    await message.answer(
+        title,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(
+                text="Открыть в CRM",
+                web_app=WebAppInfo(url=f"{webapp_url}/?screen={screen}"),
+            )
+        ]]),
+    )
+
+
+@router.message(Command("requests"))
+async def cmd_requests(message: Message):
+    await _send_admin_mini_app_entry(message, "requests", "Запросы родителей, расписание и чеки")
+
+
+@router.message(Command("payments"))
+async def cmd_payments(message: Message):
+    await _send_admin_mini_app_entry(message, "finance", "Оплаты, просрочки и долги")
+
+
+@router.message(Command("makeups"))
+async def cmd_makeups(message: Message):
+    await _send_admin_mini_app_entry(message, "requests", "Запросы и сроки отработок")
+
+
+@router.message(F.photo | F.document)
+async def receive_parent_receipt(message: Message):
+    """Attach a receipt to the latest online payment waiting for a file."""
+    parent = await get_parent(message.from_user.id)
+    if not parent:
+        return
+
+    file_id = (
+        message.photo[-1].file_id
+        if message.photo
+        else (message.document.file_id if message.document else None)
+    )
+    if not file_id:
+        return
+
+    async with async_session() as s:
+        result = await s.execute(
+            select(Payment, Student)
+            .join(Student)
+            .where(
+                Student.parent_id == parent.id,
+                Payment.status == "awaiting_receipt",
+                Payment.payment_method == "online",
+            )
+            .order_by(desc(Payment.reported_at), desc(Payment.id))
+        )
+        row = result.first()
+        if not row:
+            await message.answer(
+                "Сейчас нет онлайн-оплаты, ожидающей чек. Сначала выберите оплату в Mini App."
+            )
+            return
+
+        payment, student = row
+        payment.receipt_file_id = file_id
+        payment.status = "reported"
+        payment.reported_at = datetime.utcnow()
+
+        admins_result = await s.execute(
+            select(Coach).where(
+                Coach.is_active == True,
+                or_(
+                    Coach.is_admin == True,
+                    Coach.telegram_id.in_(ADMIN_IDS or [-1]),
+                ),
+            )
+        )
+        for admin in admins_result.scalars().all():
+            receipt_caption = (
+                f"💳 Чек на проверку\n"
+                f"Ребёнок: {student.name}\n"
+                f"Сумма: {payment.amount} Br"
+            )
+            try:
+                if message.photo:
+                    await bot.send_photo(admin.telegram_id, file_id, caption=receipt_caption)
+                else:
+                    await bot.send_document(admin.telegram_id, file_id, caption=receipt_caption)
+            except Exception as exc:
+                logger.warning("Could not forward receipt to admin %s: %s", admin.id, exc)
+            s.add(Notification(
+                coach_id=admin.id,
+                student_id=student.id,
+                type="payment_review",
+                message=(
+                    f"💳 Новый чек на проверку\n"
+                    f"Ребёнок: {student.name}\n"
+                    f"Сумма: {payment.amount} Br\n"
+                    "Откройте раздел «Запросы» в CRM."
+                ),
+                recipient_telegram_id=admin.telegram_id,
+            ))
+        await s.commit()
+
+    await message.answer("✅ Чек прикреплён и отправлен администраторам на проверку.")
 
 
 @router.message(Command("now"))
@@ -787,10 +996,28 @@ async def cb_skip_reason(callback: CallbackQuery):
                     student_id=student.id,
                     location_id=sched_info.get("location_id"),
                     status="excused",
+                    source="coach_cancelled",
+                    deducted=False,
                     attendance_date=today,
                     attendance_time=lesson_time
                 )
                 s.add(att)
+                await reconcile_attendance(s, student, att)
+                if student.parent_id:
+                    parent = await s.get(ParentAccount, student.parent_id)
+                    if parent:
+                        s.add(Notification(
+                            coach_id=student.coach_id,
+                            student_id=student.id,
+                            type="training_cancelled",
+                            message=(
+                                f"❌ Тренировка отменена\n{student.name} · "
+                                f"{today.strftime('%d.%m.%Y')} в {lesson_time}\n"
+                                f"Причина: {reason_text}\n"
+                                "Занятие не списано, право на отработку добавлено."
+                            ),
+                            recipient_telegram_id=parent.telegram_id,
+                        ))
                 skipped_count += 1
         
         await s.commit()
@@ -921,10 +1148,28 @@ async def cb_skip_group_reason(callback: CallbackQuery):
                         student_id=student.id,
                         location_id=sched_info.get("location_id"),
                         status="excused",
+                        source="coach_cancelled",
+                        deducted=False,
                         attendance_date=today,
                         attendance_time=time_key
                     )
                     s.add(att)
+                    await reconcile_attendance(s, student, att)
+                    if student.parent_id:
+                        parent = await s.get(ParentAccount, student.parent_id)
+                        if parent:
+                            s.add(Notification(
+                                coach_id=student.coach_id,
+                                student_id=student.id,
+                                type="training_cancelled",
+                                message=(
+                                    f"❌ Тренировка отменена\n{student.name} · "
+                                    f"{today.strftime('%d.%m.%Y')} в {time_key}\n"
+                                    f"Причина: {reason_text}\n"
+                                    "Занятие не списано, право на отработку добавлено."
+                                ),
+                                recipient_telegram_id=parent.telegram_id,
+                            ))
                     skipped_count += 1
         
         await s.commit()
@@ -1516,3 +1761,482 @@ async def daily_notification_scheduler():
         except Exception as e:
             logger.error(f"Error in daily notification scheduler: {e}")
             await asyncio.sleep(3600)  # Retry in 1 hour
+
+
+@router.callback_query(F.data.startswith("rsvp|"))
+async def parent_training_response(callback: CallbackQuery):
+    """Save the optional parent response without changing lesson deduction rules."""
+    parts = callback.data.split("|")
+    if len(parts) != 7:
+        await callback.answer("Не удалось сохранить ответ", show_alert=True)
+        return
+    _, student_id_raw, date_raw, time_raw, location_raw, response_raw, _version = parts
+    parent = await get_parent(callback.from_user.id)
+    if not parent:
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    try:
+        student_id = int(student_id_raw)
+        training_date = datetime.strptime(date_raw, "%Y%m%d").date()
+        training_time = f"{time_raw[:2]}:{time_raw[2:]}"
+        location_id = int(location_raw) if location_raw != "0" else None
+    except (TypeError, ValueError):
+        await callback.answer("Некорректные данные", show_alert=True)
+        return
+    response = "attending" if response_raw == "yes" else "absent"
+
+    async with async_session() as s:
+        student_result = await s.execute(
+            select(Student).where(
+                Student.id == student_id,
+                Student.parent_id == parent.id,
+                Student.is_active == True,
+            )
+        )
+        student = student_result.scalar_one_or_none()
+        if not student:
+            await callback.answer("Ребёнок не найден", show_alert=True)
+            return
+        response_result = await s.execute(
+            select(TrainingResponse).where(
+                TrainingResponse.student_id == student_id,
+                TrainingResponse.training_date == training_date,
+                TrainingResponse.training_time == training_time,
+                TrainingResponse.location_id == location_id,
+            )
+        )
+        item = response_result.scalar_one_or_none()
+        if item:
+            item.response = response
+            item.responded_at = datetime.utcnow()
+        else:
+            s.add(TrainingResponse(
+                student_id=student_id,
+                training_date=training_date,
+                training_time=training_time,
+                location_id=location_id,
+                response=response,
+            ))
+        await s.commit()
+
+    label = "Буду" if response == "attending" else "Не буду"
+    await callback.answer(f"Ответ сохранён: {label}")
+    await callback.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(
+            text=f"✓ {label}",
+            callback_data=callback.data,
+        )
+    ]]))
+
+
+async def _notify_assigned_trainers_about_blocked_parent(
+    session,
+    parent: ParentAccount,
+) -> None:
+    coaches_result = await session.execute(
+        select(Coach).join(Student).where(
+            Student.parent_id == parent.id,
+            Student.is_active == True,
+            Coach.is_active == True,
+        ).distinct()
+    )
+    for coach in coaches_result.scalars().all():
+        try:
+            await bot.send_message(
+                coach.telegram_id,
+                f"⚠️ Родитель {parent.full_name} заблокировал бота. "
+                "Уведомления ребёнку не доставляются.",
+            )
+        except Exception as exc:
+            logger.warning("Could not notify coach %s about blocked parent: %s", coach.id, exc)
+
+
+async def _deliver_outbox() -> None:
+    if bot is None:
+        return
+    async with async_session() as s:
+        result = await s.execute(
+            select(Notification).where(
+                Notification.recipient_telegram_id.is_not(None),
+                Notification.sent_at.is_(None),
+            ).order_by(Notification.created_at).limit(50)
+        )
+        for item in result.scalars().all():
+            try:
+                display_message = item.message
+                if display_message.startswith("[") and "] " in display_message:
+                    display_message = display_message.split("] ", 1)[1]
+                await bot.send_message(item.recipient_telegram_id, display_message)
+                item.sent_at = datetime.utcnow()
+                item.delivery_error = None
+            except TelegramForbiddenError:
+                item.sent_at = datetime.utcnow()
+                item.delivery_error = "bot_blocked"
+                parent_result = await s.execute(
+                    select(ParentAccount).where(
+                        ParentAccount.telegram_id == item.recipient_telegram_id
+                    )
+                )
+                parent = parent_result.scalar_one_or_none()
+                if parent:
+                    parent.bot_blocked_at = datetime.utcnow()
+                    await _notify_assigned_trainers_about_blocked_parent(s, parent)
+            except Exception as exc:
+                item.delivery_error = str(exc)[:500]
+                logger.warning("Outbox delivery failed for notification %s: %s", item.id, exc)
+        await s.commit()
+
+
+async def _send_parent_training_reminders(reference: datetime) -> None:
+    if bot is None:
+        return
+    training_date = (reference + timedelta(days=1)).date()
+    weekday = training_date.weekday()
+    async with async_session() as s:
+        result = await s.execute(
+            select(Student, ParentAccount)
+            .join(ParentAccount, Student.parent_id == ParentAccount.id)
+            .options(
+                selectinload(Student.schedules).selectinload(StudentSchedule.location)
+            )
+            .where(
+                Student.is_active == True,
+                Student.training_reminders_enabled == True,
+                ParentAccount.training_reminders_enabled == True,
+            )
+        )
+        for student, parent in result.all():
+            for schedule in student.get_schedules_for_day(weekday):
+                time_str = schedule["time"]
+                location_id = schedule.get("location_id") or 0
+                key = (
+                    f"[parent_training:{student.id}:{training_date.isoformat()}:"
+                    f"{time_str}:{location_id}]"
+                )
+                exists = await s.execute(
+                    select(Notification).where(
+                        Notification.type == "parent_training_reminder",
+                        Notification.message.like(f"{key}%"),
+                    )
+                )
+                if exists.scalar_one_or_none():
+                    continue
+                callback_prefix = (
+                    f"rsvp|{student.id}|{training_date.strftime('%Y%m%d')}|"
+                    f"{time_str.replace(':', '')}|{location_id}|"
+                )
+                markup = InlineKeyboardMarkup(inline_keyboard=[[
+                    InlineKeyboardButton(
+                        text="Буду",
+                        callback_data=f"{callback_prefix}yes|1",
+                    ),
+                    InlineKeyboardButton(
+                        text="Не буду",
+                        callback_data=f"{callback_prefix}no|1",
+                    ),
+                ]])
+                text = (
+                    f"⏰ Завтра тренировка\n\n"
+                    f"{student.name} · {time_str}\n"
+                    f"{schedule.get('location_name') or 'Зал уточняется'}\n\n"
+                    "Ответ носит информационный характер. Пропуск всё равно списывает занятие "
+                    "и создаёт право на отработку."
+                )
+                notification = Notification(
+                    coach_id=student.coach_id,
+                    student_id=student.id,
+                    type="parent_training_reminder",
+                    message=f"{key} {text}",
+                    recipient_telegram_id=parent.telegram_id,
+                )
+                try:
+                    await bot.send_message(parent.telegram_id, text, reply_markup=markup)
+                    notification.sent_at = datetime.utcnow()
+                    parent.bot_blocked_at = None
+                except TelegramForbiddenError:
+                    notification.sent_at = datetime.utcnow()
+                    notification.delivery_error = "bot_blocked"
+                    parent.bot_blocked_at = datetime.utcnow()
+                    await _notify_assigned_trainers_about_blocked_parent(s, parent)
+                except Exception as exc:
+                    notification.delivery_error = str(exc)[:500]
+                s.add(notification)
+        await s.commit()
+
+
+async def _ensure_parent_invoices(session, reference: date) -> None:
+    month_start, month_end = month_bounds(reference)
+    students_result = await session.execute(
+        select(Student).where(
+            Student.parent_id.is_not(None),
+            Student.is_active == True,
+            Student.deleted_at.is_(None),
+        )
+    )
+    for student in students_result.scalars().all():
+        existing = (
+            await session.execute(
+                select(Payment).where(
+                    Payment.student_id == student.id,
+                    Payment.period_start == month_start,
+                    Payment.tariff_code.is_not(None),
+                )
+            )
+        ).scalars().first()
+        if existing:
+            continue
+        previous = (
+            await session.execute(
+                select(Payment).where(
+                    Payment.student_id == student.id,
+                    Payment.tariff_code.is_not(None),
+                    Payment.period_start < month_start,
+                ).order_by(desc(Payment.period_start), desc(Payment.id))
+            )
+        ).scalars().first()
+        tariff_code = previous.tariff_code if previous and previous.tariff_code in TARIFFS else "8"
+        tariff = TARIFFS[tariff_code]
+        session.add(Payment(
+            coach_id=student.coach_id,
+            student_id=student.id,
+            amount=tariff["price"],
+            base_amount=tariff["price"],
+            late_fee_amount=0,
+            tariff_code=tariff_code,
+            lessons_count=tariff["lessons"],
+            status="pending",
+            period_start=month_start,
+            period_end=month_end,
+            due_date=payment_due_date(month_start),
+            notes="Абонемент повторён с прошлого месяца автоматически",
+        ))
+
+
+async def _send_payment_and_makeup_reminders(reference: datetime) -> None:
+    if bot is None:
+        return
+    today = reference.date()
+    async with async_session() as s:
+        await _ensure_parent_invoices(s, today)
+        rows = (
+            await s.execute(
+                select(Payment, Student, ParentAccount)
+                .join(Student, Payment.student_id == Student.id)
+                .join(ParentAccount, Student.parent_id == ParentAccount.id)
+                .where(
+                    Payment.status != "paid",
+                    Payment.status != "written_off",
+                    Payment.tariff_code.is_not(None),
+                )
+                .order_by(Student.id, Payment.period_start)
+            )
+        ).all()
+        oldest_by_student = {}
+        for payment, student, parent in rows:
+            oldest_by_student.setdefault(student.id, (payment, student, parent))
+
+        for payment, student, parent in oldest_by_student.values():
+            due_date = payment.due_date or payment_due_date(payment.period_start or today)
+            if not is_payment_reminder_day(today, due_date):
+                continue
+            late_fee, total = (
+                (0, payment.base_amount or payment.amount)
+                if payment.tariff_code == "single"
+                else payment_total(payment.base_amount or payment.amount, due_date, today)
+            )
+            payment.late_fee_amount = late_fee
+            payment.amount = total
+            key = f"[payment_reminder:{payment.id}:{today.isoformat()}]"
+            exists = await s.execute(
+                select(Notification).where(
+                    Notification.type == "payment_reminder",
+                    Notification.message.like(f"{key}%"),
+                )
+            )
+            if exists.scalar_one_or_none():
+                continue
+            text = (
+                f"💳 Оплата за {payment.period_start.strftime('%m.%Y')}\n\n"
+                f"{student.name}\n"
+                f"Абонемент: {payment.base_amount or payment.amount} Br\n"
+                f"Доплата за просрочку: {late_fee} Br\n"
+                f"Итого: {total} Br\n\n"
+                "Оплатить и отправить чек можно через Mini App."
+            )
+            s.add(Notification(
+                coach_id=student.coach_id,
+                student_id=student.id,
+                type="payment_reminder",
+                message=f"{key} {text}",
+                recipient_telegram_id=parent.telegram_id,
+            ))
+
+        scheduled_past = (
+            await s.execute(
+                select(MakeupCredit).where(
+                    MakeupCredit.status == "scheduled",
+                    MakeupCredit.scheduled_date < today,
+                )
+            )
+        ).scalars().all()
+        for credit in scheduled_past:
+            attendance = (
+                await s.execute(
+                    select(Attendance).where(
+                        Attendance.makeup_credit_id == credit.id
+                    )
+                )
+            ).scalar_one_or_none()
+            credit.status = "used" if attendance and attendance.status == "present" else "burned"
+            credit.used_at = datetime.utcnow()
+
+        expired_credits = (
+            await s.execute(
+                select(MakeupCredit).where(
+                    MakeupCredit.status.in_({"available", "requested"}),
+                    MakeupCredit.expires_at < today,
+                )
+            )
+        ).scalars().all()
+        for credit in expired_credits:
+            credit.status = "expired"
+
+        makeup_rows = (
+            await s.execute(
+                select(MakeupCredit, Student, ParentAccount)
+                .join(Student)
+                .join(ParentAccount, Student.parent_id == ParentAccount.id)
+                .where(
+                    MakeupCredit.status.in_({"available", "requested", "scheduled"}),
+                    MakeupCredit.expires_at >= today,
+                )
+            )
+        ).all()
+        for credit, student, parent in makeup_rows:
+            days_left = (credit.expires_at - today).days
+            if days_left not in {14, 7}:
+                continue
+            key = f"[makeup_expiry:{credit.id}:{days_left}]"
+            exists = await s.execute(
+                select(Notification).where(
+                    Notification.type == "makeup_expiry",
+                    Notification.message.like(f"{key}%"),
+                )
+            )
+            if exists.scalar_one_or_none():
+                continue
+            s.add(Notification(
+                coach_id=student.coach_id,
+                student_id=student.id,
+                type="makeup_expiry",
+                message=(
+                    f"{key} 🔁 Отработка для {student.name} сгорит через {days_left} дней.\n"
+                    f"Срок: {credit.expires_at.strftime('%d.%m.%Y')}"
+                ),
+                recipient_telegram_id=parent.telegram_id,
+            ))
+
+        pending_registrations = (
+            await s.execute(
+                select(func.count(RegistrationRequest.id)).where(
+                    RegistrationRequest.status == "pending"
+                )
+            )
+        ).scalar_one()
+        pending_schedules = (
+            await s.execute(
+                select(func.count(ScheduleRequest.id)).where(
+                    ScheduleRequest.status == "pending"
+                )
+            )
+        ).scalar_one()
+        pending_makeups = (
+            await s.execute(
+                select(func.count(MakeupCredit.id)).where(
+                    MakeupCredit.status == "requested"
+                )
+            )
+        ).scalar_one()
+        pending_payments = (
+            await s.execute(
+                select(func.count(Payment.id)).where(Payment.status == "reported")
+            )
+        ).scalar_one()
+        overdue_payments = (
+            await s.execute(
+                select(Payment).where(
+                    Payment.status != "paid",
+                    Payment.status != "written_off",
+                    Payment.tariff_code.is_not(None),
+                    Payment.due_date < today,
+                )
+            )
+        ).scalars().all()
+        overdue_total = sum(
+            payment_total(
+                payment.base_amount or payment.amount,
+                payment.due_date,
+                today,
+            )[1]
+            for payment in overdue_payments
+            if payment.tariff_code != "single"
+        )
+        admins = (
+            await s.execute(
+                select(Coach).where(
+                    Coach.is_active == True,
+                    or_(
+                        Coach.is_admin == True,
+                        Coach.telegram_id.in_(ADMIN_IDS or [-1]),
+                    ),
+                )
+            )
+        ).scalars().all()
+        for admin in admins:
+            key = f"[family_daily:{today.isoformat()}:{admin.id}]"
+            exists = await s.execute(
+                select(Notification).where(
+                    Notification.type == "family_daily_summary",
+                    Notification.message.like(f"{key}%"),
+                )
+            )
+            if exists.scalar_one_or_none():
+                continue
+            s.add(Notification(
+                coach_id=admin.id,
+                student_id=None,
+                type="family_daily_summary",
+                message=(
+                    f"{key} 📋 Сводка Break Wave на {today.strftime('%d.%m.%Y')}\n\n"
+                    f"Новые анкеты: {pending_registrations}\n"
+                    f"Изменения расписания: {pending_schedules}\n"
+                    f"Отработки на подтверждение: {pending_makeups}\n"
+                    f"Оплаты на проверку: {pending_payments}\n"
+                    f"Просроченные счета: {len(overdue_payments)} · {overdue_total} Br"
+                ),
+                recipient_telegram_id=admin.telegram_id,
+            ))
+        await s.commit()
+
+
+async def family_notification_scheduler():
+    """Run all parent/admin notifications in the same existing bot process."""
+    last_training_reminder_date = None
+    last_daily_rules_date = None
+    while True:
+        try:
+            now = datetime.now(BELARUS_TZ)
+            await _deliver_outbox()
+            if (
+                now.hour == PARENT_REMINDER_HOUR
+                and now.minute < 2
+                and last_training_reminder_date != now.date()
+            ):
+                await _send_parent_training_reminders(now)
+                last_training_reminder_date = now.date()
+            if now.hour == DAILY_SUMMARY_HOUR and now.minute < 2 and last_daily_rules_date != now.date():
+                await _send_payment_and_makeup_reminders(now)
+                last_daily_rules_date = now.date()
+        except Exception as exc:
+            logger.error("Error in family notification scheduler: %s", exc)
+        await asyncio.sleep(FAMILY_SCHEDULER_POLL_SECONDS)

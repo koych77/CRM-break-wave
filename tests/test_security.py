@@ -23,12 +23,24 @@ os.environ["DATABASE_URL"] = (
 )
 
 from fastapi.testclient import TestClient
-from sqlalchemy import text
+from sqlalchemy import select, text
 
 import app.api as api_module
 from app.api import app, get_effective_payment_status, verify_telegram_init_data
 from app.database import async_session, engine, init_db, run_migrations
-from app.models import Coach, Location, Payment, Student, StudentSchedule
+from app.family import calculate_late_fee, reconcile_attendance
+from app.models import (
+    Attendance,
+    Coach,
+    Location,
+    MakeupCredit,
+    ParentAccount,
+    Payment,
+    RegistrationInvite,
+    RegistrationRequest,
+    Student,
+    StudentSchedule,
+)
 
 
 SEEDED = {}
@@ -423,3 +435,226 @@ def test_legacy_schedule_schema_is_rebuilt_without_data_loss():
     assert actual_rows == expected_rows
     assert location_column[3] == 0
     assert violations == []
+
+
+def test_late_fee_grows_by_ten_rubles_every_seven_days_without_cap():
+    due = date(2026, 7, 10)
+    assert calculate_late_fee(due, date(2026, 7, 10)) == 0
+    assert calculate_late_fee(due, date(2026, 7, 11)) == 10
+    assert calculate_late_fee(due, date(2026, 7, 17)) == 10
+    assert calculate_late_fee(due, date(2026, 7, 18)) == 20
+    assert calculate_late_fee(due, date(2026, 8, 15)) == 60
+
+
+def test_parent_registration_approval_and_family_invoice_use_same_mini_app():
+    parent_telegram_id = 3001
+    token = "test-parent-invite"
+
+    async def create_invite():
+        async with async_session() as session:
+            invite = RegistrationInvite(
+                token=token,
+                preliminary_child_name="Новый ребёнок",
+                created_by_coach_id=SEEDED["own_coach_id"],
+                expires_at=datetime.utcnow() + timedelta(days=7),
+                status="active",
+            )
+            session.add(invite)
+            await session.commit()
+
+    asyncio.run(create_invite())
+    api_module.ADMIN_IDS.append(1001)
+    try:
+        with TestClient(app) as client:
+            registration = client.post(
+                "/api/parent/register",
+                json={
+                    "initData": telegram_init_data(parent_telegram_id),
+                    "invite_token": token,
+                    "parent": {
+                        "full_name": "Мария Иванова",
+                        "phone": "+375291111111",
+                    },
+                    "child": {
+                        "name": "Иван Иванов",
+                        "birthday": "2015-05-12",
+                        "phone": "",
+                    },
+                    "proposed_schedule": [{
+                        "days": "0",
+                        "times": {"0": "18:00"},
+                        "duration": 90,
+                        "is_primary": True,
+                    }],
+                },
+            )
+            assert registration.status_code == 200
+            request_id = registration.json()["request_id"]
+
+            parent_auth = client.post(
+                "/api/auth",
+                json={"initData": telegram_init_data(parent_telegram_id)},
+            )
+            assert parent_auth.status_code == 200
+            assert parent_auth.json()["role"] == "parent"
+
+            review = client.post(
+                f"/api/admin/registrations/{request_id}/review",
+                json={
+                    "initData": telegram_init_data(1001),
+                    "decision": "approve",
+                    "coach_id": SEEDED["own_coach_id"],
+                },
+            )
+            assert review.status_code == 200
+
+            context = client.post(
+                "/api/parent/context",
+                json={"initData": telegram_init_data(parent_telegram_id)},
+            )
+
+        assert context.status_code == 200
+        payload = context.json()
+        assert payload["students"][0]["name"] == "Иван Иванов"
+        assert payload["students"][0]["invoice"]["tariff_code"] == "8"
+        assert payload["students"][0]["invoice"]["base_amount"] == 140
+        assert payload["tariffs"]["16"]["price"] == 200
+    finally:
+        api_module.ADMIN_IDS.remove(1001)
+
+
+def test_absence_deducts_lesson_and_creates_makeup_but_coach_cancellation_does_not_deduct():
+    async def exercise_rules():
+        async with async_session() as session:
+            student = Student(
+                coach_id=SEEDED["own_coach_id"],
+                name="Правила посещения",
+                lessons_count=8,
+                lessons_remaining=8,
+            )
+            session.add(student)
+            await session.flush()
+
+            absence = Attendance(
+                student_id=student.id,
+                status="absent",
+                source="scheduled",
+                attendance_date=date(2026, 7, 6),
+                attendance_time="18:00",
+            )
+            session.add(absence)
+            await reconcile_attendance(session, student, absence)
+            remaining_after_absence = student.lessons_remaining
+
+            cancellation = Attendance(
+                student_id=student.id,
+                status="excused",
+                source="coach_cancelled",
+                attendance_date=date(2026, 7, 8),
+                attendance_time="18:00",
+            )
+            session.add(cancellation)
+            await reconcile_attendance(session, student, cancellation)
+            remaining_after_cancellation = student.lessons_remaining
+            credits = (
+                await session.execute(
+                    select(MakeupCredit).where(MakeupCredit.student_id == student.id)
+                )
+            ).scalars().all()
+            return remaining_after_absence, remaining_after_cancellation, credits
+
+    after_absence, after_cancellation, credits = asyncio.run(exercise_rules())
+    assert after_absence == 7
+    assert after_cancellation == 7
+    assert {credit.source_type for credit in credits} == {"absence", "coach_cancelled"}
+
+
+def test_student_deletion_removes_personal_data_and_receipts_but_keeps_anonymized_revenue():
+    async def prepare_deletion():
+        async with async_session() as session:
+            parent = (
+                await session.execute(
+                    select(ParentAccount).where(ParentAccount.telegram_id == 3001)
+                )
+            ).scalar_one()
+            student = (
+                await session.execute(
+                    select(Student).where(Student.parent_id == parent.id)
+                )
+            ).scalar_one()
+            payment = (
+                await session.execute(
+                    select(Payment).where(Payment.student_id == student.id)
+                )
+            ).scalars().first()
+            payment.status = "paid"
+            payment.receipt_file_id = "telegram-receipt-file"
+            payment.paid_at = datetime.utcnow()
+            session.add(Payment(
+                coach_id=student.coach_id,
+                student_id=student.id,
+                amount=140,
+                base_amount=140,
+                lessons_count=8,
+                tariff_code="8",
+                status="pending",
+                receipt_file_id="unconfirmed-receipt",
+                period_start=date.today() + timedelta(days=31),
+            ))
+            absence = Attendance(
+                student_id=student.id,
+                status="absent",
+                source="scheduled",
+                attendance_date=date.today() - timedelta(days=3),
+                attendance_time="18:00",
+            )
+            session.add(absence)
+            await reconcile_attendance(session, student, absence)
+            credit = (
+                await session.execute(
+                    select(MakeupCredit).where(
+                        MakeupCredit.student_id == student.id,
+                        MakeupCredit.source_attendance_id == absence.id,
+                    )
+                )
+            ).scalar_one()
+            session.add(Attendance(
+                student_id=student.id,
+                status="present",
+                source="makeup",
+                makeup_credit_id=credit.id,
+                attendance_date=date.today() - timedelta(days=1),
+                attendance_time="18:00",
+            ))
+            await session.commit()
+            return student.id, parent.id
+
+    student_id, parent_id = asyncio.run(prepare_deletion())
+    with TestClient(app) as client:
+        response = client.post(
+            f"/api/students/{student_id}/destroy",
+            json={
+                "initData": telegram_init_data(1001),
+                "confirm_destroy": True,
+            },
+        )
+    assert response.status_code == 200
+
+    async def inspect_deletion():
+        async with async_session() as session:
+            student = await session.get(Student, student_id)
+            parent = await session.get(ParentAccount, parent_id)
+            payments = (
+                await session.execute(
+                    select(Payment).where(Payment.student_id == student_id).order_by(Payment.id)
+                )
+            ).scalars().all()
+            return student, parent, payments
+
+    student, parent, payments = asyncio.run(inspect_deletion())
+    assert student.name == f"Удалённый ученик #{student_id}"
+    assert student.phone is None
+    assert student.parent_id is None
+    assert parent is None
+    assert [payment.status for payment in payments] == ["paid", "written_off"]
+    assert all(payment.receipt_file_id is None for payment in payments)

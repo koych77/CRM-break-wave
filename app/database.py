@@ -175,6 +175,11 @@ async def init_db():
                 date DATE NOT NULL
             )
         """))
+
+        # Keep the legacy schema compatible and let SQLAlchemy create only the
+        # additive tables introduced for parents, requests, groups and makeups.
+        from app import models as _models  # noqa: F401
+        await conn.run_sync(Base.metadata.create_all)
     
     # Run migrations for existing databases
     await run_migrations()
@@ -389,6 +394,74 @@ async def run_migrations():
             except Exception:
                 # Column may have been added by another concurrent process
                 pass
+
+        additive_columns = {
+            "coaches": [
+                ("is_admin", "BOOLEAN DEFAULT 0"),
+                ("is_manager", "BOOLEAN DEFAULT 0"),
+            ],
+            "students": [
+                ("parent_id", "INTEGER"),
+                ("training_reminders_enabled", "BOOLEAN DEFAULT 1"),
+                ("training_start_date", "DATE"),
+                ("deleted_at", "DATETIME"),
+            ],
+            "student_schedules": [
+                ("group_id", "INTEGER"),
+            ],
+            "attendance": [
+                ("source", "VARCHAR(20) DEFAULT 'scheduled'"),
+                ("makeup_credit_id", "INTEGER"),
+                ("deducted", "BOOLEAN DEFAULT 0"),
+            ],
+            "payments": [
+                ("tariff_code", "VARCHAR(20)"),
+                ("base_amount", "INTEGER"),
+                ("late_fee_amount", "INTEGER DEFAULT 0"),
+                ("due_date", "DATE"),
+                ("payment_method", "VARCHAR(20)"),
+                ("receipt_file_id", "VARCHAR(500)"),
+                ("reported_at", "DATETIME"),
+                ("confirmed_by_coach_id", "INTEGER"),
+                ("cash_received_by_coach_id", "INTEGER"),
+                ("rejection_reason", "VARCHAR(500)"),
+            ],
+            "notifications": [
+                ("recipient_telegram_id", "BIGINT"),
+                ("sent_at", "DATETIME"),
+                ("delivery_error", "VARCHAR(500)"),
+            ],
+        }
+
+        for table_name, columns in additive_columns.items():
+            for column_name, column_type in columns:
+                try:
+                    await conn.execute(text(
+                        f"SELECT {column_name} FROM {table_name} LIMIT 1"
+                    ))
+                except Exception:
+                    logger.info("Migrating: Adding %s.%s", table_name, column_name)
+                    await conn.execute(text(
+                        f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}"
+                    ))
+
+        await conn.execute(text(
+            "UPDATE students SET training_reminders_enabled = 1 "
+            "WHERE training_reminders_enabled IS NULL"
+        ))
+        await conn.execute(text(
+            "UPDATE attendance SET source = 'scheduled' WHERE source IS NULL"
+        ))
+        await conn.execute(text(
+            "UPDATE attendance SET deducted = 1 "
+            "WHERE deducted IS NULL AND status = 'present'"
+        ))
+        await conn.execute(text(
+            "UPDATE attendance SET deducted = 0 WHERE deducted IS NULL"
+        ))
+        await conn.execute(text(
+            "UPDATE payments SET late_fee_amount = 0 WHERE late_fee_amount IS NULL"
+        ))
         
         logger.info("Migrations completed")
 
@@ -427,6 +500,17 @@ async def create_indexes():
             logger.info("Created schedules indexes")
         except Exception as e:
             logger.warning(f"Could not create schedules indexes: {e}")
+
+        # Parent, request and makeup workflow indexes
+        try:
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS idx_students_parent ON students(parent_id)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS idx_registration_status ON registration_requests(status)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS idx_schedule_requests_status ON schedule_requests(status)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS idx_makeups_student_status ON makeup_credits(student_id, status)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS idx_training_response_date ON training_responses(training_date)"))
+            logger.info("Created parent workflow indexes")
+        except Exception as e:
+            logger.warning(f"Could not create parent workflow indexes: {e}")
         
         # Notification logs indexes
         try:

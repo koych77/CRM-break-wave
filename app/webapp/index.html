@@ -57,6 +57,79 @@
                 </div>
             </div>
 
+            <!-- Parent registration from a one-time invitation -->
+            <div id="screen-registration" class="screen">
+                <div class="family-hero">
+                    <span class="page-eyebrow">Приглашение от тренера</span>
+                    <h2>Регистрация в Break Wave</h2>
+                    <p>Только необходимые данные. После отправки тренер проверит анкету и расписание.</p>
+                </div>
+                <form id="parent-registration-form" class="form-container family-form">
+                    <h3 class="form-section-title">Родитель</h3>
+                    <div class="form-group">
+                        <label for="reg-parent-name">ФИО *</label>
+                        <input id="reg-parent-name" type="text" autocomplete="name" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="reg-parent-phone">Телефон *</label>
+                        <input id="reg-parent-phone" type="tel" autocomplete="tel" placeholder="+375 29 000-00-00" required>
+                    </div>
+
+                    <h3 class="form-section-title">Ребёнок</h3>
+                    <div class="form-group">
+                        <label for="reg-child-name">ФИО *</label>
+                        <input id="reg-child-name" type="text" required>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="reg-child-birthday">Дата рождения *</label>
+                            <input id="reg-child-birthday" type="date" required>
+                        </div>
+                        <div class="form-group">
+                            <label for="reg-child-phone">Телефон</label>
+                            <input id="reg-child-phone" type="tel" placeholder="Необязательно">
+                        </div>
+                    </div>
+
+                    <div class="section-heading-row family-section-title">
+                        <div>
+                            <h3>Расписание</h3>
+                            <p>Укажите дни и время, согласованные с тренером.</p>
+                        </div>
+                        <button type="button" class="section-link" onclick="addRegistrationScheduleRow()">+ День</button>
+                    </div>
+                    <div id="registration-schedule-list" class="schedule-editor"></div>
+                    <button type="submit" class="btn-primary btn-block">Отправить тренеру</button>
+                    <p class="privacy-note">Анкета доступна только руководителям школы и назначенному тренеру.</p>
+                </form>
+            </div>
+
+            <!-- Parent cabinet in the same Mini App -->
+            <div id="screen-parent" class="screen">
+                <div class="family-hero">
+                    <span class="page-eyebrow">Семейный кабинет</span>
+                    <h2 id="parent-greeting">Break Wave</h2>
+                    <p>Расписание, абонементы, оплаты и отработки — в одном месте.</p>
+                </div>
+                <div id="parent-content" class="family-content">
+                    <div class="loading-container"><div class="spinner"></div><p>Загрузка…</p></div>
+                </div>
+            </div>
+
+            <!-- Shared admin request queue -->
+            <div id="screen-requests" class="screen">
+                <div class="screen-header">
+                    <button class="back-btn" onclick="goBack()">
+                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none"><path d="M15 18L9 12L15 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                    </button>
+                    <span class="screen-title">Запросы</span>
+                    <button class="btn-primary" onclick="createParentInvitation()">+ Пригласить</button>
+                </div>
+                <div id="requests-content" class="request-center">
+                    <div class="loading-container"><div class="spinner"></div><p>Загрузка…</p></div>
+                </div>
+            </div>
+
             <!-- Dashboard -->
             <div id="screen-dashboard" class="screen">
                 <div class="dashboard-header">
@@ -99,9 +172,13 @@
                             <div class="action-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="m5 12 4 4L19 6M12 22a10 10 0 1 1 10-10"/></svg></div>
                             <div class="action-label">Отметить занятие</div>
                         </button>
-                        <button class="action-card" onclick="openAddPayment()">
-                            <div class="action-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M3 7h18v12H3zM16 13h.01M3 10h18M7 5h12"/></svg></div>
-                            <div class="action-label">Записать оплату</div>
+                        <button class="action-card" onclick="createParentInvitation()">
+                            <div class="action-icon" aria-hidden="true">↗</div>
+                            <div class="action-label">Пригласить родителя</div>
+                        </button>
+                        <button class="action-card" onclick="navigate('requests')">
+                            <div class="action-icon" aria-hidden="true">◎</div>
+                            <div class="action-label">Запросы и чеки</div>
                         </button>
                     </div>
                 </div>
@@ -243,7 +320,7 @@
                         <svg width="24" height="24" viewBox="0 0 24 24" fill="none"><path d="M15 18L9 12L15 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
                     </button>
                     <span class="screen-title">Оплаты</span>
-                    <button class="btn-primary" onclick="openAddPayment()">+ Добавить</button>
+                    <div class="header-spacer" aria-hidden="true"></div>
                 </div>
                 <div class="tabs">
                     <button class="tab active" onclick="switchPaymentTab('all', this)">Все</button>

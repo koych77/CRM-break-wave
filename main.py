@@ -18,7 +18,14 @@ if env_path.exists():
 from aiogram.types import BotCommand
 from aiogram import Bot
 from app.api import app as fastapi_app
-from app.bot import create_bot, dp, lesson_reminder_scheduler, daily_notification_scheduler, notify_version_update
+from app.bot import (
+    create_bot,
+    dp,
+    lesson_reminder_scheduler,
+    daily_notification_scheduler,
+    family_notification_scheduler,
+    notify_version_update,
+)
 from app.database import init_db
 from app.config import DATA_DIR
 
@@ -32,11 +39,20 @@ logger = logging.getLogger(__name__)
 async def on_startup():
     """Initialize bot commands."""
     bot = create_bot()
+    try:
+        bot_identity = await bot.get_me()
+        if bot_identity.username:
+            os.environ["BOT_USERNAME"] = bot_identity.username
+    except Exception as exc:
+        logger.warning("Could not resolve bot username for invitation links: %s", exc)
     
     # Set bot commands
     await bot.set_my_commands([
         BotCommand(command="start", description="Открыть CRM"),
         BotCommand(command="now", description="Текущая тренировка"),
+        BotCommand(command="requests", description="Запросы родителей"),
+        BotCommand(command="payments", description="Оплаты и долги"),
+        BotCommand(command="makeups", description="Отработки"),
         BotCommand(command="summary", description="Ежедневная сводка"),
         BotCommand(command="help", description="Помощь"),
     ])
@@ -54,6 +70,7 @@ async def run_bot():
     await notify_version_update()
     asyncio.create_task(lesson_reminder_scheduler())
     asyncio.create_task(daily_notification_scheduler())
+    asyncio.create_task(family_notification_scheduler())
     logger.info("Starting bot polling...")
     await dp.start_polling(bot)
     return bot
