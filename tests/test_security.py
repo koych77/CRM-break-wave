@@ -6,7 +6,7 @@ import os
 import tempfile
 import time
 import urllib.parse
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -25,7 +25,8 @@ os.environ["DATABASE_URL"] = (
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 
-from app.api import app, verify_telegram_init_data
+import app.api as api_module
+from app.api import app, get_effective_payment_status, verify_telegram_init_data
 from app.database import async_session, engine, init_db, run_migrations
 from app.models import Coach, Location, Payment, Student, StudentSchedule
 
@@ -143,6 +144,46 @@ def test_legacy_webapp_route_redirects_to_current_mini_app():
     assert response.headers["cache-control"] == "no-cache, no-store, must-revalidate"
 
 
+def test_healthcheck_verifies_database():
+    with TestClient(app) as client:
+        response = client.get("/healthz")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok", "database": "ok"}
+
+
+def test_admin_is_provisioned_as_coach_on_first_open():
+    admin_id = 909001
+    api_module.ADMIN_IDS.append(admin_id)
+
+    try:
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/auth",
+                json={"initData": telegram_init_data(admin_id)},
+            )
+
+        assert response.status_code == 200
+        assert response.json()["is_admin"] is True
+        assert response.json()["telegram_id"] == admin_id
+    finally:
+        api_module.ADMIN_IDS.remove(admin_id)
+
+        async def remove_admin_coach():
+            async with async_session() as session:
+                coach_result = await session.execute(
+                    text("SELECT id FROM coaches WHERE telegram_id = :telegram_id"),
+                    {"telegram_id": admin_id},
+                )
+                coach_id = coach_result.scalar_one_or_none()
+                if coach_id:
+                    coach = await session.get(Coach, coach_id)
+                    await session.delete(coach)
+                    await session.commit()
+
+        asyncio.run(remove_admin_coach())
+
+
 def test_telegram_init_data_rejects_stale_signature():
     stale = telegram_init_data(1001, int(time.time()) - 3601)
     assert verify_telegram_init_data(stale) is None
@@ -249,6 +290,46 @@ def test_unlimited_student_is_not_reported_as_out_of_lessons():
         assert SEEDED["own_student_id"] not in reported_ids
     finally:
         asyncio.run(set_subscription(False, 8))
+
+
+def test_payment_overdue_status_is_derived_from_period_end():
+    payment = Payment(status="pending", period_end=date.today() - timedelta(days=1))
+    assert get_effective_payment_status(payment) == "overdue"
+
+    payment.status = "paid"
+    assert get_effective_payment_status(payment) == "paid"
+
+
+def test_finance_debtors_count_each_student_once():
+    async def set_multiple_attention_reasons():
+        async with async_session() as session:
+            student = await session.get(Student, SEEDED["own_student_id"])
+            student.subscription_end = date.today() - timedelta(days=5)
+            student.lessons_remaining = 0
+            await session.commit()
+
+    asyncio.run(set_multiple_attention_reasons())
+    try:
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/finance/debtors",
+                json={"initData": telegram_init_data(1001)},
+            )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["counts"]["total"] == 1
+        assert payload["items"][0]["id"] == SEEDED["own_student_id"]
+        assert set(payload["items"][0]["reasons"]) == {"expired", "no_lessons"}
+    finally:
+        async def restore_subscription():
+            async with async_session() as session:
+                student = await session.get(Student, SEEDED["own_student_id"])
+                student.subscription_end = None
+                student.lessons_remaining = 8
+                await session.commit()
+
+        asyncio.run(restore_subscription())
 
 
 def test_lesson_create_static_route_is_not_shadowed_by_detail_route():

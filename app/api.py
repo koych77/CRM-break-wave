@@ -1,9 +1,9 @@
-from fastapi import FastAPI, UploadFile, File, Query, Request, Form, Depends
+from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse, HTMLResponse, RedirectResponse, Response
+from fastapi.responses import JSONResponse, HTMLResponse, RedirectResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
-from sqlalchemy import select, func, and_, or_, desc, delete, update
+from sqlalchemy import select, func, desc, delete, update
 from contextlib import asynccontextmanager
 from datetime import datetime, date, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -24,7 +24,6 @@ from sqlalchemy.orm import selectinload
 from app.config import (
     WEBAPP_DIR,
     BOT_TOKEN,
-    WEEKDAYS,
     ADMIN_IDS,
     CORS_ORIGINS,
     TELEGRAM_AUTH_MAX_AGE_SECONDS,
@@ -132,19 +131,48 @@ def verify_telegram_init_data(init_data: str) -> dict | None:
 
 
 async def get_current_coach(init_data: str):
-    """Get coach by Telegram init data."""
+    """Get an active coach and provision configured admins on first Mini App open."""
     user = verify_telegram_init_data(init_data)
     if not user:
         return None
-    
+
+    user_id = user["id"]
     async with async_session() as s:
         result = await s.execute(
             select(Coach).where(
-                Coach.telegram_id == user.get("id"),
-                Coach.is_active == True,
+                Coach.telegram_id == user_id,
             )
         )
-        return result.scalar_one_or_none()
+        coach = result.scalar_one_or_none()
+        if coach and coach.is_active:
+            return coach
+
+        admin_allowed = user_id in ADMIN_IDS
+        if not admin_allowed:
+            admin_result = await s.execute(
+                select(AdminUser).where(AdminUser.telegram_id == user_id)
+            )
+            admin_allowed = admin_result.scalar_one_or_none() is not None
+
+        if not admin_allowed:
+            return None
+
+        if coach:
+            coach.is_active = True
+            coach.first_name = user.get("first_name") or coach.first_name
+            coach.username = user.get("username") or coach.username
+        else:
+            coach = Coach(
+                telegram_id=user_id,
+                first_name=user.get("first_name") or "Администратор",
+                username=user.get("username"),
+                is_active=True,
+            )
+            s.add(coach)
+        await s.commit()
+        await s.refresh(coach)
+        logger.info("Provisioned coach profile for admin Telegram user %s", user_id)
+        return coach
 
 
 async def location_ids_belong_to_coach(session, location_ids, coach_id: int) -> bool:
@@ -210,6 +238,21 @@ def normalize_bool(value) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "on"}
     return False
+
+
+def normalize_payment_status(value) -> str:
+    """Persist only explicit user states; overdue is derived from period_end."""
+    return "paid" if str(value or "").strip().lower() == "paid" else "pending"
+
+
+def get_effective_payment_status(payment: Payment, today: date | None = None) -> str:
+    """Return a consistent payment status across lists, filters and finance reports."""
+    if payment.status == "paid":
+        return "paid"
+    reference_date = today or datetime.now(BELARUS_TZ).date()
+    if payment.period_end and payment.period_end < reference_date:
+        return "overdue"
+    return "pending"
 
 
 def normalize_schedule_days_payload(days, fallback_days: str = "1,3") -> str:
@@ -330,6 +373,7 @@ async def root():
         content = html_file.read_text()
         # Always bump asset versions on server start so Telegram WebApp does not keep stale JS/CSS.
         content = re.sub(r'href="/assets/style\.css\?v=\d+"', f'href="/assets/style.css?v={APP_VERSION}"', content)
+        content = re.sub(r'href="/assets/visual-system\.css\?v=\d+"', f'href="/assets/visual-system.css?v={APP_VERSION}"', content)
         content = re.sub(r'src="/assets/app\.js\?v=\d+"', f'src="/assets/app.js?v={APP_VERSION}"', content)
         return Response(content=content, media_type="text/html", headers={
             "Cache-Control": "no-cache, no-store, must-revalidate",
@@ -337,6 +381,18 @@ async def root():
             "Expires": "0"
         })
     return HTMLResponse(content="<h1>CRM Break Wave</h1><p>Mini App is loading...</p>")
+
+
+@app.get("/healthz", include_in_schema=False)
+async def healthcheck():
+    """Verify that both the web process and database are ready."""
+    try:
+        async with async_session() as s:
+            await s.execute(select(1))
+        return {"status": "ok", "database": "ok"}
+    except Exception:
+        logger.exception("Healthcheck failed")
+        return JSONResponse({"status": "error", "database": "unavailable"}, 503)
 
 
 @app.get("/webapp", include_in_schema=False)
@@ -366,24 +422,16 @@ async def api_auth(request: Request):
     if not coach:
         return JSONResponse({"error": "not_registered"}, 403)
     
-    # Check if admin
     user = verify_telegram_init_data(init_data)
     user_id = user.get("id") if user else None
-    is_admin_user = False
-    if ADMIN_IDS and user_id in ADMIN_IDS:
-        is_admin_user = True
-    else:
-        async with async_session() as s:
-            admin_result = await s.execute(select(AdminUser).where(AdminUser.telegram_id == user_id))
-            if admin_result.scalar_one_or_none():
-                is_admin_user = True
+    actor_is_admin = await is_admin_user(user_id)
     
     return {
         "coach_id": coach.id,
         "first_name": coach.first_name,
         "telegram_id": coach.telegram_id,
         "username": coach.username,
-        "is_admin": is_admin_user,
+        "is_admin": actor_is_admin,
     }
 
 
@@ -1522,12 +1570,12 @@ async def api_payments(request: Request):
     
     status_filter = body.get("status")
     student_id = body.get("student_id")
+    if status_filter not in (None, "paid", "pending", "overdue"):
+        return JSONResponse({"error": "invalid_status"}, 400)
     
     async with async_session() as s:
         query = select(Payment, Student).join(Student).where(Payment.coach_id == coach.id)
         
-        if status_filter:
-            query = query.where(Payment.status == status_filter)
         if student_id:
             query = query.where(Payment.student_id == student_id)
         
@@ -1535,14 +1583,18 @@ async def api_payments(request: Request):
         result = await s.execute(query)
         
         payments = []
+        today = datetime.now(BELARUS_TZ).date()
         for payment, student in result.all():
+            effective_status = get_effective_payment_status(payment, today)
+            if status_filter and effective_status != status_filter:
+                continue
             payments.append({
                 "id": payment.id,
                 "student_id": payment.student_id,
                 "student_name": student.name,
                 "amount": payment.amount,
                 "lessons_count": payment.lessons_count,
-                "status": payment.status,
+                "status": effective_status,
                 "period_start": payment.period_start.isoformat() if payment.period_start else None,
                 "period_end": payment.period_end.isoformat() if payment.period_end else None,
                 "paid_at": payment.paid_at.isoformat() if payment.paid_at else None,
@@ -1579,7 +1631,7 @@ async def api_create_payment(request: Request):
             student_id=data.get("student_id"),
             amount=int(data.get("amount", 0)),
             lessons_count=lessons_count,
-            status=data.get("status", "pending"),
+            status=normalize_payment_status(data.get("status")),
             period_start=date.fromisoformat(data["period_start"]) if data.get("period_start") else None,
             period_end=date.fromisoformat(data["period_end"]) if data.get("period_end") else None,
             is_unlimited=is_unlimited,
@@ -1653,7 +1705,7 @@ async def api_update_payment(payment_id: int, request: Request):
             payment.lessons_count = int(data["lessons_count"] or 0)
         if "status" in data:
             old_status = payment.status
-            payment.status = data["status"]
+            payment.status = normalize_payment_status(data["status"])
             if payment.status == "paid" and old_status != "paid":
                 payment.paid_at = datetime.utcnow()
             elif payment.status != "paid" and old_status == "paid":
@@ -3318,26 +3370,33 @@ async def api_finance_summary(request: Request):
                     "revenue": rev
                 })
         
-        # Pending payments (overdue + pending)
+        # Pending amount for the selected reporting period. Overdue is derived
+        # consistently from period_end rather than stored as a competing state.
         pending_result = await s.execute(
-            select(func.sum(Payment.amount)).where(
+            select(Payment).where(
                 Payment.coach_id.in_(visible_coach_ids),
-                Payment.status.in_(["pending", "overdue"]),
+                Payment.status != "paid",
                 Payment.created_at >= start_date
             )
         )
-        pending_amount = pending_result.scalar() or 0
+        pending_amount = sum(
+            payment.amount
+            for payment in pending_result.scalars().all()
+            if get_effective_payment_status(payment, today) in {"pending", "overdue"}
+        )
         
         # Overdue breakdown
         overdue_result = await s.execute(
             select(Payment, Student).join(Student).where(
                 Payment.coach_id.in_(visible_coach_ids),
-                Payment.status == "overdue"
+                Payment.status != "paid"
             ).order_by(desc(Payment.created_at))
         )
         
         overdue_list = []
         for payment, student in overdue_result.all():
+            if get_effective_payment_status(payment, today) != "overdue":
+                continue
             overdue_list.append({
                 "id": payment.id,
                 "student_name": student.name,
@@ -3415,9 +3474,11 @@ async def api_finance_debtors(request: Request):
             "no_lessons": [],            # 0 lessons remaining
             "low_lessons": []            # 1-2 lessons remaining
         }
+        attention_items = []
         
         for student in students:
             remaining = student.lessons_remaining if student.lessons_remaining is not None else student.lessons_count
+            reasons = []
             
             # Check lessons
             if not student.is_unlimited and remaining <= 0:
@@ -3428,6 +3489,13 @@ async def api_finance_debtors(request: Request):
                     "reason": "no_lessons",
                     "remaining": 0
                 })
+                reasons.append({
+                    "code": "no_lessons",
+                    "label": "Закончились занятия",
+                    "detail": "Нет доступных занятий",
+                    "severity": "critical",
+                    "priority": 1,
+                })
             elif not student.is_unlimited and remaining <= 2:
                 debtors["low_lessons"].append({
                     "id": student.id,
@@ -3435,6 +3503,13 @@ async def api_finance_debtors(request: Request):
                     "coach_id": student.coach_id,
                     "reason": "low_lessons",
                     "remaining": remaining
+                })
+                reasons.append({
+                    "code": "low_lessons",
+                    "label": "Мало занятий",
+                    "detail": f"Осталось {remaining}",
+                    "severity": "warning",
+                    "priority": 3,
                 })
             
             # Check subscription
@@ -3448,6 +3523,13 @@ async def api_finance_debtors(request: Request):
                         "reason": "expired",
                         "days_overdue": abs(days_left)
                     })
+                    reasons.append({
+                        "code": "expired",
+                        "label": "Абонемент просрочен",
+                        "detail": f"Просрочено на {abs(days_left)} дн.",
+                        "severity": "critical",
+                        "priority": 0,
+                    })
                 elif days_left <= 3:
                     debtors["ending_soon"].append({
                         "id": student.id,
@@ -3456,6 +3538,31 @@ async def api_finance_debtors(request: Request):
                         "reason": "ending_soon",
                         "days_left": days_left
                     })
+                    reasons.append({
+                        "code": "ending_soon",
+                        "label": "Абонемент заканчивается",
+                        "detail": f"Осталось {days_left} дн.",
+                        "severity": "warning",
+                        "priority": 2,
+                    })
+
+            if reasons:
+                ordered_reasons = sorted(reasons, key=lambda reason: reason["priority"])
+                primary_reason = ordered_reasons[0]
+                attention_items.append({
+                    "id": student.id,
+                    "name": student.name,
+                    "coach_id": student.coach_id,
+                    "primary_reason": primary_reason["code"],
+                    "label": primary_reason["label"],
+                    "detail": primary_reason["detail"],
+                    "severity": primary_reason["severity"],
+                    "reasons": [reason["code"] for reason in ordered_reasons],
+                })
+
+        attention_items.sort(
+            key=lambda item: (0 if item["severity"] == "critical" else 1, item["name"].lower())
+        )
         
         return {
             "counts": {
@@ -3463,7 +3570,8 @@ async def api_finance_debtors(request: Request):
                 "ending_soon": len(debtors["ending_soon"]),
                 "no_lessons": len(debtors["no_lessons"]),
                 "low_lessons": len(debtors["low_lessons"]),
-                "total": sum(len(v) for v in debtors.values())
+                "total": len(attention_items)
             },
+            "items": attention_items,
             "debtors": debtors
         }
