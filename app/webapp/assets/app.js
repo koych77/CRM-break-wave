@@ -5,7 +5,7 @@ const tg = window.Telegram?.WebApp;
 
 // Cache busting - force reload if version changed
 const APP_VERSION_KEY = 'crm_bw_version';
-const CURRENT_VERSION = '39'; // Version 39: UX, accessibility and navigation hardening
+const CURRENT_VERSION = '40'; // Version 40: cohesive visual system and mobile workflow polish
 
 // Check version on load
 const savedVersion = localStorage.getItem(APP_VERSION_KEY);
@@ -68,18 +68,41 @@ let currentPaymentsFilter = 'all';
 let accessibilityControlId = 0;
 const ROOT_SCREENS = new Set(['dashboard', 'students', 'calendar', 'quick-lesson', 'finance']);
 
+function callTelegram(method, ...args) {
+    try {
+        const result = tg?.[method]?.(...args);
+        result?.catch?.(() => {});
+    } catch (error) {
+        console.debug(`Telegram WebApp method ${method} is unavailable`, error);
+    }
+}
+
+function telegramVersionAtLeast(version) {
+    try {
+        return typeof tg?.isVersionAtLeast !== 'function' || tg.isVersionAtLeast(version);
+    } catch {
+        return false;
+    }
+}
+
 // === Init ===
 document.addEventListener('DOMContentLoaded', async () => {
     enhanceAccessibility(document);
     initializeDialogAccessibility();
 
     if (tg) {
-        tg.ready();
-        tg.expand();
-        tg.requestFullscreen?.();
-        tg.enableClosingConfirmation?.();
-        tg.setBackgroundColor?.('#0A1628');
-        tg.setHeaderColor?.('#0F2035');
+        callTelegram('ready');
+        callTelegram('expand');
+        if (telegramVersionAtLeast('8.0')) {
+            callTelegram('requestFullscreen');
+        }
+        if (telegramVersionAtLeast('6.2')) {
+            callTelegram('enableClosingConfirmation');
+        }
+        if (telegramVersionAtLeast('6.1')) {
+            callTelegram('setBackgroundColor', '#07111F');
+            callTelegram('setHeaderColor', '#0B1829');
+        }
         initData = tg.initData || '';
         
         // Store current user info from Telegram
@@ -405,7 +428,7 @@ function renderScreenState(container, message, options = {}) {
     const {retry, icon = '⚠️'} = options;
     container.innerHTML = `
         <div class="screen-state" role="status">
-            <div style="font-size: 28px; margin-bottom: 8px;" aria-hidden="true">${icon}</div>
+            <div class="screen-state-icon" aria-hidden="true">${icon}</div>
             <p>${escapeHtml(message)}</p>
             ${retry ? `<button type="button" class="btn-secondary" onclick="${retry}">Повторить</button>` : ''}
         </div>
@@ -515,6 +538,12 @@ async function loadDashboard() {
 }
 
 async function renderDashboard(data) {
+    const greeting = document.getElementById('dashboard-greeting');
+    const coachName = currentCoach?.first_name?.trim();
+    if (greeting) {
+        greeting.textContent = coachName ? `Добрый день, ${coachName}` : 'Рабочий обзор';
+    }
+
     // Update stats
     document.getElementById('stat-students').textContent = data.students_count;
     document.getElementById('stat-lessons').textContent = data.lessons_this_month;
@@ -708,7 +737,7 @@ function renderStudentsList(list) {
             <button type="button" class="list-item" onclick="openStudentDetail(${s.id})">
                 <div class="list-item-header">
                     <span class="list-item-title">${escapeHtml(s.name)} ${lessonsIndicator}</span>
-                    <div style="display: flex; gap: 4px;">
+                    <div class="list-item-badges">
                         ${lessonsBadge || statusBadge}
                     </div>
                 </div>
@@ -913,7 +942,7 @@ async function openStudentDetail(id, options = {}) {
             ${subAlert}
             
             <div class="info-section">
-                <h3>📞 Контакты</h3>
+                <h3>Контакты</h3>
                 <div class="info-row">
                     <span class="info-label">Телефон</span>
                     <span class="info-value">${escapeHtml(student.phone || '—')}</span>
@@ -929,7 +958,7 @@ async function openStudentDetail(id, options = {}) {
             </div>
             
             <div class="info-section">
-                <h3>📍 Залы и расписание</h3>
+                <h3>Залы и расписание</h3>
                 ${renderStudentDetailLocations(student)}
                 <div class="info-row" style="margin-top: 12px;">
                     <span class="info-label">Стоимость</span>
@@ -938,7 +967,7 @@ async function openStudentDetail(id, options = {}) {
             </div>
             
             <div class="info-section">
-                <h3>📅 Абонемент</h3>
+                <h3>Абонемент</h3>
                 ${student.is_unlimited ? `
                 <div style="background: var(--bg-secondary); border-radius: 8px; padding: 12px; margin-bottom: 12px; border-left: 3px solid var(--accent);">
                     <div style="font-size: 13px; color: var(--text-secondary); margin-bottom: 4px;">Тип абонемента</div>
@@ -980,7 +1009,7 @@ async function openStudentDetail(id, options = {}) {
             
             ${student.payments && student.payments.length > 0 ? `
             <div class="info-section">
-                <h3>💳 История оплат</h3>
+                <h3>История оплат</h3>
                 ${student.payments.map(p => {
                     const statusText = {paid: 'Оплачено', pending: 'Ожидает', overdue: 'Просрочено'}[p.status];
                     const lessonsText = p.is_unlimited ? '♾️ Безлимит' : formatLessonCount(p.lessons_count || 0);
@@ -1003,23 +1032,23 @@ async function openStudentDetail(id, options = {}) {
             
             ${attendanceSummary ? `
             <div class="info-section">
-                <h3>📊 Посещаемость</h3>
+                <h3>Посещаемость</h3>
                 ${attendanceSummary}
             </div>
             ` : ''}
             
             ${student.notes ? `
             <div class="info-section">
-                <h3>📝 Заметки</h3>
+                <h3>Заметки</h3>
                 <p style="color: var(--text-secondary); font-size: 14px;">${escapeHtml(student.notes)}</p>
             </div>
             ` : ''}
             
             <div class="action-buttons-grid">
-                <button class="btn-primary" onclick="openEditStudent(${student.id})">✏️ Редактировать ученика</button>
-                <button class="btn-secondary" onclick="addPaymentForStudent(${student.id})">💰 Добавить оплату</button>
-                <button class="btn-secondary" onclick="markExtraAttendance(${student.id})">⭐ Внеплановое занятие</button>
-                <button class="btn-secondary" onclick="viewAttendanceHistory(${student.id})">📋 История посещений</button>
+                <button class="btn-primary" onclick="openEditStudent(${student.id})">Редактировать</button>
+                <button class="btn-secondary" onclick="addPaymentForStudent(${student.id})">Добавить оплату</button>
+                <button class="btn-secondary" onclick="markExtraAttendance(${student.id})">Внеплановое занятие</button>
+                <button class="btn-secondary" onclick="viewAttendanceHistory(${student.id})">История посещений</button>
             </div>
             <section class="danger-zone">
                 <h3>Опасная зона</h3>
@@ -1292,10 +1321,10 @@ function selectCalendarDay(day, element) {
     
     if (lessons.length === 0) {
         container.innerHTML = `
-            <div style="text-align: center; padding: 20px;">
-                <div style="font-size: 24px; font-weight: 700; color: var(--accent); margin-bottom: 4px;">${day}</div>
-                <div style="font-size: 14px; color: var(--text-secondary); margin-bottom: 8px;">${dayOfWeek}</div>
-                <p style="color: var(--text-muted); margin-top: 16px;">Нет занятий</p>
+            <div class="calendar-day-summary is-empty">
+                <div class="calendar-date-number">${day}</div>
+                <div class="calendar-date-weekday">${dayOfWeek}</div>
+                <p>На этот день занятий нет</p>
             </div>
         `;
     } else {
@@ -1313,13 +1342,13 @@ function selectCalendarDay(day, element) {
         const presentStudents = lessons.filter(s => s.status === 'present').length;
         
         let html = `
-            <div style="text-align: center; padding: 16px; background: var(--bg-secondary); border-radius: 12px; margin-bottom: 16px;">
-                <div style="font-size: 28px; font-weight: 700; color: var(--accent);">${day}</div>
-                <div style="font-size: 14px; color: var(--text-secondary); margin-bottom: 12px;">${dayOfWeek}</div>
-                <div style="display: flex; justify-content: center; gap: 16px; font-size: 13px;">
-                    <span style="color: var(--text-muted);">Всего: <b style="color: var(--text-primary);">${totalStudents}</b></span>
-                    <span style="color: var(--text-muted);">Отмечено: <b style="color: var(--success);">${markedStudents}</b></span>
-                    <span style="color: var(--text-muted);">Присутствовало: <b style="color: var(--accent);">${presentStudents}</b></span>
+            <div class="calendar-day-summary">
+                <div class="calendar-date-number">${day}</div>
+                <div class="calendar-date-weekday">${dayOfWeek}</div>
+                <div class="calendar-day-metrics">
+                    <span><b>${totalStudents}</b> всего</span>
+                    <span><b class="success">${markedStudents}</b> отмечено</span>
+                    <span><b class="accent">${presentStudents}</b> были</span>
                 </div>
             </div>
         `;
@@ -1328,20 +1357,19 @@ function selectCalendarDay(day, element) {
         Object.keys(byTime).sort().forEach((time) => {
             const students = byTime[time];
             const markedCount = students.filter(s => s.is_marked).length;
-            const presentCount = students.filter(s => s.status === 'present').length;
             
             html += `
-                <div style="margin-bottom: 16px; background: var(--bg-card); border-radius: 12px; padding: 12px; border: 1px solid var(--border);">
-                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; padding-bottom: 8px; border-bottom: 1px solid var(--border);">
-                        <div style="display: flex; align-items: center; gap: 8px;">
-                            <span style="font-size: 20px;">🕐</span>
-                            <span style="font-weight: 700; font-size: 18px; color: var(--accent);">${escapeHtml(time)}</span>
+                <section class="calendar-session-card">
+                    <div class="calendar-session-header">
+                        <div class="calendar-session-time">
+                            <span class="calendar-session-icon" aria-hidden="true">🕐</span>
+                            <span>${escapeHtml(time)}</span>
                         </div>
-                        <div style="font-size: 12px; color: var(--text-muted);">
-                            ${markedCount > 0 ? `<span style="color: var(--success);">✓ ${markedCount}/${students.length}</span>` : `${students.length} уч.`}
+                        <div class="calendar-session-count ${markedCount > 0 ? 'is-marked' : ''}">
+                            ${markedCount > 0 ? `✓ ${markedCount}/${students.length}` : `${students.length} уч.`}
                         </div>
                     </div>
-                    <div style="display: flex; flex-direction: column; gap: 8px;">
+                    <div class="calendar-session-students">
                         ${students.map(s => {
                             let statusIcon = '⏳';
                             let statusColor = 'var(--text-muted)';
@@ -1361,23 +1389,21 @@ function selectCalendarDay(day, element) {
                             }
                             
                             return `
-                                <button type="button" class="list-item" style="margin-bottom: 0; padding: 12px;"
+                                <button type="button" class="calendar-student-row"
                                      aria-label="${escapeHtml(s.student_name)}: ${statusText}"
                                      onclick="openLessonDetailFromCalendar(${day}, ${s.calendar_index})">
-                                    <div style="display: flex; justify-content: space-between; align-items: center;">
-                                        <div style="flex: 1;">
-                                            <div style="font-weight: 600; font-size: 15px; margin-bottom: 2px;">${escapeHtml(s.student_name)}</div>
-                                            <div style="font-size: 12px; color: var(--text-muted);">
-                                                📍 ${escapeHtml(s.location || 'Зал')} • <span style="color: ${statusColor};">${statusText}</span>
-                                            </div>
+                                    <div class="calendar-student-copy">
+                                        <div class="calendar-student-name">${escapeHtml(s.student_name)}</div>
+                                        <div class="calendar-student-meta">
+                                            ${escapeHtml(s.location || 'Зал')} · <span style="color: ${statusColor};">${statusText}</span>
                                         </div>
-                                        <div style="font-size: 20px; margin-left: 8px;">${statusIcon}</div>
                                     </div>
+                                    <div class="calendar-student-status" aria-hidden="true">${statusIcon}</div>
                                 </button>
                             `;
                         }).join('')}
                     </div>
-                </div>
+                </section>
             `;
         });
         
@@ -1564,30 +1590,31 @@ function renderPayments(list) {
         const lessonsText = p.is_unlimited ? '♾️ Безлимит' : formatLessonCount(p.lessons_count || 0);
         
         return `
-            <div class="list-item">
+            <article class="list-item payment-card">
                 <div class="list-item-header">
                     <span class="list-item-title">${escapeHtml(p.student_name)}</span>
                     <span class="payment-status ${statusClass}">${statusText}</span>
                 </div>
-                <div class="list-item-subtitle">${p.amount.toLocaleString()} Br • ${lessonsText}</div>
+                <div class="payment-amount">${p.amount.toLocaleString()} Br</div>
+                <div class="list-item-subtitle">${lessonsText}</div>
                 <div class="list-item-meta">
                     ${p.period_start && p.period_end ? 
                         `<span>📅 ${formatDate(p.period_start)} — ${formatDate(p.period_end)}</span>` : ''}
                 </div>
-                <div class="list-item-actions" style="display: flex; gap: 8px; margin-top: 12px;">
+                <div class="payment-actions">
                     ${p.status !== 'paid' ? `
-                        <button class="btn-primary" style="flex: 1;" onclick="markPaymentPaid(${p.id})">
-                            ✅ Оплачено
+                        <button class="payment-action payment-action-primary" onclick="markPaymentPaid(${p.id})">
+                            <span aria-hidden="true">✓</span> Отметить оплату
                         </button>
                     ` : ''}
-                    <button class="btn-secondary" style="flex: 1;" onclick="openEditPayment(${p.id})">
-                        ✏️ Редактировать оплату
+                    <button class="payment-action payment-action-secondary" onclick="openEditPayment(${p.id})">
+                        Редактировать
                     </button>
-                    <button class="btn-danger" style="flex: 1;" onclick="deletePayment(${p.id})">
-                        🗑 Удалить
+                    <button class="payment-action payment-action-danger" onclick="deletePayment(${p.id})">
+                        Удалить
                     </button>
                 </div>
-            </div>
+            </article>
         `;
     }).join('');
 }
@@ -1992,7 +2019,7 @@ function renderQuickLessonListGrouped(byTime, sortedTimes) {
                 <p>Нет учеников на этот день</p>
             </div>
         `;
-        document.getElementById('ql-title').textContent = '✅ Отметка (0)';
+        document.getElementById('ql-title').textContent = 'Отметка · 0';
         return;
     }
     
@@ -2045,7 +2072,7 @@ function renderQuickLessonListGrouped(byTime, sortedTimes) {
     });
     
     container.innerHTML = html;
-    document.getElementById('ql-title').textContent = `✅ Отметка (${totalStudents})`;
+    document.getElementById('ql-title').textContent = `Отметка · ${totalStudents}`;
 }
 
 // Legacy function - now calls the grouped version
@@ -2083,7 +2110,7 @@ function renderQuickLessonList(students) {
         `;
     }).join('');
     
-    document.getElementById('ql-title').textContent = `✅ Отметка (${students.length})`;
+    document.getElementById('ql-title').textContent = `Отметка · ${students.length}`;
 }
 
 function toggleQuickStatus(attendanceKey) {
@@ -2241,6 +2268,12 @@ function formatLessonCount(count) {
 }
 
 function formatMonthLabel(value) {
+    const isoMatch = String(value || '').match(/^(\d{4})-(\d{2})$/);
+    if (isoMatch) {
+        const labels = ['Янв', 'Фев', 'Мар', 'Апр', 'Май', 'Июн', 'Июл', 'Авг', 'Сен', 'Окт', 'Ноя', 'Дек'];
+        return labels[Number(isoMatch[2]) - 1] || value;
+    }
+
     const monthMap = {
         Jan: 'Янв', Feb: 'Фев', Mar: 'Мар', Apr: 'Апр',
         May: 'Май', Jun: 'Июн', Jul: 'Июл', Aug: 'Авг',
@@ -2696,7 +2729,7 @@ async function viewAttendanceHistory(studentId) {
         modal.innerHTML = `
             <div class="modal-content" style="max-height: 85vh; overflow-y: auto; display: flex; flex-direction: column;">
                 <div class="modal-header">
-                    <h3>📋 История посещений</h3>
+                <h3>История посещений</h3>
                     <button class="close-btn" onclick="this.closest('.modal').remove()">✕</button>
                 </div>
                 
@@ -3024,22 +3057,22 @@ function renderStatistics(data) {
             </div>
             
             <div class="stat-section">
-                <h3>📅 По дням недели</h3>
+                <h3>По дням недели</h3>
                 <div class="stat-bars">${byDayHtml || '<p>Нет данных</p>'}</div>
             </div>
             
             <div class="stat-section">
-                <h3>📍 По залам</h3>
+                <h3>По залам</h3>
                 <div class="stat-bars">${byLocationHtml || '<p>Нет данных</p>'}</div>
             </div>
             
             <div class="stat-section">
-                <h3>👥 Возрастные группы</h3>
+                <h3>Возрастные группы</h3>
                 <div class="age-groups">${ageGroupsHtml || '<p>Нет данных</p>'}</div>
             </div>
             
             <div class="stat-section">
-                <h3>📈 Динамика (6 мес)</h3>
+                <h3>Динамика за 6 месяцев</h3>
                 <div class="trend-chart">${trendHtml || '<p>Нет данных</p>'}</div>
             </div>
         </div>
@@ -3726,7 +3759,7 @@ function renderFinance(summary, debtors) {
     if (debtors.debtors.expired_subscription.length > 0) {
         debtorsHtml += `
             <div class="finance-section">
-                <h3>🚨 Просроченные абонементы (${debtors.debtors.expired_subscription.length})</h3>
+                <h3>Просроченные абонементы (${debtors.debtors.expired_subscription.length})</h3>
                 ${debtors.debtors.expired_subscription.map(d => `
                     <button type="button" class="debtor-item critical" onclick="openStudentDetail(${d.id})">
                         <div class="debtor-info">
@@ -3744,7 +3777,7 @@ function renderFinance(summary, debtors) {
     if (debtors.debtors.ending_soon.length > 0) {
         debtorsHtml += `
             <div class="finance-section">
-                <h3>⏰ Заканчивается скоро (${debtors.debtors.ending_soon.length})</h3>
+                <h3>Заканчивается скоро (${debtors.debtors.ending_soon.length})</h3>
                 ${debtors.debtors.ending_soon.map(d => `
                     <button type="button" class="debtor-item warning" onclick="openStudentDetail(${d.id})">
                         <div class="debtor-info">
@@ -3762,7 +3795,7 @@ function renderFinance(summary, debtors) {
     if (debtors.debtors.no_lessons.length > 0) {
         debtorsHtml += `
             <div class="finance-section">
-                <h3>❌ Закончились занятия (${debtors.debtors.no_lessons.length})</h3>
+                <h3>Закончились занятия (${debtors.debtors.no_lessons.length})</h3>
                 ${debtors.debtors.no_lessons.map(d => `
                     <button type="button" class="debtor-item critical" onclick="openStudentDetail(${d.id})">
                         <div class="debtor-info">
@@ -3780,7 +3813,7 @@ function renderFinance(summary, debtors) {
     if (debtors.debtors.low_lessons.length > 0) {
         debtorsHtml += `
             <div class="finance-section">
-                <h3>⚠️ Мало занятий (${debtors.debtors.low_lessons.length})</h3>
+                <h3>Мало занятий (${debtors.debtors.low_lessons.length})</h3>
                 ${debtors.debtors.low_lessons.map(d => `
                     <button type="button" class="debtor-item warning" onclick="openStudentDetail(${d.id})">
                         <div class="debtor-info">
@@ -3820,20 +3853,20 @@ function renderFinance(summary, debtors) {
         
         ${byCoachHtml ? `
             <div class="finance-section">
-                <h3>👥 По тренерам</h3>
+                <h3>По тренерам</h3>
                 ${byCoachHtml}
             </div>
         ` : ''}
         
         ${byLocationHtml ? `
             <div class="finance-section">
-                <h3>📍 По залам</h3>
+                <h3>По залам</h3>
                 ${byLocationHtml}
             </div>
         ` : ''}
         
         <div class="finance-section">
-            <h3>📈 Динамика доходов (6 мес)</h3>
+            <h3>Динамика доходов за 6 месяцев</h3>
             <div class="trend-chart">${trendHtml}</div>
         </div>
         
