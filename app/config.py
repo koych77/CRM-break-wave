@@ -8,10 +8,16 @@ DATA_DIR.mkdir(exist_ok=True)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 ADMIN_IDS = list(map(int, os.getenv("ADMIN_IDS", "").split(","))) if os.getenv("ADMIN_IDS") else []
-ADMIN_SECRET = os.getenv("ADMIN_SECRET", "bwcoach2026")
+ADMIN_SECRET = os.getenv("ADMIN_SECRET", "").strip()
+TELEGRAM_AUTH_MAX_AGE_SECONDS = int(os.getenv("TELEGRAM_AUTH_MAX_AGE_SECONDS", "3600"))
 
 DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite+aiosqlite:///{DATA_DIR / 'coach_crm.db'}")
 WEBAPP_URL = os.getenv("WEBAPP_URL", "")
+CORS_ORIGINS = [
+    origin.strip().rstrip("/")
+    for origin in os.getenv("CORS_ORIGINS", "").split(",")
+    if origin.strip()
+]
 
 # Constants
 LESSON_STATUS = {

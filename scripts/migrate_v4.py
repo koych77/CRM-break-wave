@@ -47,7 +47,10 @@ async def migrate():
             print("✓ lesson_times already exists")
         except:
             print("Adding lesson_times to students...")
-            await conn.execute(text('''ALTER TABLE students ADD COLUMN lesson_times VARCHAR(500) DEFAULT '{"1": "18:00", "3": "18:00"}''''))
+            await conn.execute(text(
+                """ALTER TABLE students ADD COLUMN lesson_times VARCHAR(500)
+                DEFAULT '{"1": "18:00", "3": "18:00"}'"""
+            ))
             # Update existing records with default times based on lesson_days
             result = await conn.execute(text("SELECT id, lesson_days, lesson_time FROM students WHERE lesson_times IS NULL"))
             rows = result.fetchall()

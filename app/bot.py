@@ -1,4 +1,5 @@
 import asyncio
+import hmac
 import logging
 import json
 import os
@@ -388,8 +389,13 @@ async def cmd_coach_register(message: Message):
     if len(parts) < 2:
         await message.answer("Используй: /coach <секретный код>")
         return
-    
-    if parts[1].strip() != ADMIN_SECRET:
+
+    if not ADMIN_SECRET:
+        logger.error("Coach self-registration is disabled because ADMIN_SECRET is not configured")
+        await message.answer("❌ Регистрация временно отключена. Обратитесь к администратору.")
+        return
+
+    if not hmac.compare_digest(parts[1].strip(), ADMIN_SECRET):
         await message.answer("❌ Неверный код.")
         return
     

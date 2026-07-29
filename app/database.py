@@ -1,15 +1,27 @@
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from sqlalchemy.orm import DeclarativeBase
-from sqlalchemy import text
+from sqlalchemy import event, text
+from sqlalchemy.engine import make_url
 from app.config import DATABASE_URL
 import logging
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-logger.info(f"Database URL: {DATABASE_URL}")
+database_url = make_url(DATABASE_URL)
+is_sqlite = database_url.drivername.startswith("sqlite")
+logger.info("Database backend: %s", database_url.drivername)
 
 engine = create_async_engine(DATABASE_URL, echo=False)
 async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+
+if is_sqlite:
+    @event.listens_for(engine.sync_engine, "connect")
+    def _enable_sqlite_foreign_keys(dbapi_connection, _connection_record):
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
 
 
 class Base(DeclarativeBase):
@@ -20,12 +32,12 @@ async def init_db():
     """Initialize database tables."""
     logger.info("Initializing database...")
     
-    # Ensure data directory exists (for Railway volume)
-    import os
-    data_dir = os.path.dirname(DATABASE_URL.replace('sqlite+aiosqlite:///', ''))
-    if data_dir and not os.path.exists(data_dir):
-        os.makedirs(data_dir, exist_ok=True)
-        logger.info(f"Created data directory: {data_dir}")
+    # Ensure the SQLite parent directory exists without treating non-SQLite URLs as paths.
+    if is_sqlite and database_url.database and database_url.database != ":memory:":
+        database_path = Path(database_url.database)
+        if not database_path.is_absolute():
+            database_path = Path.cwd() / database_path
+        database_path.parent.mkdir(parents=True, exist_ok=True)
     
     async with engine.begin() as conn:
         # Coaches table
@@ -324,7 +336,7 @@ async def run_migrations():
                 CREATE TABLE IF NOT EXISTS student_schedules (
                     id INTEGER PRIMARY KEY,
                     student_id INTEGER NOT NULL REFERENCES students(id),
-                    location_id INTEGER NOT NULL REFERENCES locations(id),
+                    location_id INTEGER REFERENCES locations(id),
                     days VARCHAR(100) DEFAULT '1,3',
                     times VARCHAR(500) DEFAULT '{"1": "18:00", "3": "18:00"}',
                     duration INTEGER DEFAULT 90,
@@ -332,6 +344,40 @@ async def run_migrations():
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
                 )
             """))
+
+        # Older databases created location_id as NOT NULL even though the API permits
+        # schedules without a selected hall. Rebuild the child table without data loss.
+        if is_sqlite:
+            table_info = await conn.execute(text("PRAGMA table_info(student_schedules)"))
+            location_column = next(
+                (row for row in table_info.fetchall() if row[1] == "location_id"),
+                None,
+            )
+            if location_column and location_column[3]:
+                logger.info("Migrating: Allowing null location_id in student_schedules")
+                await conn.execute(text("DROP TABLE IF EXISTS student_schedules_new"))
+                await conn.execute(text("""
+                    CREATE TABLE student_schedules_new (
+                        id INTEGER PRIMARY KEY,
+                        student_id INTEGER NOT NULL REFERENCES students(id),
+                        location_id INTEGER REFERENCES locations(id),
+                        days VARCHAR(100) DEFAULT '1,3',
+                        times VARCHAR(500) DEFAULT '{"1": "18:00", "3": "18:00"}',
+                        duration INTEGER DEFAULT 90,
+                        is_primary BOOLEAN DEFAULT 1,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                    )
+                """))
+                await conn.execute(text("""
+                    INSERT INTO student_schedules_new
+                        (id, student_id, location_id, days, times, duration, is_primary, created_at)
+                    SELECT id, student_id, location_id, days, times, duration, is_primary, created_at
+                    FROM student_schedules
+                """))
+                await conn.execute(text("DROP TABLE student_schedules"))
+                await conn.execute(text(
+                    "ALTER TABLE student_schedules_new RENAME TO student_schedules"
+                ))
         
         # 10. Check and add is_unlimited to payments
         try:

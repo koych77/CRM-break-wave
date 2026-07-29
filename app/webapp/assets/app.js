@@ -5,7 +5,7 @@ const tg = window.Telegram?.WebApp;
 
 // Cache busting - force reload if version changed
 const APP_VERSION_KEY = 'crm_bw_version';
-const CURRENT_VERSION = '38'; // Version 38: instant payment refresh, quick attendance persistence, lighter student loads
+const CURRENT_VERSION = '40'; // Version 40: cohesive visual system and mobile workflow polish
 
 // Check version on load
 const savedVersion = localStorage.getItem(APP_VERSION_KEY);
@@ -58,21 +58,51 @@ let students = [];
 let payments = [];
 let calendarData = {};
 let currentCalendarDate = new Date();
+let selectedCalendarDay = null;
 let editingStudentId = null;
 let editingPaymentId = null;
 let currentStudentDetailId = null;
+let currentStudentDetailName = '';
 let selectedDays = new Set([1, 3]); // Default Mon, Wed
 let currentPaymentsFilter = 'all';
+let accessibilityControlId = 0;
+const ROOT_SCREENS = new Set(['dashboard', 'students', 'calendar', 'quick-lesson', 'finance']);
+
+function callTelegram(method, ...args) {
+    try {
+        const result = tg?.[method]?.(...args);
+        result?.catch?.(() => {});
+    } catch (error) {
+        console.debug(`Telegram WebApp method ${method} is unavailable`, error);
+    }
+}
+
+function telegramVersionAtLeast(version) {
+    try {
+        return typeof tg?.isVersionAtLeast !== 'function' || tg.isVersionAtLeast(version);
+    } catch {
+        return false;
+    }
+}
 
 // === Init ===
 document.addEventListener('DOMContentLoaded', async () => {
+    enhanceAccessibility(document);
+    initializeDialogAccessibility();
+
     if (tg) {
-        tg.ready();
-        tg.expand();
-        tg.requestFullscreen?.();
-        tg.enableClosingConfirmation?.();
-        tg.setBackgroundColor?.('#0A1628');
-        tg.setHeaderColor?.('#0F2035');
+        callTelegram('ready');
+        callTelegram('expand');
+        if (telegramVersionAtLeast('8.0')) {
+            callTelegram('requestFullscreen');
+        }
+        if (telegramVersionAtLeast('6.2')) {
+            callTelegram('enableClosingConfirmation');
+        }
+        if (telegramVersionAtLeast('6.1')) {
+            callTelegram('setBackgroundColor', '#07111F');
+            callTelegram('setHeaderColor', '#0B1829');
+        }
         initData = tg.initData || '';
         
         // Store current user info from Telegram
@@ -100,6 +130,119 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Authenticate
     await authenticate();
 });
+
+function enhanceAccessibility(root = document) {
+    root.querySelectorAll?.('button:not([type])').forEach((button) => {
+        button.setAttribute('type', 'button');
+    });
+
+    root.querySelectorAll?.('.back-btn').forEach((button) => {
+        if (!button.getAttribute('aria-label')) button.setAttribute('aria-label', 'Назад');
+    });
+
+    root.querySelectorAll?.('.close-btn').forEach((button) => {
+        if (!button.getAttribute('aria-label')) button.setAttribute('aria-label', 'Закрыть');
+    });
+
+    root.querySelectorAll?.('.btn-icon').forEach((button) => {
+        if (!button.getAttribute('aria-label') && button.textContent.trim() === '×') {
+            button.setAttribute('aria-label', 'Удалить');
+        }
+    });
+
+    root.querySelectorAll?.('.form-group').forEach((group) => {
+        const label = group.querySelector(':scope > label');
+        const control = group.querySelector('input, select, textarea');
+        if (!label || !control || label.contains(control)) return;
+        if (!control.id) {
+            accessibilityControlId += 1;
+            control.id = `accessible-control-${accessibilityControlId}`;
+        }
+        if (!label.htmlFor) label.htmlFor = control.id;
+    });
+
+    const previousMonth = root.querySelector?.('.calendar-nav button[onclick="changeMonth(-1)"]');
+    const nextMonth = root.querySelector?.('.calendar-nav button[onclick="changeMonth(1)"]');
+    previousMonth?.setAttribute('aria-label', 'Предыдущий месяц');
+    nextMonth?.setAttribute('aria-label', 'Следующий месяц');
+}
+
+function initializeDialogAccessibility() {
+    let activeDialog = null;
+    let focusBeforeDialog = null;
+
+    const syncDialogs = () => {
+        const modal = document.querySelector('.modal');
+        const appRoot = document.getElementById('app');
+        document.body.classList.toggle('modal-open', Boolean(modal));
+        if (appRoot) appRoot.inert = Boolean(modal);
+        if (!modal) {
+            if (activeDialog) {
+                const restoreTarget = focusBeforeDialog;
+                activeDialog = null;
+                focusBeforeDialog = null;
+                requestAnimationFrame(() => restoreTarget?.focus?.());
+            }
+            return;
+        }
+
+        modal.setAttribute('role', 'dialog');
+        modal.setAttribute('aria-modal', 'true');
+        modal.setAttribute('tabindex', '-1');
+        const heading = modal.querySelector('h2, h3');
+        if (heading) {
+            if (!heading.id) heading.id = `dialog-title-${Date.now()}`;
+            modal.setAttribute('aria-labelledby', heading.id);
+        }
+        enhanceAccessibility(modal);
+        if (modal !== activeDialog) {
+            focusBeforeDialog = document.activeElement;
+            activeDialog = modal;
+            requestAnimationFrame(() => {
+                const firstControl = modal.querySelector(
+                    'input:not([type="hidden"]), select, textarea, button'
+                );
+                (firstControl || modal).focus();
+            });
+        }
+    };
+
+    const observer = new MutationObserver(() => {
+        enhanceAccessibility(document);
+        syncDialogs();
+    });
+    observer.observe(document.body, {childList: true, subtree: true});
+    syncDialogs();
+
+    document.addEventListener('keydown', (event) => {
+        const modal = document.querySelector('.modal');
+        if (!modal) return;
+
+        if (event.key === 'Escape') {
+            const closeButton = modal.querySelector(
+                '[data-close-modal], .close-btn, button[onclick*=".remove()"]'
+            );
+            closeButton?.click();
+            return;
+        }
+
+        if (event.key !== 'Tab') return;
+        const focusable = [...modal.querySelectorAll(
+            'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+        )].filter((element) => element.getClientRects().length > 0);
+        if (focusable.length === 0) return;
+
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (event.shiftKey && document.activeElement === first) {
+            event.preventDefault();
+            last.focus();
+        } else if (!event.shiftKey && document.activeElement === last) {
+            event.preventDefault();
+            first.focus();
+        }
+    });
+}
 
 function setupWeekdaySelector() {
     const container = document.getElementById('weekdays-selector');
@@ -140,12 +283,24 @@ function setupForms() {
 
 async function authenticate() {
     try {
+        if (!initData) {
+            showApplicationError('Откройте CRM из меню Telegram-бота Break Wave.');
+            return;
+        }
+
         const res = await fetch(`${API}/api/auth`, {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({initData})
         });
         
+        if (!res.ok) {
+            if (res.status === 401 || res.status === 403) {
+                showApplicationError('Сессия Telegram устарела. Закройте CRM и откройте её снова из меню бота.');
+                return;
+            }
+            throw new Error(`Authentication failed with ${res.status}`);
+        }
         const data = await res.json();
         
         if (data.error === 'not_registered') {
@@ -166,8 +321,19 @@ async function authenticate() {
         showScreen('dashboard');
     } catch (e) {
         console.error('Auth error:', e);
-        showNotification('Ошибка авторизации', 'error');
+        showApplicationError('Не удалось связаться с сервером. Проверьте интернет и повторите попытку.');
     }
+}
+
+function showApplicationError(message) {
+    const messageElement = document.getElementById('error-message');
+    if (messageElement) messageElement.textContent = message;
+    showScreen('error');
+}
+
+async function retryApplication() {
+    showScreen('loading');
+    await authenticate();
 }
 
 // === Navigation ===
@@ -176,6 +342,11 @@ function navigate(screen) {
     if (currentScreen !== screen && currentScreen !== 'loading') {
         screenHistory.push(currentScreen);
     }
+    showScreen(screen);
+}
+
+function navigateRoot(screen) {
+    screenHistory = [];
     showScreen(screen);
 }
 
@@ -197,8 +368,22 @@ function showScreen(screen) {
         el.classList.add('active');
     }
     
-    // Scroll to top
-    document.getElementById('content')?.scrollTo(0, 0);
+    // The document is the real scroll container in the current layout.
+    window.scrollTo(0, 0);
+    const content = document.getElementById('content');
+    if (content) content.scrollTop = 0;
+
+    const bottomNav = document.getElementById('bottom-nav');
+    const navigationVisible = ROOT_SCREENS.has(screen);
+    if (bottomNav) {
+        bottomNav.hidden = !navigationVisible;
+        bottomNav.querySelectorAll('button').forEach((button) => {
+            const isActive = button.dataset.screen === screen;
+            button.classList.toggle('active', isActive);
+            if (isActive) button.setAttribute('aria-current', 'page');
+            else button.removeAttribute('aria-current');
+        });
+    }
     
     // Load data
     switch (screen) {
@@ -223,7 +408,31 @@ function showScreen(screen) {
         case 'finance':
             loadFinance();
             break;
+        case 'search': {
+            const input = document.getElementById('search-input');
+            if (!input?.value.trim()) {
+                renderScreenState(
+                    document.getElementById('search-results'),
+                    'Введите минимум две буквы имени, никнейма или телефона.',
+                    {icon: '🔎'}
+                );
+            }
+            input?.focus();
+            break;
+        }
     }
+}
+
+function renderScreenState(container, message, options = {}) {
+    if (!container) return;
+    const {retry, icon = '⚠️'} = options;
+    container.innerHTML = `
+        <div class="screen-state" role="status">
+            <div class="screen-state-icon" aria-hidden="true">${icon}</div>
+            <p>${escapeHtml(message)}</p>
+            ${retry ? `<button type="button" class="btn-secondary" onclick="${retry}">Повторить</button>` : ''}
+        </div>
+    `;
 }
 
 // === Coaches ===
@@ -248,24 +457,8 @@ async function loadCoaches() {
 }
 
 function updateCoachFilterLabels() {
-    if (coaches.length < 2) return;
-    
-    const myBtn = document.getElementById('filter-my');
-    const otherBtn = document.getElementById('filter-other');
-    
-    if (!myBtn || !otherBtn) return;
-    
-    // Find current coach and other coach
-    const myCoach = coaches.find(c => c.is_current);
-    const otherCoach = coaches.find(c => !c.is_current);
-    
-    if (myCoach) {
-        myBtn.textContent = myCoach.first_name || 'Мои';
-    }
-    
-    if (otherCoach) {
-        otherBtn.textContent = otherCoach.first_name || 'Брат';
-    }
+    const operationalFilter = document.querySelector('#coach-filter-tabs [data-filter="all"]');
+    if (operationalFilter) operationalFilter.textContent = 'Мои ученики';
 }
 
 function renderCoachSelect() {
@@ -290,7 +483,6 @@ function renderCoachSelect() {
     const coachName = coachInfo?.first_name || currentCoach?.first_name || 'Тренер';
     const coachUsername = coachInfo?.username || currentCoach?.username;
     const coachId = coachInfo?.id || currentCoach?.id || coaches[0]?.id;
-    const isAdmin = coachInfo?.is_admin || currentCoach?.is_admin;
     
     // Show current coach info (auto-filled from Telegram)
     select.style.display = 'none';
@@ -301,20 +493,7 @@ function renderCoachSelect() {
     `;
     select.value = coachId;
     
-    // For admin with multiple coaches - show dropdown instead
-    if (coaches.length > 1 && isAdmin) {
-        select.style.display = 'block';
-        display.style.display = 'none';
-        select.innerHTML = coaches.map(c => {
-            const isCurrent = c.is_current ? ' (вы)' : '';
-            const username = c.username ? ` @${c.username}` : '';
-            return `<option value="${c.id}">${escapeHtml(c.first_name || 'Без имени')}${username}${isCurrent}</option>`;
-        }).join('');
-        
-        if (coachId) {
-            select.value = coachId;
-        }
-    }
+    // Operational screens intentionally stay in the signed-in coach context.
 }
 
 // === Dashboard ===
@@ -343,12 +522,28 @@ async function loadDashboard() {
     } catch (e) {
         console.error('Dashboard load error:', e);
         if (!cached) {
-            showNotification('Ошибка загрузки данных', 'error');
+            ['stat-students', 'stat-lessons', 'stat-attendance', 'stat-revenue'].forEach((id) => {
+                const value = document.getElementById(id);
+                if (value) value.textContent = '—';
+            });
+            const alertsSection = document.getElementById('alerts-section');
+            if (alertsSection) alertsSection.style.display = 'block';
+            renderScreenState(
+                document.getElementById('alerts-list'),
+                'Не удалось загрузить сводку.',
+                {retry: 'loadDashboard()'}
+            );
         }
     }
 }
 
 async function renderDashboard(data) {
+    const greeting = document.getElementById('dashboard-greeting');
+    const coachName = currentCoach?.first_name?.trim();
+    if (greeting) {
+        greeting.textContent = coachName ? `Добрый день, ${coachName}` : 'Рабочий обзор';
+    }
+
     // Update stats
     document.getElementById('stat-students').textContent = data.students_count;
     document.getElementById('stat-lessons').textContent = data.lessons_this_month;
@@ -413,13 +608,13 @@ async function renderDashboard(data) {
     } else {
         alertsSection.style.display = 'block';
         alertsContainer.innerHTML = alerts.map(a => `
-            <div class="alert-item" onclick="navigate('students')">
+            <button type="button" class="alert-item" onclick="navigate('students')">
                 <div class="alert-icon">${a.icon}</div>
                 <div class="alert-content">
                     <div class="alert-title">${a.title}</div>
                     <div class="alert-subtitle">${a.subtitle}</div>
                 </div>
-            </div>
+            </button>
         `).join('');
     }
 }
@@ -432,17 +627,10 @@ async function loadStudents() {
     // Load coaches first (for displaying coach info)
     await loadCoaches();
     
-    // Build request body based on filter
-    const requestBody = {initData};
-    if (currentStudentsFilter === 'my') {
-        requestBody.view_mode = 'my';
-    } else if (currentStudentsFilter === 'other' && coaches.length > 1) {
-        // Find other coach (brother)
-        const otherCoach = coaches.find(c => !c.is_current);
-        if (otherCoach) {
-            requestBody.coach_id = otherCoach.id;
-        }
-    }
+    const requestBody = {
+        initData,
+        coach_id: currentCoach?.coach_id || null,
+    };
     
     // Show cached data first
     const cached = DataCache.load(DataCache.STUDENTS_KEY);
@@ -468,7 +656,11 @@ async function loadStudents() {
     } catch (e) {
         console.error('Students load error:', e);
         if (!cached) {
-            showNotification('Ошибка загрузки учеников', 'error');
+            renderScreenState(
+                document.getElementById('students-list'),
+                'Не удалось загрузить учеников.',
+                {retry: 'loadStudents()'}
+            );
         }
     }
 }
@@ -524,18 +716,7 @@ function renderStudentsList(list) {
         if (!s.is_unlimited && remaining <= 0) {
             lessonsBadge = '<span class="list-item-badge danger">Нет занятий</span>';
         } else if (!s.is_unlimited && remaining <= 2) {
-            lessonsBadge = `<span class="list-item-badge warning">${remaining} занятия</span>`;
-        } else if (s.is_unlimited) {
-            lessonsBadge = '<span class="list-item-badge" style="background: rgba(123, 92, 255, 0.15); color: var(--accent);">♾️ Безлимит</span>';
-        }
-        
-        // Get coach badge (my vs other)
-        let coachBadge = '';
-        if (coaches.length > 1) {
-            const isMyStudent = s.is_my_student !== undefined ? s.is_my_student : s.coach_id === currentCoach?.coach_id;
-            const badgeClass = isMyStudent ? 'my' : 'other';
-            const badgeText = isMyStudent ? 'Мой' : 'Брат';
-            coachBadge = `<span class="coach-badge ${badgeClass}">${badgeText}</span>`;
+            lessonsBadge = `<span class="list-item-badge warning">${formatLessonCount(remaining)}</span>`;
         }
         
         // Show locations info
@@ -543,21 +724,20 @@ function renderStudentsList(list) {
         if (s.schedules && s.schedules.length > 1) {
             const locationCount = s.schedules.length;
             const primaryLoc = s.schedules.find(sch => sch.is_primary);
-            locationsInfo = `<span>📍 ${primaryLoc?.location_name || 'Зал'} +${locationCount - 1}</span>`;
+            locationsInfo = `<span>📍 ${escapeHtml(primaryLoc?.location_name || 'Зал')} +${locationCount - 1}</span>`;
         } else {
             locationsInfo = `<span>📍 ${escapeHtml(s.location || 'Зал Break Wave')}</span>`;
         }
         
         // Lessons indicator
-        const indicatorClass = s.is_unlimited ? '' : (remaining <= 2 ? 'low' : remaining <= 0 ? 'none' : '');
+        const indicatorClass = s.is_unlimited ? '' : (remaining <= 0 ? 'none' : remaining <= 2 ? 'low' : '');
         const lessonsIndicator = `<span class="lessons-indicator ${indicatorClass}">${getStudentLessonsDisplay(s)}</span>`;
         
         return `
-            <div class="list-item" onclick="openStudentDetail(${s.id})">
+            <button type="button" class="list-item" onclick="openStudentDetail(${s.id})">
                 <div class="list-item-header">
                     <span class="list-item-title">${escapeHtml(s.name)} ${lessonsIndicator}</span>
-                    <div style="display: flex; gap: 4px;">
-                        ${coachBadge}
+                    <div class="list-item-badges">
                         ${lessonsBadge || statusBadge}
                     </div>
                 </div>
@@ -566,7 +746,7 @@ function renderStudentsList(list) {
                     ${locationsInfo}
                     <span>🕐 ${days}</span>
                 </div>
-            </div>
+            </button>
         `;
     }).join('');
 }
@@ -624,6 +804,7 @@ async function openStudentDetail(id, options = {}) {
             showNotification('Ученик не найден', 'error');
             return;
         }
+        currentStudentDetailName = student.name || '';
         
         const days = student.lesson_days ? student.lesson_days.split(',').map(d => {
             const daysMap = {0:'Пн',1:'Вт',2:'Ср',3:'Чт',4:'Пт',5:'Сб',6:'Вс'};
@@ -658,7 +839,7 @@ async function openStudentDetail(id, options = {}) {
         if (!student.is_unlimited && remaining <= 0) {
             lessonsAlert = '<div class="alert-danger">Занятия закончились! Требуется оплата.</div>';
         } else if (!student.is_unlimited && remaining <= 2) {
-            lessonsAlert = `<div class="alert-warning">Осталось ${remaining} занятия. Пора оплачивать!</div>`;
+            lessonsAlert = `<div class="alert-warning">Осталось ${formatLessonCount(remaining)}. Пора оплачивать!</div>`;
         }
         
         // Attendance history summary
@@ -749,7 +930,7 @@ async function openStudentDetail(id, options = {}) {
         const content = document.getElementById('student-detail-content');
         content.innerHTML = `
             <div class="student-header">
-                <div class="student-avatar">${student.name.charAt(0)}</div>
+                <div class="student-avatar">${escapeHtml(student.name.charAt(0))}</div>
                 <div class="student-name">${escapeHtml(student.name)}</div>
                 ${student.nickname ? `<div class="student-nickname">${escapeHtml(student.nickname)}</div>` : ''}
                 <span class="student-status ${student.is_active ? 'active' : 'inactive'}">
@@ -761,14 +942,14 @@ async function openStudentDetail(id, options = {}) {
             ${subAlert}
             
             <div class="info-section">
-                <h3>📞 Контакты</h3>
+                <h3>Контакты</h3>
                 <div class="info-row">
                     <span class="info-label">Телефон</span>
-                    <span class="info-value">${student.phone || '—'}</span>
+                    <span class="info-value">${escapeHtml(student.phone || '—')}</span>
                 </div>
                 <div class="info-row">
                     <span class="info-label">Тел. родителя</span>
-                    <span class="info-value">${student.parent_phone || '—'}</span>
+                    <span class="info-value">${escapeHtml(student.parent_phone || '—')}</span>
                 </div>
                 <div class="info-row">
                     <span class="info-label">Возраст</span>
@@ -777,7 +958,7 @@ async function openStudentDetail(id, options = {}) {
             </div>
             
             <div class="info-section">
-                <h3>📍 Залы и расписание</h3>
+                <h3>Залы и расписание</h3>
                 ${renderStudentDetailLocations(student)}
                 <div class="info-row" style="margin-top: 12px;">
                     <span class="info-label">Стоимость</span>
@@ -786,7 +967,7 @@ async function openStudentDetail(id, options = {}) {
             </div>
             
             <div class="info-section">
-                <h3>📅 Абонемент</h3>
+                <h3>Абонемент</h3>
                 ${student.is_unlimited ? `
                 <div style="background: var(--bg-secondary); border-radius: 8px; padding: 12px; margin-bottom: 12px; border-left: 3px solid var(--accent);">
                     <div style="font-size: 13px; color: var(--text-secondary); margin-bottom: 4px;">Тип абонемента</div>
@@ -828,10 +1009,10 @@ async function openStudentDetail(id, options = {}) {
             
             ${student.payments && student.payments.length > 0 ? `
             <div class="info-section">
-                <h3>💳 История оплат</h3>
+                <h3>История оплат</h3>
                 ${student.payments.map(p => {
                     const statusText = {paid: 'Оплачено', pending: 'Ожидает', overdue: 'Просрочено'}[p.status];
-                    const lessonsText = p.is_unlimited ? '♾️ Безлимит' : `${p.lessons_count || 0} занятий`;
+                    const lessonsText = p.is_unlimited ? '♾️ Безлимит' : formatLessonCount(p.lessons_count || 0);
                     return `
                     <div class="list-item" style="margin-bottom: 8px;">
                         <div class="list-item-header">
@@ -840,7 +1021,7 @@ async function openStudentDetail(id, options = {}) {
                         </div>
                         <div class="list-item-subtitle">${lessonsText}${p.period_start && p.period_end ? ' • ' + formatDate(p.period_start) + ' — ' + formatDate(p.period_end) : ''}</div>
                         <div style="display: flex; gap: 8px; margin-top: 8px;">
-                            <button class="btn-secondary" style="flex: 1; padding: 6px; font-size: 13px;" onclick="openEditPayment(${p.id})">✏️ Редактировать</button>
+                            <button class="btn-secondary" style="flex: 1; padding: 6px; font-size: 13px;" onclick="openEditPayment(${p.id})">✏️ Редактировать оплату</button>
                             <button class="btn-danger" style="flex: 1; padding: 6px; font-size: 13px;" onclick="deletePayment(${p.id})">🗑 Удалить</button>
                         </div>
                     </div>
@@ -851,26 +1032,32 @@ async function openStudentDetail(id, options = {}) {
             
             ${attendanceSummary ? `
             <div class="info-section">
-                <h3>📊 Посещаемость</h3>
+                <h3>Посещаемость</h3>
                 ${attendanceSummary}
             </div>
             ` : ''}
             
             ${student.notes ? `
             <div class="info-section">
-                <h3>📝 Заметки</h3>
+                <h3>Заметки</h3>
                 <p style="color: var(--text-secondary); font-size: 14px;">${escapeHtml(student.notes)}</p>
             </div>
             ` : ''}
             
             <div class="action-buttons-grid">
-                <button class="btn-primary" onclick="openEditStudent(${student.id})">✏️ Редактировать</button>
-                <button class="btn-secondary" onclick="addPaymentForStudent(${student.id})">💰 Оплата</button>
-                <button class="btn-secondary" onclick="markExtraAttendance(${student.id})">⭐ Внеплановое</button>
-                <button class="btn-secondary" onclick="viewAttendanceHistory(${student.id})">📋 История</button>
-                <button class="btn-secondary btn-danger" onclick="deactivateStudent(${student.id})">🚫 Деактивировать</button>
-                <button class="btn-danger" onclick="destroyStudent(${student.id}, '${escapeHtml(student.name)}')">🗑️ Удалить навсегда</button>
+                <button class="btn-primary" onclick="openEditStudent(${student.id})">Редактировать</button>
+                <button class="btn-secondary" onclick="addPaymentForStudent(${student.id})">Добавить оплату</button>
+                <button class="btn-secondary" onclick="markExtraAttendance(${student.id})">Внеплановое занятие</button>
+                <button class="btn-secondary" onclick="viewAttendanceHistory(${student.id})">История посещений</button>
             </div>
+            <section class="danger-zone">
+                <h3>Опасная зона</h3>
+                <p>Деактивацию можно отменить без потери истории. Полное удаление необратимо.</p>
+                <div class="action-buttons-grid">
+                    <button class="btn-secondary btn-danger" onclick="deactivateStudent(${student.id})">Деактивировать</button>
+                    <button class="btn-danger" onclick="destroyStudent(${student.id})">Удалить навсегда</button>
+                </div>
+            </section>
         `;
         
         if (navigateToScreen) {
@@ -1053,6 +1240,11 @@ async function loadCalendar() {
         renderCalendar(year, month, calendarData.days);
     } catch (e) {
         console.error('Calendar load error:', e);
+        renderScreenState(
+            document.getElementById('calendar-day-details'),
+            'Не удалось загрузить календарь.',
+            {retry: 'loadCalendar()'}
+        );
     }
 }
 
@@ -1067,7 +1259,7 @@ function renderCalendar(year, month, daysWithLessons) {
     
     // Padding days
     for (let i = 0; i < startPadding; i++) {
-        html += '<div class="calendar-day other-month"></div>';
+        html += '<span class="calendar-day other-month" aria-hidden="true"></span>';
     }
     
     // Days
@@ -1078,26 +1270,42 @@ function renderCalendar(year, month, daysWithLessons) {
                        today.getFullYear() === year;
         
         const hasLessons = daysWithLessons[day]?.length > 0;
-        const dot = hasLessons ? '<div class="day-dot"></div>' : '';
+        const dot = hasLessons ? '<span class="day-dot" aria-hidden="true"></span>' : '';
+        const spokenDate = new Date(year, month - 1, day).toLocaleDateString(
+            'ru-RU',
+            {day: 'numeric', month: 'long'}
+        );
         
         html += `
-            <div class="calendar-day ${isToday ? 'today' : ''}" 
+            <button type="button" class="calendar-day ${isToday ? 'today' : ''}"
+                 data-day="${day}"
+                 aria-label="${spokenDate}${hasLessons ? ', есть занятия' : ', занятий нет'}"
                  onclick="selectCalendarDay(${day}, this)">
                 ${day}
                 ${dot}
-            </div>
+            </button>
         `;
     }
     
     grid.innerHTML = html;
+
+    const isCurrentMonth = today.getFullYear() === year && today.getMonth() + 1 === month;
+    const defaultDay = selectedCalendarDay
+        || (isCurrentMonth
+            ? today.getDate()
+            : (Object.keys(daysWithLessons).map(Number).sort((a, b) => a - b)[0] || 1));
+    const defaultButton = grid.querySelector(`[data-day="${defaultDay}"]`);
+    selectCalendarDay(defaultDay, defaultButton);
 }
 
 function changeMonth(delta) {
     currentCalendarDate.setMonth(currentCalendarDate.getMonth() + delta);
+    selectedCalendarDay = null;
     loadCalendar();
 }
 
 function selectCalendarDay(day, element) {
+    selectedCalendarDay = day;
     const lessons = calendarData.days[day] || [];
     const container = document.getElementById('calendar-day-details');
     
@@ -1113,19 +1321,19 @@ function selectCalendarDay(day, element) {
     
     if (lessons.length === 0) {
         container.innerHTML = `
-            <div style="text-align: center; padding: 20px;">
-                <div style="font-size: 24px; font-weight: 700; color: var(--accent); margin-bottom: 4px;">${day}</div>
-                <div style="font-size: 14px; color: var(--text-secondary); margin-bottom: 8px;">${dayOfWeek}</div>
-                <p style="color: var(--text-muted); margin-top: 16px;">Нет занятий</p>
+            <div class="calendar-day-summary is-empty">
+                <div class="calendar-date-number">${day}</div>
+                <div class="calendar-date-weekday">${dayOfWeek}</div>
+                <p>На этот день занятий нет</p>
             </div>
         `;
     } else {
         // Group by time
         const byTime = {};
-        lessons.forEach(l => {
+        lessons.forEach((l, lessonIndex) => {
             const time = l.time || '—';
             if (!byTime[time]) byTime[time] = [];
-            byTime[time].push(l);
+            byTime[time].push({...l, calendar_index: lessonIndex});
         });
         
         // Calculate totals
@@ -1134,35 +1342,34 @@ function selectCalendarDay(day, element) {
         const presentStudents = lessons.filter(s => s.status === 'present').length;
         
         let html = `
-            <div style="text-align: center; padding: 16px; background: var(--bg-secondary); border-radius: 12px; margin-bottom: 16px;">
-                <div style="font-size: 28px; font-weight: 700; color: var(--accent);">${day}</div>
-                <div style="font-size: 14px; color: var(--text-secondary); margin-bottom: 12px;">${dayOfWeek}</div>
-                <div style="display: flex; justify-content: center; gap: 16px; font-size: 13px;">
-                    <span style="color: var(--text-muted);">Всего: <b style="color: var(--text-primary);">${totalStudents}</b></span>
-                    <span style="color: var(--text-muted);">Отмечено: <b style="color: var(--success);">${markedStudents}</b></span>
-                    <span style="color: var(--text-muted);">Присутствовало: <b style="color: var(--accent);">${presentStudents}</b></span>
+            <div class="calendar-day-summary">
+                <div class="calendar-date-number">${day}</div>
+                <div class="calendar-date-weekday">${dayOfWeek}</div>
+                <div class="calendar-day-metrics">
+                    <span><b>${totalStudents}</b> всего</span>
+                    <span><b class="success">${markedStudents}</b> отмечено</span>
+                    <span><b class="accent">${presentStudents}</b> были</span>
                 </div>
             </div>
         `;
         
         // Show lessons grouped by time
-        Object.keys(byTime).sort().forEach((time, index) => {
+        Object.keys(byTime).sort().forEach((time) => {
             const students = byTime[time];
             const markedCount = students.filter(s => s.is_marked).length;
-            const presentCount = students.filter(s => s.status === 'present').length;
             
             html += `
-                <div style="margin-bottom: 16px; background: var(--bg-card); border-radius: 12px; padding: 12px; border: 1px solid var(--border);">
-                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; padding-bottom: 8px; border-bottom: 1px solid var(--border);">
-                        <div style="display: flex; align-items: center; gap: 8px;">
-                            <span style="font-size: 20px;">🕐</span>
-                            <span style="font-weight: 700; font-size: 18px; color: var(--accent);">${escapeHtml(time)}</span>
+                <section class="calendar-session-card">
+                    <div class="calendar-session-header">
+                        <div class="calendar-session-time">
+                            <span class="calendar-session-icon" aria-hidden="true">🕐</span>
+                            <span>${escapeHtml(time)}</span>
                         </div>
-                        <div style="font-size: 12px; color: var(--text-muted);">
-                            ${markedCount > 0 ? `<span style="color: var(--success);">✓ ${markedCount}/${students.length}</span>` : `${students.length} уч.`}
+                        <div class="calendar-session-count ${markedCount > 0 ? 'is-marked' : ''}">
+                            ${markedCount > 0 ? `✓ ${markedCount}/${students.length}` : `${students.length} уч.`}
                         </div>
                     </div>
-                    <div style="display: flex; flex-direction: column; gap: 8px;">
+                    <div class="calendar-session-students">
                         ${students.map(s => {
                             let statusIcon = '⏳';
                             let statusColor = 'var(--text-muted)';
@@ -1182,22 +1389,21 @@ function selectCalendarDay(day, element) {
                             }
                             
                             return `
-                                <div class="list-item" style="margin-bottom: 0; cursor: pointer; padding: 12px;" 
-                                     onclick="openLessonDetailFromCalendar(${day}, ${index})">
-                                    <div style="display: flex; justify-content: space-between; align-items: center;">
-                                        <div style="flex: 1;">
-                                            <div style="font-weight: 600; font-size: 15px; margin-bottom: 2px;">${escapeHtml(s.student_name)}</div>
-                                            <div style="font-size: 12px; color: var(--text-muted);">
-                                                📍 ${s.location || 'Зал'} • <span style="color: ${statusColor};">${statusText}</span>
-                                            </div>
+                                <button type="button" class="calendar-student-row"
+                                     aria-label="${escapeHtml(s.student_name)}: ${statusText}"
+                                     onclick="openLessonDetailFromCalendar(${day}, ${s.calendar_index})">
+                                    <div class="calendar-student-copy">
+                                        <div class="calendar-student-name">${escapeHtml(s.student_name)}</div>
+                                        <div class="calendar-student-meta">
+                                            ${escapeHtml(s.location || 'Зал')} · <span style="color: ${statusColor};">${statusText}</span>
                                         </div>
-                                        <div style="font-size: 20px; margin-left: 8px;">${statusIcon}</div>
                                     </div>
-                                </div>
+                                    <div class="calendar-student-status" aria-hidden="true">${statusIcon}</div>
+                                </button>
                             `;
                         }).join('')}
                     </div>
-                </div>
+                </section>
             `;
         });
         
@@ -1240,47 +1446,39 @@ function renderLessonDetail(lesson, lessonDate, day, lessonIndex) {
 
     container.innerHTML = `
         <div class="screen-header">
-            <button class="back-btn" onclick="goBack()">
+            <button type="button" class="back-btn" aria-label="Назад" onclick="goBack()">
                 <svg width="24" height="24" viewBox="0 0 24 24" fill="none"><path d="M15 18L9 12L15 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
             </button>
-            <span class="screen-title">Урок</span>
+            <span class="screen-title">Занятие</span>
             <div style="width: 40px;"></div>
         </div>
-        <div class="form-container">
-            <div class="detail-card">
-                <div class="detail-row">
-                    <span class="detail-label">Ученик</span>
-                    <span class="detail-value">${escapeHtml(lesson.student_name)}</span>
-                </div>
-                <div class="detail-row">
-                    <span class="detail-label">Дата</span>
-                    <span class="detail-value">${formatDate(lessonDate)}</span>
-                </div>
-                <div class="detail-row">
-                    <span class="detail-label">Время</span>
-                    <span class="detail-value">${escapeHtml(lesson.time || '—')}</span>
-                </div>
-                <div class="detail-row">
-                    <span class="detail-label">Зал</span>
-                    <span class="detail-value">${escapeHtml(lesson.location || 'Зал')}</span>
-                </div>
-                <div class="detail-row">
-                    <span class="detail-label">Статус</span>
-                    <span class="detail-value">${escapeHtml(getLessonStatusLabel(currentStatus))}</span>
-                </div>
-            </div>
+        <div class="lesson-detail-shell">
+            <section class="lesson-hero">
+                <span class="lesson-hero-kicker">Ученик</span>
+                <h2>${escapeHtml(lesson.student_name)}</h2>
+                <span class="lesson-status-chip ${currentStatus || 'unmarked'}">${escapeHtml(getLessonStatusLabel(currentStatus))}</span>
+            </section>
 
-            <div class="form-group">
-                <label>Отметить посещаемость</label>
-                <div class="action-buttons-grid">
+            <section class="lesson-info-card" aria-label="Детали занятия">
+                <div><span>📅 Дата</span><strong>${formatDate(lessonDate)}</strong></div>
+                <div><span>🕐 Время</span><strong>${escapeHtml(lesson.time || '—')}</strong></div>
+                <div><span>📍 Зал</span><strong>${escapeHtml(lesson.location || 'Зал')}</strong></div>
+            </section>
+
+            <section class="lesson-attendance-card">
+                <h3>Посещаемость</h3>
+                <p>Выберите актуальный статус ученика.</p>
+                <div class="lesson-status-actions">
                     ${statusButtons.map((button) => `
-                        <button class="${currentStatus === button.value ? 'btn-primary' : 'btn-secondary'}"
+                        <button type="button"
+                                class="${currentStatus === button.value ? 'btn-primary' : 'btn-secondary'}"
+                                aria-pressed="${currentStatus === button.value}"
                                 onclick="saveLessonAttendanceFromCalendar(${day}, ${lessonIndex}, '${button.value}')">
                             ${button.label}
                         </button>
                     `).join('')}
                 </div>
-            </div>
+            </section>
 
             <div class="form-actions">
                 <button type="button" class="btn-secondary" onclick="openStudentDetail(${lesson.student_id})">Карточка ученика</button>
@@ -1389,33 +1587,34 @@ function renderPayments(list) {
     container.innerHTML = list.map(p => {
         const statusClass = p.status;
         const statusText = {paid: 'Оплачено', pending: 'Ожидает', overdue: 'Просрочено'}[p.status];
-        const lessonsText = p.is_unlimited ? '♾️ Безлимит' : `${p.lessons_count || 0} занятий`;
+        const lessonsText = p.is_unlimited ? '♾️ Безлимит' : formatLessonCount(p.lessons_count || 0);
         
         return `
-            <div class="list-item">
+            <article class="list-item payment-card">
                 <div class="list-item-header">
                     <span class="list-item-title">${escapeHtml(p.student_name)}</span>
                     <span class="payment-status ${statusClass}">${statusText}</span>
                 </div>
-                <div class="list-item-subtitle">${p.amount.toLocaleString()} Br • ${lessonsText}</div>
+                <div class="payment-amount">${p.amount.toLocaleString()} Br</div>
+                <div class="list-item-subtitle">${lessonsText}</div>
                 <div class="list-item-meta">
                     ${p.period_start && p.period_end ? 
                         `<span>📅 ${formatDate(p.period_start)} — ${formatDate(p.period_end)}</span>` : ''}
                 </div>
-                <div class="list-item-actions" style="display: flex; gap: 8px; margin-top: 12px;">
+                <div class="payment-actions">
                     ${p.status !== 'paid' ? `
-                        <button class="btn-primary" style="flex: 1;" onclick="markPaymentPaid(${p.id})">
-                            ✅ Оплачено
+                        <button class="payment-action payment-action-primary" onclick="markPaymentPaid(${p.id})">
+                            <span aria-hidden="true">✓</span> Отметить оплату
                         </button>
                     ` : ''}
-                    <button class="btn-secondary" style="flex: 1;" onclick="openEditPayment(${p.id})">
-                        ✏️ Редактировать
+                    <button class="payment-action payment-action-secondary" onclick="openEditPayment(${p.id})">
+                        Редактировать
                     </button>
-                    <button class="btn-danger" style="flex: 1;" onclick="deletePayment(${p.id})">
-                        🗑 Удалить
+                    <button class="payment-action payment-action-danger" onclick="deletePayment(${p.id})">
+                        Удалить
                     </button>
                 </div>
-            </div>
+            </article>
         `;
     }).join('');
 }
@@ -1449,7 +1648,7 @@ async function openAddPayment() {
     const res = await fetch(`${API}/api/students`, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({initData})
+        body: JSON.stringify({initData, coach_id: currentCoach?.coach_id || null})
     });
     
     const studentsList = await res.json();
@@ -1468,7 +1667,7 @@ async function openEditPayment(paymentId) {
     const paymentsRes = await fetch(`${API}/api/payments`, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({initData})
+        body: JSON.stringify({initData, coach_id: currentCoach?.coach_id || null})
     });
     const payments = await paymentsRes.json();
     const payment = payments.find(p => p.id === paymentId);
@@ -1652,6 +1851,13 @@ function getQuickStatusIcon(status) {
     return '⏳';
 }
 
+function getQuickStatusLabel(status) {
+    if (status === 'present') return 'присутствует';
+    if (status === 'absent') return 'отсутствует';
+    if (status === 'sick') return 'болеет';
+    return 'не отмечен';
+}
+
 function applyQuickStatusUI(item, statusEl, status) {
     if (!item || !statusEl) return;
 
@@ -1695,7 +1901,7 @@ async function loadQuickLesson() {
             fetch(`${API}/api/students`, {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({initData, view_mode: 'my'})
+                body: JSON.stringify({initData, coach_id: currentCoach?.coach_id || null})
             }),
             fetch(`${API}/api/attendance/day-status`, {
                 method: 'POST',
@@ -1795,11 +2001,11 @@ async function loadQuickLesson() {
         
     } catch (e) {
         console.error('Quick lesson load error:', e);
-        document.getElementById('quick-lesson-students').innerHTML = `
-            <div class="empty-state">
-                <p>Ошибка загрузки</p>
-            </div>
-        `;
+        renderScreenState(
+            document.getElementById('quick-lesson-students'),
+            'Не удалось загрузить расписание.',
+            {retry: 'loadQuickLesson()'}
+        );
     }
 }
 
@@ -1813,7 +2019,7 @@ function renderQuickLessonListGrouped(byTime, sortedTimes) {
                 <p>Нет учеников на этот день</p>
             </div>
         `;
-        document.getElementById('ql-title').textContent = '✅ Отметка (0)';
+        document.getElementById('ql-title').textContent = 'Отметка · 0';
         return;
     }
     
@@ -1841,8 +2047,12 @@ function renderQuickLessonListGrouped(byTime, sortedTimes) {
                         const locationName = s.schedule_location || s.location || 'Зал';
                         
                         return `
-                            <div class="quick-student-item ${selectedClass}" data-attendance-key="${s.quick_key}" onclick="toggleQuickStatus('${s.quick_key}')">
-                                <div class="quick-student-avatar">${s.name.charAt(0)}</div>
+                            <button type="button"
+                                    class="quick-student-item ${selectedClass}"
+                                    data-attendance-key="${s.quick_key}"
+                                    aria-label="${escapeHtml(s.name)}: ${getQuickStatusLabel(currentStatus)}. Нажмите, чтобы изменить статус"
+                                    onclick="toggleQuickStatus('${s.quick_key}')">
+                                <div class="quick-student-avatar">${escapeHtml(s.name.charAt(0))}</div>
                                 <div class="quick-student-info">
                                     <div class="quick-student-name">
                                         ${index + 1}. ${escapeHtml(s.name)}
@@ -1853,7 +2063,7 @@ function renderQuickLessonListGrouped(byTime, sortedTimes) {
                                     </div>
                                 </div>
                                 <div class="quick-student-status" id="status-${s.quick_key}">${getQuickStatusIcon(currentStatus)}</div>
-                            </div>
+                            </button>
                         `;
                     }).join('')}
                 </div>
@@ -1862,7 +2072,7 @@ function renderQuickLessonListGrouped(byTime, sortedTimes) {
     });
     
     container.innerHTML = html;
-    document.getElementById('ql-title').textContent = `✅ Отметка (${totalStudents})`;
+    document.getElementById('ql-title').textContent = `Отметка · ${totalStudents}`;
 }
 
 // Legacy function - now calls the grouped version
@@ -1886,8 +2096,8 @@ function renderQuickLessonList(students) {
         else if (!s.is_unlimited && remaining <= 2) dotClass = 'low';
         
         return `
-            <div class="quick-student-item" data-student-id="${s.id}" onclick="toggleQuickStatus(${s.id})">
-                <div class="quick-student-avatar">${s.name.charAt(0)}</div>
+            <button type="button" class="quick-student-item" data-student-id="${s.id}" onclick="toggleQuickStatus(${s.id})">
+                <div class="quick-student-avatar">${escapeHtml(s.name.charAt(0))}</div>
                 <div class="quick-student-info">
                     <div class="quick-student-name">
                         ${index + 1}. ${escapeHtml(s.name)}
@@ -1896,11 +2106,11 @@ function renderQuickLessonList(students) {
                     <div class="quick-student-meta">${getStudentLessonsMeta(s)}</div>
                 </div>
                 <div class="quick-student-status" id="status-${s.id}">⏳</div>
-            </div>
+            </button>
         `;
     }).join('');
     
-    document.getElementById('ql-title').textContent = `✅ Отметка (${students.length})`;
+    document.getElementById('ql-title').textContent = `Отметка · ${students.length}`;
 }
 
 function toggleQuickStatus(attendanceKey) {
@@ -1926,6 +2136,11 @@ function toggleQuickStatus(attendanceKey) {
     
     data.status = nextStatus;
     applyQuickStatusUI(item, statusEl, nextStatus);
+    item?.setAttribute(
+        'aria-label',
+        `${data.student?.name || 'Ученик'}: ${getQuickStatusLabel(nextStatus)}. Нажмите, чтобы изменить статус`
+    );
+    announce(`${data.student?.name || 'Ученик'}: ${getQuickStatusLabel(nextStatus)}`);
     updateQuickStats();
 }
 
@@ -2029,6 +2244,57 @@ function escapeHtml(text) {
     return div.innerHTML;
 }
 
+function announce(message) {
+    const liveRegion = document.getElementById('live-region');
+    if (!liveRegion) return;
+    liveRegion.textContent = '';
+    requestAnimationFrame(() => {
+        liveRegion.textContent = message;
+    });
+}
+
+function formatLessonCount(count) {
+    const absolute = Math.abs(Number(count) || 0);
+    const mod100 = absolute % 100;
+    const mod10 = absolute % 10;
+    const word = mod100 >= 11 && mod100 <= 14
+        ? 'занятий'
+        : mod10 === 1
+            ? 'занятие'
+            : mod10 >= 2 && mod10 <= 4
+                ? 'занятия'
+                : 'занятий';
+    return `${count} ${word}`;
+}
+
+function formatMonthLabel(value) {
+    const isoMatch = String(value || '').match(/^(\d{4})-(\d{2})$/);
+    if (isoMatch) {
+        const labels = ['Янв', 'Фев', 'Мар', 'Апр', 'Май', 'Июн', 'Июл', 'Авг', 'Сен', 'Окт', 'Ноя', 'Дек'];
+        return labels[Number(isoMatch[2]) - 1] || value;
+    }
+
+    const monthMap = {
+        Jan: 'Янв', Feb: 'Фев', Mar: 'Мар', Apr: 'Апр',
+        May: 'Май', Jun: 'Июн', Jul: 'Июл', Aug: 'Авг',
+        Sep: 'Сен', Oct: 'Окт', Nov: 'Ноя', Dec: 'Дек'
+    };
+    const [month, year] = String(value || '').split(' ');
+    return `${monthMap[month] || month}${year ? ` ${year}` : ''}`.trim();
+}
+
+function getPeriodCaption(period) {
+    if (period === 'all') return 'За всё время';
+    const now = new Date();
+    const start = period === 'year'
+        ? new Date(now.getFullYear(), 0, 1)
+        : period === 'week'
+            ? new Date(now.getFullYear(), now.getMonth(), now.getDate() - ((now.getDay() + 6) % 7))
+            : new Date(now.getFullYear(), now.getMonth(), 1);
+    const formatter = new Intl.DateTimeFormat('ru-RU', {day: 'numeric', month: 'short', year: 'numeric'});
+    return `${formatter.format(start)} — ${formatter.format(now)}`;
+}
+
 function formatDate(dateStr) {
     if (!dateStr) return '—';
     const date = new Date(dateStr);
@@ -2041,8 +2307,10 @@ function showNotification(message, type = 'info') {
     
     const notif = document.createElement('div');
     notif.className = `notification ${type}`;
+    notif.setAttribute('role', type === 'error' ? 'alert' : 'status');
     notif.textContent = message;
     document.body.appendChild(notif);
+    announce(message);
     
     setTimeout(() => {
         notif.style.opacity = '0';
@@ -2056,18 +2324,6 @@ document.getElementById('ql-date')?.addEventListener('change', () => {
         loadQuickLesson();
     }
 });
-
-// Add save button to quick lesson screen
-const quickLessonContent = document.getElementById('quick-lesson-content');
-if (quickLessonContent) {
-    const saveBtn = document.createElement('button');
-    saveBtn.className = 'btn-primary';
-    saveBtn.style.cssText = 'width: 100%; margin-top: 20px;';
-    saveBtn.textContent = '💾 Сохранить занятия';
-    saveBtn.onclick = saveQuickLesson;
-    quickLessonContent.appendChild(saveBtn);
-}
-
 
 // === Extra Attendance & Attendance History ===
 
@@ -2087,7 +2343,7 @@ async function openExtraAttendanceModal(studentId = null) {
         fetch(`${API}/api/students`, {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({initData, view_mode: 'my'})
+            body: JSON.stringify({initData, coach_id: currentCoach?.coach_id || null})
         }),
         fetch(`${API}/api/locations`, {
             method: 'POST',
@@ -2099,6 +2355,10 @@ async function openExtraAttendanceModal(studentId = null) {
     const studentsList = await studentsRes.json();
     const locationsList = await locationsRes.json();
     const selectedStudent = studentId ? studentsList.find(s => s.id === studentId) : null;
+    const selectedStudentLocationId = selectedStudent?.location_id
+        || selectedStudent?.schedules?.find(schedule => schedule.is_primary)?.location_id
+        || '';
+    const resolvedLocationId = defaultLocationId || selectedStudentLocationId;
 
     const studentFieldHtml = studentId && selectedStudent
         ? `
@@ -2141,7 +2401,7 @@ async function openExtraAttendanceModal(studentId = null) {
                 <label>Зал</label>
                 <select id="extra-location-id">
                     <option value="">Без зала</option>
-                    ${locationsList.map(loc => `<option value="${loc.id}" ${String(loc.id) === String(defaultLocationId) ? 'selected' : ''}>${escapeHtml(loc.name)}</option>`).join('')}
+                    ${locationsList.map(loc => `<option value="${loc.id}" ${String(loc.id) === String(resolvedLocationId) ? 'selected' : ''}>${escapeHtml(loc.name)}</option>`).join('')}
                 </select>
             </div>
             <div class="form-group">
@@ -2361,7 +2621,12 @@ async function deactivateStudent(studentId) {
     }
 }
 
-async function destroyStudent(studentId, studentName) {
+async function destroyStudent(studentId) {
+    const studentName = currentStudentDetailId === studentId ? currentStudentDetailName : '';
+    if (!studentName) {
+        showNotification('Не удалось подтвердить имя ученика', 'error');
+        return;
+    }
     const confirmText = prompt(`ВНИМАНИЕ! Это действие НЕОБРАТИМО!\\n\\nДля подтверждения удаления ученика "${studentName}" введите его имя:`);
     
     if (confirmText !== studentName) {
@@ -2464,7 +2729,7 @@ async function viewAttendanceHistory(studentId) {
         modal.innerHTML = `
             <div class="modal-content" style="max-height: 85vh; overflow-y: auto; display: flex; flex-direction: column;">
                 <div class="modal-header">
-                    <h3>📋 История посещений</h3>
+                <h3>История посещений</h3>
                     <button class="close-btn" onclick="this.closest('.modal').remove()">✕</button>
                 </div>
                 
@@ -2708,7 +2973,7 @@ async function loadStatistics() {
         renderStatistics(data);
     } catch (e) {
         console.error('Statistics error:', e);
-        container.innerHTML = '<div class="empty-state">Ошибка загрузки статистики</div>';
+        renderScreenState(container, 'Не удалось загрузить статистику.', {retry: 'loadStatistics()'});
     }
 }
 
@@ -2764,7 +3029,7 @@ function renderStatistics(data) {
     data.monthly_trend.forEach(m => {
         trendHtml += `
             <div class="trend-item">
-                <span class="trend-month">${m.month}</span>
+                <span class="trend-month">${formatMonthLabel(m.month)}</span>
                 <div class="trend-bar-wrapper">
                     <div class="trend-bar" style="height: ${Math.max(10, m.count * 2)}px"></div>
                 </div>
@@ -2775,6 +3040,7 @@ function renderStatistics(data) {
     
     container.innerHTML = `
         <div class="statistics-content">
+            <p class="period-caption">${getPeriodCaption(currentStatsPeriod)}</p>
             <div class="stats-summary-cards">
                 <div class="summary-card">
                     <span class="summary-value">${data.summary.total_students}</span>
@@ -2791,22 +3057,22 @@ function renderStatistics(data) {
             </div>
             
             <div class="stat-section">
-                <h3>📅 По дням недели</h3>
+                <h3>По дням недели</h3>
                 <div class="stat-bars">${byDayHtml || '<p>Нет данных</p>'}</div>
             </div>
             
             <div class="stat-section">
-                <h3>📍 По залам</h3>
+                <h3>По залам</h3>
                 <div class="stat-bars">${byLocationHtml || '<p>Нет данных</p>'}</div>
             </div>
             
             <div class="stat-section">
-                <h3>👥 Возрастные группы</h3>
+                <h3>Возрастные группы</h3>
                 <div class="age-groups">${ageGroupsHtml || '<p>Нет данных</p>'}</div>
             </div>
             
             <div class="stat-section">
-                <h3>📈 Динамика (6 мес)</h3>
+                <h3>Динамика за 6 месяцев</h3>
                 <div class="trend-chart">${trendHtml || '<p>Нет данных</p>'}</div>
             </div>
         </div>
@@ -2816,29 +3082,60 @@ function renderStatistics(data) {
 // === Search ===
 
 let searchTimeout = null;
+let searchController = null;
 
 function performSearch(query) {
     clearTimeout(searchTimeout);
-    
-    if (!query || query.length < 2) {
-        document.getElementById('search-results').innerHTML = '';
+    searchController?.abort();
+    const normalizedQuery = String(query || '').trim();
+    const clearButton = document.querySelector('.search-clear');
+    if (clearButton) clearButton.hidden = normalizedQuery.length === 0;
+
+    if (normalizedQuery.length < 2) {
+        renderScreenState(
+            document.getElementById('search-results'),
+            normalizedQuery
+                ? 'Введите ещё один символ для поиска.'
+                : 'Введите минимум две буквы имени, никнейма или телефона.',
+            {icon: '🔎'}
+        );
         return;
     }
-    
+
     searchTimeout = setTimeout(async () => {
+        const container = document.getElementById('search-results');
+        container.innerHTML = '<div class="loading"><div class="spinner"></div><span>Ищем…</span></div>';
+        searchController = new AbortController();
         try {
             const res = await fetch(`${API}/api/search`, {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({initData, query})
+                body: JSON.stringify({initData, query: normalizedQuery}),
+                signal: searchController.signal
             });
-            
+            if (!res.ok) throw new Error(`Search failed with ${res.status}`);
+
             const data = await res.json();
             renderSearchResults(data.results);
         } catch (e) {
+            if (e.name === 'AbortError') return;
             console.error('Search error:', e);
+            renderScreenState(
+                container,
+                'Поиск временно недоступен.',
+                {retry: "performSearch(document.getElementById('search-input').value)"}
+            );
         }
     }, 300);
+}
+
+function clearSearch() {
+    const input = document.getElementById('search-input');
+    if (input) {
+        input.value = '';
+        input.focus();
+    }
+    performSearch('');
 }
 
 function renderSearchResults(results) {
@@ -2850,18 +3147,18 @@ function renderSearchResults(results) {
     }
     
     container.innerHTML = results.map(r => `
-        <div class="list-item" onclick="openStudentDetail(${r.id})">
+        <button type="button" class="list-item" onclick="openStudentDetail(${r.id})">
             <div class="list-item-header">
                 <span class="list-item-title">${escapeHtml(r.name)}</span>
                 <span class="lessons-indicator ${!r.is_unlimited && r.lessons_remaining <= 2 ? 'low' : ''}">${getStudentLessonsDisplay(r)}</span>
             </div>
             <div class="list-item-subtitle">${escapeHtml(r.nickname || '')}</div>
             <div class="list-item-meta">
-                ${r.phone ? `<span>📞 ${r.phone}</span>` : ''}
+                ${r.phone ? `<span>📞 ${escapeHtml(r.phone)}</span>` : ''}
                 ${r.age ? `<span>🎂 ${r.age} лет</span>` : ''}
                 <span>📍 ${escapeHtml(r.location || 'Зал Break Wave')}</span>
             </div>
-        </div>
+        </button>
     `).join('');
 }
 
@@ -3139,7 +3436,7 @@ openAddStudent = async function() {
     await loadCoaches();
     renderCoachSelect();
     
-    showScreen('student-form');
+    navigate('student-form');
 };
 
 // Toggle unlimited lessons
@@ -3162,8 +3459,7 @@ function togglePayUnlimited(checked) {
     }
 }
 
-// Override openEditStudent
-openEditStudent = async function(studentId) {
+async function openEditStudent(studentId) {
     editingStudentId = studentId;
     document.getElementById('student-form-title').textContent = 'Редактирование';
     
@@ -3213,12 +3509,12 @@ openEditStudent = async function(studentId) {
             initLocationSchedules([legacySchedule]);
         }
         
-        showScreen('student-form');
+        navigate('student-form');
     } catch (e) {
         console.error('Edit student error:', e);
         showNotification('Ошибка загрузки', 'error');
     }
-};
+}
 
 // Override saveStudent to include schedules
 saveStudent = async function() {
@@ -3326,7 +3622,7 @@ function formatTimes(timesStr) {
     try {
         const times = typeof timesStr === 'string' ? JSON.parse(timesStr) : timesStr;
         const uniqueTimes = [...new Set(Object.values(times))];
-        return uniqueTimes.join(', ');
+        return escapeHtml(uniqueTimes.join(', '));
     } catch {
         return '';
     }
@@ -3359,8 +3655,7 @@ function getStudentLessonsMeta(student) {
 
     const remaining = getStudentRemainingLessons(student);
     if (remaining <= 0) return 'Нет занятий';
-    if (remaining === 1) return '1 занятие';
-    return `${remaining} занятия`;
+    return formatLessonCount(remaining);
 }
 
 window.editStudent = openEditStudent;
@@ -3399,11 +3694,7 @@ async function loadFinance() {
         renderFinance(summary, debtors);
     } catch (e) {
         console.error('Finance load error:', e);
-        document.getElementById('finance-content').innerHTML = `
-            <div class="empty-state">
-                <p>Ошибка загрузки данных</p>
-            </div>
-        `;
+        renderScreenState(container, 'Не удалось загрузить финансовые данные.', {retry: 'loadFinance()'});
     }
 }
 
@@ -3452,7 +3743,7 @@ function renderFinance(summary, debtors) {
         const maxRevenue = Math.max(...summary.monthly_trend.map(m => m.revenue), 1);
         trendHtml = summary.monthly_trend.map(m => `
             <div class="trend-item">
-                <span class="trend-month">${m.month}</span>
+                <span class="trend-month">${formatMonthLabel(m.month)}</span>
                 <div class="trend-bar-wrapper">
                     <div class="trend-bar" style="height: ${Math.max(10, (m.revenue / maxRevenue) * 100)}px"></div>
                 </div>
@@ -3468,15 +3759,15 @@ function renderFinance(summary, debtors) {
     if (debtors.debtors.expired_subscription.length > 0) {
         debtorsHtml += `
             <div class="finance-section">
-                <h3>🚨 Просроченные абонементы (${debtors.debtors.expired_subscription.length})</h3>
+                <h3>Просроченные абонементы (${debtors.debtors.expired_subscription.length})</h3>
                 ${debtors.debtors.expired_subscription.map(d => `
-                    <div class="debtor-item critical" onclick="openStudentDetail(${d.id})">
+                    <button type="button" class="debtor-item critical" onclick="openStudentDetail(${d.id})">
                         <div class="debtor-info">
                             <div class="debtor-name">${escapeHtml(d.name)}</div>
                             <div class="debtor-meta">Просрочено ${d.days_overdue} дн.</div>
                         </div>
                         <span class="debtor-badge critical">Просрочен</span>
-                    </div>
+                    </button>
                 `).join('')}
             </div>
         `;
@@ -3486,15 +3777,15 @@ function renderFinance(summary, debtors) {
     if (debtors.debtors.ending_soon.length > 0) {
         debtorsHtml += `
             <div class="finance-section">
-                <h3>⏰ Заканчивается скоро (${debtors.debtors.ending_soon.length})</h3>
+                <h3>Заканчивается скоро (${debtors.debtors.ending_soon.length})</h3>
                 ${debtors.debtors.ending_soon.map(d => `
-                    <div class="debtor-item warning" onclick="openStudentDetail(${d.id})">
+                    <button type="button" class="debtor-item warning" onclick="openStudentDetail(${d.id})">
                         <div class="debtor-info">
                             <div class="debtor-name">${escapeHtml(d.name)}</div>
                             <div class="debtor-meta">Осталось ${d.days_left} дн.</div>
                         </div>
                         <span class="debtor-badge warning">${d.days_left} дн.</span>
-                    </div>
+                    </button>
                 `).join('')}
             </div>
         `;
@@ -3504,15 +3795,15 @@ function renderFinance(summary, debtors) {
     if (debtors.debtors.no_lessons.length > 0) {
         debtorsHtml += `
             <div class="finance-section">
-                <h3>❌ Закончились занятия (${debtors.debtors.no_lessons.length})</h3>
+                <h3>Закончились занятия (${debtors.debtors.no_lessons.length})</h3>
                 ${debtors.debtors.no_lessons.map(d => `
-                    <div class="debtor-item critical" onclick="openStudentDetail(${d.id})">
+                    <button type="button" class="debtor-item critical" onclick="openStudentDetail(${d.id})">
                         <div class="debtor-info">
                             <div class="debtor-name">${escapeHtml(d.name)}</div>
                             <div class="debtor-meta">Нет доступных занятий</div>
                         </div>
                         <span class="debtor-badge critical">0 занятий</span>
-                    </div>
+                    </button>
                 `).join('')}
             </div>
         `;
@@ -3522,21 +3813,25 @@ function renderFinance(summary, debtors) {
     if (debtors.debtors.low_lessons.length > 0) {
         debtorsHtml += `
             <div class="finance-section">
-                <h3>⚠️ Мало занятий (${debtors.debtors.low_lessons.length})</h3>
+                <h3>Мало занятий (${debtors.debtors.low_lessons.length})</h3>
                 ${debtors.debtors.low_lessons.map(d => `
-                    <div class="debtor-item warning" onclick="openStudentDetail(${d.id})">
+                    <button type="button" class="debtor-item warning" onclick="openStudentDetail(${d.id})">
                         <div class="debtor-info">
                             <div class="debtor-name">${escapeHtml(d.name)}</div>
-                            <div class="debtor-meta">Осталось ${d.remaining} занятия</div>
+                            <div class="debtor-meta">Осталось ${formatLessonCount(d.remaining)}</div>
                         </div>
-                        <span class="debtor-badge warning">${d.remaining} занятия</span>
-                    </div>
+                        <span class="debtor-badge warning">${formatLessonCount(d.remaining)}</span>
+                    </button>
                 `).join('')}
             </div>
         `;
     }
     
     container.innerHTML = `
+        <p class="period-caption">
+            ${getPeriodCaption(currentFinancePeriod)}
+            ${currentCoach?.is_admin ? ' · Сводка школы; должники — ваши ученики' : ''}
+        </p>
         <div class="finance-summary-cards">
             <div class="finance-card revenue">
                 <span class="finance-value">${summary.summary.total_revenue.toLocaleString()} Br</span>
@@ -3558,35 +3853,24 @@ function renderFinance(summary, debtors) {
         
         ${byCoachHtml ? `
             <div class="finance-section">
-                <h3>👥 По тренерам</h3>
+                <h3>По тренерам</h3>
                 ${byCoachHtml}
             </div>
         ` : ''}
         
         ${byLocationHtml ? `
             <div class="finance-section">
-                <h3>📍 По залам</h3>
+                <h3>По залам</h3>
                 ${byLocationHtml}
             </div>
         ` : ''}
         
         <div class="finance-section">
-            <h3>📈 Динамика доходов (6 мес)</h3>
+            <h3>Динамика доходов за 6 месяцев</h3>
             <div class="trend-chart">${trendHtml}</div>
         </div>
         
         ${debtorsHtml}
     `;
 }
-
-// Add finance to navigation
-const originalNavigate = navigate;
-navigate = function(screen) {
-    if (screen === 'finance') {
-        loadFinance();
-    }
-    return originalNavigate(screen);
-};
-
-
 

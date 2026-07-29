@@ -30,9 +30,7 @@ logger = logging.getLogger(__name__)
 
 
 async def on_startup():
-    """Initialize database and bot commands."""
-    await init_db()
-    logger.info("Database initialized")
+    """Initialize bot commands."""
     bot = create_bot()
     
     # Set bot commands
@@ -62,6 +60,10 @@ async def run_bot():
 
 
 def main():
+    # Initialize the schema once before API and bot tasks start in separate loops.
+    asyncio.run(init_db())
+    logger.info("Database initialized")
+
     # Run FastAPI in a thread
     api_thread = Thread(target=run_api, daemon=True)
     api_thread.start()

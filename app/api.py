@@ -1,11 +1,11 @@
 from fastapi import FastAPI, UploadFile, File, Query, Request, Form, Depends
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse, HTMLResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, HTMLResponse, RedirectResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from sqlalchemy import select, func, and_, or_, desc, delete, update
 from contextlib import asynccontextmanager
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
 from zoneinfo import ZoneInfo
 from typing import Optional
 import re
@@ -18,10 +18,17 @@ import os
 import logging
 import urllib.parse
 
-from app.database import async_session, init_db
+from app.database import async_session
 from app.models import Coach, Student, Lesson, Attendance, Payment, Notification, AdminUser, DailyNotificationLog, Location, StudentSchedule
 from sqlalchemy.orm import selectinload
-from app.config import WEBAPP_DIR, BOT_TOKEN, WEEKDAYS, ADMIN_IDS
+from app.config import (
+    WEBAPP_DIR,
+    BOT_TOKEN,
+    WEEKDAYS,
+    ADMIN_IDS,
+    CORS_ORIGINS,
+    TELEGRAM_AUTH_MAX_AGE_SECONDS,
+)
 
 # Version for cache busting - auto-generated on server start (timestamp)
 import time
@@ -29,13 +36,17 @@ APP_VERSION = str(int(time.time()))
 
 
 class NoCacheMiddleware(BaseHTTPMiddleware):
-    """Add cache-busting headers to all responses."""
+    """Add cache-busting and baseline security headers to all responses."""
     async def dispatch(self, request, call_next):
         response = await call_next(request)
-        # Disable caching for all responses
         response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
         response.headers["Pragma"] = "no-cache"
         response.headers["Expires"] = "0"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+        if request.url.scheme == "https":
+            response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
         return response
 
 logger = logging.getLogger(__name__)
@@ -55,7 +66,7 @@ def get_student_schedule_for_time(student: Student, day_of_week: int, target_tim
 
 @asynccontextmanager
 async def lifespan(application: FastAPI):
-    await init_db()
+    # Database initialization is performed once by the supported main.py entrypoint.
     yield
 
 app = FastAPI(lifespan=lifespan)
@@ -63,14 +74,15 @@ app = FastAPI(lifespan=lifespan)
 # Disable caching middleware
 app.add_middleware(NoCacheMiddleware)
 
-# CORS for Telegram WebApp
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# The Mini App calls the API on the same origin. Cross-origin access is opt-in.
+if CORS_ORIGINS:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=CORS_ORIGINS,
+        allow_credentials=False,
+        allow_methods=["POST"],
+        allow_headers=["Content-Type"],
+    )
 
 # Static files with cache disabled
 class NoCacheStaticFiles(StaticFiles):
@@ -96,9 +108,24 @@ def verify_telegram_init_data(init_data: str) -> dict | None:
         data_check_string = "\n".join(f"{k}={v}" for k, v in sorted(parsed.items()))
         secret_key = hmac.new(b"WebAppData", BOT_TOKEN.encode(), hashlib.sha256).digest()
         computed_hash = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
-        if computed_hash == check_hash:
-            user = json.loads(parsed.get("user", "{}"))
-            return user
+        if not check_hash or not hmac.compare_digest(computed_hash, check_hash):
+            return None
+
+        auth_date_raw = parsed.get("auth_date")
+        if not auth_date_raw:
+            return None
+
+        auth_date = int(auth_date_raw)
+        now = int(datetime.now(timezone.utc).timestamp())
+        if auth_date > now + 30:
+            return None
+        if now - auth_date > TELEGRAM_AUTH_MAX_AGE_SECONDS:
+            return None
+
+        user = json.loads(parsed.get("user", "{}"))
+        if not isinstance(user.get("id"), int):
+            return None
+        return user
     except Exception as e:
         logger.warning(f"initData verification failed: {e}")
     return None
@@ -111,8 +138,35 @@ async def get_current_coach(init_data: str):
         return None
     
     async with async_session() as s:
-        result = await s.execute(select(Coach).where(Coach.telegram_id == user.get("id")))
+        result = await s.execute(
+            select(Coach).where(
+                Coach.telegram_id == user.get("id"),
+                Coach.is_active == True,
+            )
+        )
         return result.scalar_one_or_none()
+
+
+async def location_ids_belong_to_coach(session, location_ids, coach_id: int) -> bool:
+    """Return whether every non-null location belongs to the expected coach."""
+    try:
+        normalized_ids = {
+            int(location_id)
+            for location_id in location_ids
+            if location_id not in (None, "")
+        }
+    except (TypeError, ValueError):
+        return False
+    if not normalized_ids:
+        return True
+
+    result = await session.execute(
+        select(func.count(Location.id)).where(
+            Location.id.in_(normalized_ids),
+            Location.coach_id == coach_id,
+        )
+    )
+    return result.scalar_one() == len(normalized_ids)
 
 
 async def is_admin_user(user_id: int | None) -> bool:
@@ -171,6 +225,7 @@ def normalize_schedule_days_payload(days, fallback_days: str = "1,3") -> str:
 async def resolve_legacy_schedule_fields(
     session,
     schedules_payload,
+    owner_coach_id: int,
     fallback_location: str = "Зал Break Wave",
     fallback_location_id: int | None = None,
     fallback_days: str = "1,3",
@@ -198,7 +253,13 @@ async def resolve_legacy_schedule_fields(
     location_id = primary_schedule.get("location_id") or fallback_location_id
     location_name = fallback_location
     if location_id:
-        location = await session.get(Location, location_id)
+        location_result = await session.execute(
+            select(Location).where(
+                Location.id == location_id,
+                Location.coach_id == owner_coach_id,
+            )
+        )
+        location = location_result.scalar_one_or_none()
         if location:
             location_name = location.name
 
@@ -276,6 +337,21 @@ async def root():
             "Expires": "0"
         })
     return HTMLResponse(content="<h1>CRM Break Wave</h1><p>Mini App is loading...</p>")
+
+
+@app.get("/webapp", include_in_schema=False)
+@app.get("/webapp/", include_in_schema=False)
+async def legacy_webapp_redirect():
+    """Keep previously configured Telegram Mini App buttons working."""
+    return RedirectResponse(
+        url="/",
+        status_code=307,
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
 
 
 # === Auth ===
@@ -566,7 +642,6 @@ async def api_students(request: Request):
                 is_admin_user = True
     
     # Get filter parameters
-    view_mode = body.get("view_mode", "all")  # "all" or "my"
     coach_filter = body.get("coach_id")  # Filter by specific coach
     
     refresh_subscriptions = normalize_bool(body.get("refresh_subscriptions", False))
@@ -577,13 +652,11 @@ async def api_students(request: Request):
             selectinload(Student.schedules).selectinload(StudentSchedule.location)
         )
         
-        if coach_filter:
-            # Filter by specific coach
+        if is_admin_user and coach_filter:
             query = query.where(Student.coach_id == coach_filter)
-        elif view_mode == "my" and not is_admin_user:
-            # Show only my students
+        elif not is_admin_user:
             query = query.where(Student.coach_id == coach.id)
-        # else: show all students (shared view for coaches)
+        # Administrators may use the unfiltered shared view.
         
         query = query.where(Student.is_active == True).order_by(Student.name)
         result = await s.execute(query)
@@ -672,8 +745,15 @@ async def api_create_student(request: Request):
         target_coach = await s.get(Coach, coach_id)
         if not target_coach:
             return JSONResponse({"error": "coach_not_found"}, 400)
-        
+
         schedules_payload = data.get("schedules") or []
+        requested_location_ids = [
+            data.get("location_id"),
+            *(schedule.get("location_id") for schedule in schedules_payload),
+        ]
+        if not await location_ids_belong_to_coach(s, requested_location_ids, coach_id):
+            return JSONResponse({"error": "location_not_found"}, 404)
+
         lesson_days = data.get("lesson_days", "1,3")
         lesson_times = normalize_lesson_times_payload(
             data.get("lesson_times"),
@@ -683,6 +763,7 @@ async def api_create_student(request: Request):
         legacy_fields = await resolve_legacy_schedule_fields(
             s,
             schedules_payload,
+            owner_coach_id=coach_id,
             fallback_location=data.get("location", "Р—Р°Р» Break Wave"),
             fallback_location_id=data.get("location_id"),
             fallback_days=lesson_days,
@@ -921,6 +1002,14 @@ async def api_update_student(student_id: int, request: Request):
         student = result.scalar_one_or_none()
         if not student:
             return JSONResponse({"error": "not_found"}, 404)
+
+        schedules_payload = data.get("schedules") or []
+        requested_location_ids = [
+            data.get("location_id"),
+            *(schedule.get("location_id") for schedule in schedules_payload),
+        ]
+        if not await location_ids_belong_to_coach(s, requested_location_ids, coach.id):
+            return JSONResponse({"error": "location_not_found"}, 404)
         
         # Update fields
         if "name" in data:
@@ -1009,6 +1098,7 @@ async def api_update_student(student_id: int, request: Request):
             legacy_fields = await resolve_legacy_schedule_fields(
                 s,
                 schedules_payload,
+                owner_coach_id=coach.id,
                 fallback_location=student.location or "Зал Break Wave",
                 fallback_location_id=student.location_id,
                 fallback_days=student.lesson_days or "1,3",
@@ -1165,7 +1255,7 @@ async def api_lessons(request: Request):
         return lessons
 
 
-@app.post("/api/lessons/{lesson_id}")
+@app.post("/api/lessons/{lesson_id:int}")
 async def api_lesson_detail(lesson_id: int, request: Request):
     """Get detailed lesson info by id."""
     body = await request.json()
@@ -1219,7 +1309,9 @@ async def api_create_lesson(request: Request):
     async with async_session() as s:
         # Verify student belongs to coach
         student_result = await s.execute(
-            select(Student).where(Student.id == student_id, Student.coach_id == coach.id)
+            select(Student).options(
+                selectinload(Student.schedules).selectinload(StudentSchedule.location)
+            ).where(Student.id == student_id, Student.coach_id == coach.id)
         )
         student = student_result.scalar_one_or_none()
         if not student:
@@ -1289,7 +1381,7 @@ async def api_create_lesson(request: Request):
         return {"success": True, "id": lesson.id}
 
 
-@app.post("/api/lessons/{lesson_id}/attendance")
+@app.post("/api/lessons/{lesson_id:int}/attendance")
 async def api_update_attendance(lesson_id: int, request: Request):
     """Update attendance for lesson."""
     body = await request.json()
@@ -2089,6 +2181,9 @@ async def api_extra_attendance(request: Request):
         student = student_result.scalar_one_or_none()
         if not student:
             return JSONResponse({"error": "student_not_found"}, 404)
+
+        if not await location_ids_belong_to_coach(s, [location_id], coach.id):
+            return JSONResponse({"error": "location_not_found"}, 404)
         
         # Check remaining lessons (skip for unlimited subscriptions)
         remaining_lessons = get_remaining_lessons(student)
@@ -2848,25 +2943,33 @@ async def api_search(request: Request):
     if not coach:
         return JSONResponse({"error": "unauthorized"}, 403)
     
-    query = body.get("query", "").strip().lower()
+    query = body.get("query", "").strip().casefold()
     if not query or len(query) < 2:
         return {"results": [], "count": 0}
     
     async with async_session() as s:
-        # Search in students
+        # SQLite's built-in lower() is ASCII-only, so Cyrillic names must be
+        # normalized in Python. The operational search is intentionally scoped
+        # to the current coach.
         students_result = await s.execute(
             select(Student).where(
                 Student.coach_id == coach.id,
                 Student.is_active == True,
-                or_(
-                    func.lower(Student.name).contains(query),
-                    func.lower(Student.nickname).contains(query),
-                    Student.phone.contains(query),
-                    Student.parent_phone.contains(query)
-                )
-            ).order_by(Student.name).limit(20)
+            ).order_by(Student.name)
         )
-        students = students_result.scalars().all()
+        students = [
+            student
+            for student in students_result.scalars().all()
+            if any(
+                query in (value or "").casefold()
+                for value in (
+                    student.name,
+                    student.nickname,
+                    student.phone,
+                    student.parent_phone,
+                )
+            )
+        ][:20]
         
         results = [{
             "type": "student",
@@ -2898,9 +3001,12 @@ async def api_get_student_schedules(student_id: int, request: Request):
         return JSONResponse({"error": "unauthorized"}, 403)
     
     async with async_session() as s:
-        # Verify student exists and belongs to coach
+        # Verify student exists and belongs to coach.
         student_result = await s.execute(
-            select(Student).where(Student.id == student_id)
+            select(Student).where(
+                Student.id == student_id,
+                Student.coach_id == coach.id,
+            )
         )
         student = student_result.scalar_one_or_none()
         if not student:
@@ -3013,7 +3119,14 @@ async def api_update_schedule(schedule_id: int, request: Request):
             return JSONResponse({"error": "not_found"}, 404)
         
         schedule, student = row
-        
+
+        if "location_id" in data and not await location_ids_belong_to_coach(
+            s,
+            [data["location_id"]],
+            coach.id,
+        ):
+            return JSONResponse({"error": "location_not_found"}, 404)
+
         # Update fields
         if "location_id" in data:
             schedule.location_id = data["location_id"]
@@ -3126,29 +3239,42 @@ async def api_finance_summary(request: Request):
         start_date = date(2000, 1, 1)
     
     async with async_session() as s:
-        # Base query
-        base_query = select(Payment).where(Payment.coach_id == coach.id)
-        
+        actor_is_admin = await is_admin_user(coach.telegram_id)
+        if actor_is_admin:
+            visible_coaches_result = await s.execute(
+                select(Coach).where(Coach.is_active == True).order_by(Coach.first_name)
+            )
+            visible_coaches = visible_coaches_result.scalars().all()
+        else:
+            visible_coaches = [coach]
+        visible_coach_ids = [visible_coach.id for visible_coach in visible_coaches]
+
         if location_id:
-            # Join with students to filter by location
-            base_query = base_query.join(Student).where(Student.location_id == location_id)
+            location_result = await s.execute(
+                select(Location).where(
+                    Location.id == location_id,
+                    Location.coach_id.in_(visible_coach_ids),
+                )
+            )
+            if not location_result.scalar_one_or_none():
+                return JSONResponse({"error": "location_not_found"}, 404)
         
         # Total revenue
+        revenue_query = select(func.sum(Payment.amount)).where(
+            Payment.coach_id.in_(visible_coach_ids),
+            Payment.status == "paid",
+            Payment.paid_at >= start_date,
+        )
+        if location_id:
+            revenue_query = revenue_query.join(Student).where(Student.location_id == location_id)
         revenue_result = await s.execute(
-            select(func.sum(Payment.amount)).where(
-                Payment.coach_id == coach.id,
-                Payment.status == "paid",
-                Payment.paid_at >= start_date
-            )
+            revenue_query
         )
         total_revenue = revenue_result.scalar() or 0
         
-        # Revenue by coach (for shared view)
+        # Revenue by coach, restricted to the actor's visible scope.
         revenue_by_coach = []
-        coaches_result = await s.execute(select(Coach).where(Coach.is_active == True))
-        all_coaches = coaches_result.scalars().all()
-        
-        for c in all_coaches:
+        for c in visible_coaches:
             coach_revenue = await s.execute(
                 select(func.sum(Payment.amount)).where(
                     Payment.coach_id == c.id,
@@ -3167,7 +3293,10 @@ async def api_finance_summary(request: Request):
         # Revenue by location
         revenue_by_location = []
         locations_result = await s.execute(
-            select(Location).where(Location.is_active == True)
+            select(Location).where(
+                Location.coach_id.in_(visible_coach_ids),
+                Location.is_active == True,
+            )
         )
         all_locations = locations_result.scalars().all()
         
@@ -3176,6 +3305,7 @@ async def api_finance_summary(request: Request):
             loc_revenue = await s.execute(
                 select(func.sum(Payment.amount)).join(Student).where(
                     Student.location_id == loc.id,
+                    Payment.coach_id.in_(visible_coach_ids),
                     Payment.status == "paid",
                     Payment.paid_at >= start_date
                 )
@@ -3191,7 +3321,7 @@ async def api_finance_summary(request: Request):
         # Pending payments (overdue + pending)
         pending_result = await s.execute(
             select(func.sum(Payment.amount)).where(
-                Payment.coach_id == coach.id,
+                Payment.coach_id.in_(visible_coach_ids),
                 Payment.status.in_(["pending", "overdue"]),
                 Payment.created_at >= start_date
             )
@@ -3201,7 +3331,7 @@ async def api_finance_summary(request: Request):
         # Overdue breakdown
         overdue_result = await s.execute(
             select(Payment, Student).join(Student).where(
-                Payment.coach_id == coach.id,
+                Payment.coach_id.in_(visible_coach_ids),
                 Payment.status == "overdue"
             ).order_by(desc(Payment.created_at))
         )
@@ -3233,6 +3363,7 @@ async def api_finance_summary(request: Request):
             
             month_revenue = await s.execute(
                 select(func.sum(Payment.amount)).where(
+                    Payment.coach_id.in_(visible_coach_ids),
                     Payment.status == "paid",
                     Payment.paid_at >= month_start,
                     Payment.paid_at < month_end
@@ -3289,7 +3420,7 @@ async def api_finance_debtors(request: Request):
             remaining = student.lessons_remaining if student.lessons_remaining is not None else student.lessons_count
             
             # Check lessons
-            if remaining <= 0:
+            if not student.is_unlimited and remaining <= 0:
                 debtors["no_lessons"].append({
                     "id": student.id,
                     "name": student.name,
@@ -3297,7 +3428,7 @@ async def api_finance_debtors(request: Request):
                     "reason": "no_lessons",
                     "remaining": 0
                 })
-            elif remaining <= 2:
+            elif not student.is_unlimited and remaining <= 2:
                 debtors["low_lessons"].append({
                     "id": student.id,
                     "name": student.name,
