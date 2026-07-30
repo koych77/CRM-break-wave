@@ -127,6 +127,7 @@ async def seed_database():
         SEEDED.update({
             "own_coach_id": own_coach.id,
             "other_coach_id": other_coach.id,
+            "own_location_id": own_location.id,
             "own_student_id": own_student.id,
             "other_student_id": other_student.id,
         })
@@ -567,6 +568,72 @@ def test_absence_deducts_lesson_and_creates_makeup_but_coach_cancellation_does_n
     assert after_absence == 7
     assert after_cancellation == 7
     assert {credit.source_type for credit in credits} == {"absence", "coach_cancelled"}
+
+
+def test_admin_can_approve_parent_makeup_and_reported_payment():
+    async def prepare_requests():
+        async with async_session() as session:
+            parent = (
+                await session.execute(
+                    select(ParentAccount).where(ParentAccount.telegram_id == 3001)
+                )
+            ).scalar_one()
+            student = (
+                await session.execute(
+                    select(Student).where(Student.parent_id == parent.id)
+                )
+            ).scalar_one()
+            credit = MakeupCredit(
+                student_id=student.id,
+                source_date=date.today() - timedelta(days=1),
+                source_type="absence",
+                expires_at=date.today() + timedelta(days=60),
+                status="requested",
+                requested_date=date.today() + timedelta(days=7),
+            )
+            session.add(credit)
+            payment = (
+                await session.execute(
+                    select(Payment)
+                    .where(Payment.student_id == student.id)
+                    .order_by(Payment.id)
+                )
+            ).scalars().first()
+            payment.status = "reported"
+            payment.payment_method = "cash"
+            payment.reported_at = datetime.utcnow()
+            await session.commit()
+            return credit.id, payment.id
+
+    makeup_id, payment_id = asyncio.run(prepare_requests())
+    api_module.ADMIN_IDS.append(1001)
+    try:
+        with TestClient(app) as client:
+            makeup_review = client.post(
+                f"/api/admin/makeups/{makeup_id}/review",
+                json={
+                    "initData": telegram_init_data(1001),
+                    "decision": "approve",
+                    "scheduled_date": (date.today() + timedelta(days=7)).isoformat(),
+                    "scheduled_time": "18:00",
+                    "location_id": SEEDED["own_location_id"],
+                },
+            )
+            payment_review = client.post(
+                f"/api/admin/payments/{payment_id}/review",
+                json={
+                    "initData": telegram_init_data(1001),
+                    "decision": "approve",
+                    "received_by_coach_id": SEEDED["own_coach_id"],
+                },
+            )
+    finally:
+        api_module.ADMIN_IDS.remove(1001)
+
+    assert makeup_review.status_code == 200
+    assert makeup_review.json()["status"] == "scheduled"
+    assert payment_review.status_code == 200
+    assert payment_review.json()["status"] == "paid"
 
 
 def test_student_deletion_removes_personal_data_and_receipts_but_keeps_anonymized_revenue():

@@ -3349,6 +3349,14 @@ function renderParentContext() {
     if (!container || !parentData) return;
     const studentsHtml = parentData.students.map(student => {
         const invoice = student.invoice;
+        const scheduleRequest = (parentData.schedule_requests || []).find(
+            item => item.student_id === student.id
+        );
+        const scheduleRequestNote = scheduleRequest?.status === 'pending'
+            ? '<p class="status-note warning-copy">Новое расписание ожидает подтверждения тренера.</p>'
+            : scheduleRequest?.status === 'rejected'
+                ? `<p class="status-note danger-copy">Изменение расписания отклонено${scheduleRequest.rejection_reason ? `: ${escapeHtml(scheduleRequest.rejection_reason)}` : '.'}</p>`
+                : '';
         const schedules = student.schedules.length
             ? student.schedules.map(item => `
                 <div class="family-row">
@@ -3399,6 +3407,7 @@ function renderParentContext() {
                         <button type="button" class="section-link" onclick="requestParentSchedule(${student.id})">Изменить</button>
                     </div>
                     ${schedules}
+                    ${scheduleRequestNote}
                     <label class="family-toggle">
                         <span><strong>Напоминание за сутки</strong><small>Ежедневно в 18:00, только перед тренировкой</small></span>
                         <input type="checkbox" ${student.training_reminders_enabled ? 'checked' : ''}
@@ -3756,6 +3765,8 @@ function renderAdminRequests(requests, invitations) {
                 <article class="request-card">
                     <h4>${escapeHtml(item.student_name)}</h4>
                     <p>Желаемая дата: ${formatDate(item.requested_date)} · право до ${formatDate(item.expires_at)}</p>
+                    <label class="inline-select"><span>Дата отработки</span><input id="makeup-date-${item.id}" type="date" value="${escapeHtml(item.requested_date || '')}"></label>
+                    <label class="inline-select"><span>Время</span><input id="makeup-time-${item.id}" type="time" value="18:00"></label>
                     <label class="inline-select"><span>Зал</span><select id="makeup-location-${item.id}"><option value="">Без зала</option>${resources.locations.filter(location => location.coach_id === item.coach_id).map(location => `<option value="${location.id}">${escapeHtml(location.name)}</option>`).join('')}</select></label>
                     <label class="inline-select"><span>Группа</span><select id="makeup-group-${item.id}"><option value="">Без группы</option>${resources.groups.filter(group => group.coach_id === item.coach_id).map(group => `<option value="${group.id}">${escapeHtml(group.name)}</option>`).join('')}</select></label>
                     <div class="family-actions">
@@ -3866,11 +3877,14 @@ async function reviewScheduleRequest(requestId, decision) {
 async function reviewMakeupRequest(requestId, decision, proposedDate = '') {
     const payload = {decision};
     if (decision === 'approve') {
-        payload.scheduled_date = window.prompt('Дата отработки ГГГГ-ММ-ДД', proposedDate) || '';
-        payload.scheduled_time = window.prompt('Время', '18:00') || '';
+        payload.scheduled_date = document.getElementById(`makeup-date-${requestId}`)?.value || proposedDate;
+        payload.scheduled_time = document.getElementById(`makeup-time-${requestId}`)?.value || '';
         payload.location_id = Number(document.getElementById(`makeup-location-${requestId}`)?.value) || null;
         payload.group_id = Number(document.getElementById(`makeup-group-${requestId}`)?.value) || null;
-        if (!payload.scheduled_date || !payload.scheduled_time) return;
+        if (!payload.scheduled_date || !payload.scheduled_time) {
+            showNotification('Укажите дату и время отработки', 'error');
+            return;
+        }
     } else {
         payload.reason = rejectionReason();
         if (!payload.reason) return;

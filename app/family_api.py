@@ -950,7 +950,7 @@ async def admin_review_makeup(makeup_id: int, request: Request):
     async with async_session() as session:
         result = await session.execute(
             select(MakeupCredit, Student, ParentAccount)
-            .join(Student)
+            .join(Student, MakeupCredit.student_id == Student.id)
             .join(ParentAccount, Student.parent_id == ParentAccount.id)
             .where(MakeupCredit.id == makeup_id)
         )
@@ -1013,7 +1013,7 @@ async def admin_review_payment(payment_id: int, request: Request):
     async with async_session() as session:
         result = await session.execute(
             select(Payment, Student, ParentAccount)
-            .join(Student)
+            .join(Student, Payment.student_id == Student.id)
             .join(ParentAccount, Student.parent_id == ParentAccount.id)
             .where(Payment.id == payment_id)
         )
