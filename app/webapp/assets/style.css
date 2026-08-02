@@ -75,6 +75,30 @@ body {
     font-size: 13px;
 }
 
+.registration-children-list {
+    display: grid;
+    gap: 16px;
+}
+
+.registration-child-card {
+    padding: 16px;
+    border: 1px solid rgba(139, 163, 190, 0.16);
+    border-radius: 18px;
+    background: rgba(15, 31, 50, 0.72);
+}
+
+.registration-child-card > .section-heading-row:first-child {
+    margin-bottom: 14px;
+}
+
+.registration-child-card .family-section-title {
+    margin-top: 18px;
+}
+
+.registration-child-card .schedule-editor {
+    margin-bottom: 0;
+}
+
 .schedule-editor {
     display: grid;
     gap: 10px;

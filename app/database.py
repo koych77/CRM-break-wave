@@ -462,6 +462,55 @@ async def run_migrations():
         await conn.execute(text(
             "UPDATE payments SET late_fee_amount = 0 WHERE late_fee_amount IS NULL"
         ))
+
+        # Public family registration is authenticated by signed Telegram initData
+        # and therefore does not require a one-time administrator invitation.
+        if is_sqlite:
+            table_info = await conn.execute(text("PRAGMA table_info(registration_requests)"))
+            invite_column = next(
+                (row for row in table_info.fetchall() if row[1] == "invite_id"),
+                None,
+            )
+            if invite_column and invite_column[3]:
+                logger.info("Migrating: Allowing public registration requests without invites")
+                await conn.execute(text("DROP TABLE IF EXISTS registration_requests_new"))
+                await conn.execute(text("""
+                    CREATE TABLE registration_requests_new (
+                        id INTEGER PRIMARY KEY,
+                        invite_id INTEGER UNIQUE REFERENCES registration_invites(id),
+                        parent_id INTEGER NOT NULL REFERENCES parent_accounts(id),
+                        student_id INTEGER REFERENCES students(id),
+                        child_name VARCHAR(200) NOT NULL,
+                        child_birthday DATE NOT NULL,
+                        child_phone VARCHAR(50),
+                        proposed_schedule TEXT NOT NULL,
+                        status VARCHAR(20) DEFAULT 'pending',
+                        rejection_reason VARCHAR(500),
+                        reviewed_by_coach_id INTEGER REFERENCES coaches(id),
+                        reviewed_at DATETIME,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                    )
+                """))
+                await conn.execute(text("""
+                    INSERT INTO registration_requests_new (
+                        id, invite_id, parent_id, student_id, child_name,
+                        child_birthday, child_phone, proposed_schedule, status,
+                        rejection_reason, reviewed_by_coach_id, reviewed_at, created_at
+                    )
+                    SELECT
+                        id, invite_id, parent_id, student_id, child_name,
+                        child_birthday, child_phone, proposed_schedule, status,
+                        rejection_reason, reviewed_by_coach_id, reviewed_at, created_at
+                    FROM registration_requests
+                """))
+                await conn.execute(text("DROP TABLE registration_requests"))
+                await conn.execute(text(
+                    "ALTER TABLE registration_requests_new RENAME TO registration_requests"
+                ))
+        else:
+            await conn.execute(text(
+                "ALTER TABLE registration_requests ALTER COLUMN invite_id DROP NOT NULL"
+            ))
         
         logger.info("Migrations completed")
 

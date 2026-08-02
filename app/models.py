@@ -353,7 +353,9 @@ class RegistrationRequest(Base):
     __tablename__ = "registration_requests"
 
     id = Column(Integer, primary_key=True)
-    invite_id = Column(Integer, ForeignKey("registration_invites.id"), unique=True, nullable=False)
+    # Personal invitations remain supported, while public family registration
+    # creates requests without a one-time invite.
+    invite_id = Column(Integer, ForeignKey("registration_invites.id"), unique=True, nullable=True)
     parent_id = Column(Integer, ForeignKey("parent_accounts.id"), nullable=False)
     student_id = Column(Integer, ForeignKey("students.id"), nullable=True)
     child_name = Column(String(200), nullable=False)

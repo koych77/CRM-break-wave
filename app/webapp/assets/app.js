@@ -11,7 +11,7 @@ let currentRole = null;
 let currentParent = null;
 let parentData = null;
 let guestInvitation = null;
-let registrationScheduleRows = [];
+let registrationChildren = [];
 let coaches = [];
 let students = [];
 let payments = [];
@@ -227,8 +227,10 @@ async function authenticate() {
             return;
         }
 
-        const urlInvitation = new URLSearchParams(window.location.search).get('invite');
-        const startParam = urlInvitation || tg?.initDataUnsafe?.start_param || '';
+        const query = new URLSearchParams(window.location.search);
+        const urlInvitation = query.get('invite');
+        const publicRegistration = query.get('registration') === '1';
+        const startParam = urlInvitation || (publicRegistration ? 'registration' : (tg?.initDataUnsafe?.start_param || ''));
         const res = await fetch(`${API}/api/auth`, {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
@@ -252,10 +254,9 @@ async function authenticate() {
             guestInvitation = data;
             if (subtitle) subtitle.textContent = 'Регистрация';
             if (context) context.textContent = 'Семья';
-            document.getElementById('reg-child-name').value = data.preliminary_child_name || '';
             document.getElementById('reg-parent-name').value = data.existing_parent?.full_name || '';
             document.getElementById('reg-parent-phone').value = data.existing_parent?.phone || '';
-            initializeRegistrationSchedule();
+            initializeRegistrationChildren(data.preliminary_child_name || '');
             showScreen('registration');
             return;
         }
@@ -3278,80 +3279,158 @@ async function apiPost(path, payload = {}) {
     return data;
 }
 
-function initializeRegistrationSchedule() {
-    if (!registrationScheduleRows.length) {
-        registrationScheduleRows = [
+function newRegistrationChild(name = '') {
+    return {
+        name,
+        birthday: '',
+        phone: '',
+        schedule: [
             {day: '0', time: '18:00'},
             {day: '2', time: '18:00'}
-        ];
+        ]
+    };
+}
+
+function initializeRegistrationChildren(preliminaryName = '') {
+    registrationChildren = [newRegistrationChild(preliminaryName)];
+    renderRegistrationChildren();
+}
+
+function addRegistrationChild() {
+    if (registrationChildren.length >= 10) {
+        showNotification('За одну анкету можно добавить не более 10 детей', 'error');
+        return;
     }
-    renderRegistrationSchedule();
+    registrationChildren.push(newRegistrationChild());
+    renderRegistrationChildren();
+    document.getElementById(`reg-child-name-${registrationChildren.length - 1}`)?.focus();
 }
 
-function addRegistrationScheduleRow() {
-    registrationScheduleRows.push({day: '0', time: '18:00'});
-    renderRegistrationSchedule();
+function removeRegistrationChild(childIndex) {
+    if (registrationChildren.length <= 1) {
+        showNotification('В анкете должен быть хотя бы один ребёнок', 'error');
+        return;
+    }
+    registrationChildren.splice(childIndex, 1);
+    renderRegistrationChildren();
 }
 
-function updateRegistrationScheduleRow(index, field, value) {
-    if (registrationScheduleRows[index]) registrationScheduleRows[index][field] = value;
+function updateRegistrationChild(childIndex, field, value) {
+    if (registrationChildren[childIndex]) registrationChildren[childIndex][field] = value;
 }
 
-function removeRegistrationScheduleRow(index) {
-    if (registrationScheduleRows.length <= 1) {
+function addRegistrationScheduleRow(childIndex) {
+    registrationChildren[childIndex]?.schedule.push({day: '0', time: '18:00'});
+    renderRegistrationChildren();
+}
+
+function updateRegistrationScheduleRow(childIndex, rowIndex, field, value) {
+    const row = registrationChildren[childIndex]?.schedule[rowIndex];
+    if (row) row[field] = value;
+}
+
+function removeRegistrationScheduleRow(childIndex, rowIndex) {
+    const schedule = registrationChildren[childIndex]?.schedule;
+    if (!schedule) return;
+    if (schedule.length <= 1) {
         showNotification('Нужен хотя бы один день тренировки', 'error');
         return;
     }
-    registrationScheduleRows.splice(index, 1);
-    renderRegistrationSchedule();
+    schedule.splice(rowIndex, 1);
+    renderRegistrationChildren();
 }
 
-function renderRegistrationSchedule() {
-    const container = document.getElementById('registration-schedule-list');
+function renderRegistrationChildren() {
+    const container = document.getElementById('registration-children-list');
     if (!container) return;
     const weekdays = ['Понедельник', 'Вторник', 'Среда', 'Четверг', 'Пятница', 'Суббота', 'Воскресенье'];
-    container.innerHTML = registrationScheduleRows.map((row, index) => `
-        <div class="schedule-editor-row">
-            <select aria-label="День тренировки" onchange="updateRegistrationScheduleRow(${index}, 'day', this.value)">
-                ${weekdays.map((name, day) => `<option value="${day}" ${String(day) === row.day ? 'selected' : ''}>${name}</option>`).join('')}
-            </select>
-            <input type="time" aria-label="Время тренировки" value="${escapeHtml(row.time)}"
-                onchange="updateRegistrationScheduleRow(${index}, 'time', this.value)">
-            <button type="button" class="btn-icon" aria-label="Удалить день" onclick="removeRegistrationScheduleRow(${index})">×</button>
-        </div>
+    container.innerHTML = registrationChildren.map((child, childIndex) => `
+        <section class="registration-child-card">
+            <div class="section-heading-row">
+                <div>
+                    <span class="page-eyebrow">Ребёнок ${childIndex + 1}</span>
+                    <h3>${escapeHtml(child.name || 'Данные ребёнка')}</h3>
+                </div>
+                ${registrationChildren.length > 1 ? `
+                    <button type="button" class="section-link danger-action" onclick="removeRegistrationChild(${childIndex})">Удалить</button>
+                ` : ''}
+            </div>
+            <div class="form-group">
+                <label for="reg-child-name-${childIndex}">ФИО *</label>
+                <input id="reg-child-name-${childIndex}" type="text" value="${escapeHtml(child.name)}"
+                    oninput="updateRegistrationChild(${childIndex}, 'name', this.value)" required>
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label for="reg-child-birthday-${childIndex}">Дата рождения *</label>
+                    <input id="reg-child-birthday-${childIndex}" type="date" value="${escapeHtml(child.birthday)}"
+                        oninput="updateRegistrationChild(${childIndex}, 'birthday', this.value)" required>
+                </div>
+                <div class="form-group">
+                    <label for="reg-child-phone-${childIndex}">Телефон</label>
+                    <input id="reg-child-phone-${childIndex}" type="tel" value="${escapeHtml(child.phone)}"
+                        placeholder="Необязательно" oninput="updateRegistrationChild(${childIndex}, 'phone', this.value)">
+                </div>
+            </div>
+            <div class="section-heading-row family-section-title">
+                <div>
+                    <h4>Расписание ребёнка</h4>
+                    <p>Дни и время, согласованные с тренером.</p>
+                </div>
+                <button type="button" class="section-link" onclick="addRegistrationScheduleRow(${childIndex})">+ День</button>
+            </div>
+            <div class="schedule-editor">
+                ${child.schedule.map((row, rowIndex) => `
+                    <div class="schedule-editor-row">
+                        <select aria-label="День тренировки" onchange="updateRegistrationScheduleRow(${childIndex}, ${rowIndex}, 'day', this.value)">
+                            ${weekdays.map((name, day) => `<option value="${day}" ${String(day) === row.day ? 'selected' : ''}>${name}</option>`).join('')}
+                        </select>
+                        <input type="time" aria-label="Время тренировки" value="${escapeHtml(row.time)}"
+                            onchange="updateRegistrationScheduleRow(${childIndex}, ${rowIndex}, 'time', this.value)" required>
+                        <button type="button" class="btn-icon" aria-label="Удалить день" onclick="removeRegistrationScheduleRow(${childIndex}, ${rowIndex})">×</button>
+                    </div>
+                `).join('')}
+            </div>
+        </section>
     `).join('');
+    enhanceAccessibility(container);
 }
 
 async function submitParentRegistration() {
-    if (!guestInvitation) return;
-    const proposedSchedule = registrationScheduleRows.map((row, index) => ({
-        days: row.day,
-        times: {[row.day]: row.time},
-        duration: 90,
-        is_primary: index === 0
+    if (!guestInvitation || !registrationChildren.length) return;
+    const children = registrationChildren.map(child => ({
+        name: child.name.trim(),
+        birthday: child.birthday,
+        phone: child.phone.trim(),
+        proposed_schedule: child.schedule.map((row, index) => ({
+            days: row.day,
+            times: {[row.day]: row.time},
+            duration: 90,
+            is_primary: index === 0
+        }))
     }));
     const submitButton = document.querySelector('#parent-registration-form button[type="submit"]');
     if (submitButton) submitButton.disabled = true;
     try {
-        await apiPost('/api/parent/register', {
+        const result = await apiPost('/api/parent/register', {
             invite_token: guestInvitation.invite_token,
             parent: {
                 full_name: document.getElementById('reg-parent-name').value.trim(),
                 phone: document.getElementById('reg-parent-phone').value.trim()
             },
-            child: {
-                name: document.getElementById('reg-child-name').value.trim(),
-                birthday: document.getElementById('reg-child-birthday').value,
-                phone: document.getElementById('reg-child-phone').value.trim()
-            },
-            proposed_schedule: proposedSchedule
+            children
         });
         currentRole = 'parent';
         guestInvitation = null;
-        showNotification('Анкета отправлена тренерам');
+        const childWord = result.children_count === 1 ? 'ребёнка' : 'детей';
+        showNotification(`Анкета на ${result.children_count} ${childWord} отправлена тренерам`);
         showScreen('parent');
     } catch (error) {
-        showNotification(error.message || 'Не удалось отправить анкету', 'error');
+        const duplicateName = error.payload?.child_name;
+        showNotification(
+            duplicateName ? `Анкета на ${duplicateName} уже отправлена` : (error.message || 'Не удалось отправить анкету'),
+            'error'
+        );
     } finally {
         if (submitButton) submitButton.disabled = false;
     }
@@ -3641,6 +3720,20 @@ async function createParentInvitation() {
         if (currentScreen === 'requests') await loadAdminRequests();
     } catch (error) {
         showNotification(error.message || 'Не удалось создать приглашение', 'error');
+    }
+}
+
+async function copyPublicRegistrationLink() {
+    try {
+        const result = await apiPost('/api/admin/registration-link');
+        try {
+            await navigator.clipboard.writeText(result.url);
+            showNotification('Общая ссылка на семейную анкету скопирована');
+        } catch {
+            window.prompt('Скопируйте общую ссылку на семейную анкету', result.url);
+        }
+    } catch (error) {
+        showNotification(error.message || 'Не удалось получить ссылку', 'error');
     }
 }
 
