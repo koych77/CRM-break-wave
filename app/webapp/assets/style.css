@@ -219,6 +219,19 @@ body {
     background: linear-gradient(155deg, rgba(255, 107, 53, 0.10), rgba(7, 17, 31, 0.48));
 }
 
+.family-invoice-item {
+    margin-top: 12px;
+    padding: 14px;
+    border: 1px solid rgba(139, 163, 190, 0.14);
+    border-radius: 14px;
+    background: rgba(4, 12, 23, 0.34);
+}
+
+.family-invoice-item.is-overdue {
+    border-color: rgba(255, 107, 53, 0.48);
+    background: linear-gradient(155deg, rgba(255, 107, 53, 0.10), rgba(7, 17, 31, 0.48));
+}
+
 .status-paid,
 .status-reported {
     color: #87E7A2;

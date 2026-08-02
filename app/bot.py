@@ -542,7 +542,7 @@ async def cmd_makeups(message: Message):
 
 @router.message(F.photo | F.document)
 async def receive_parent_receipt(message: Message):
-    """Attach a receipt to the latest online payment waiting for a file."""
+    """Attach a receipt to the oldest online family invoice waiting for a file."""
     parent = await get_parent(message.from_user.id)
     if not parent:
         return
@@ -564,7 +564,7 @@ async def receive_parent_receipt(message: Message):
                 Payment.status == "awaiting_receipt",
                 Payment.payment_method == "online",
             )
-            .order_by(desc(Payment.reported_at), desc(Payment.id))
+            .order_by(Payment.period_start, Payment.id)
         )
         row = result.first()
         if not row:
@@ -577,6 +577,14 @@ async def receive_parent_receipt(message: Message):
         payment.receipt_file_id = file_id
         payment.status = "reported"
         payment.reported_at = datetime.utcnow()
+        report_date = datetime.now(BELARUS_TZ).date()
+        late_fee, total = (
+            (0, payment.base_amount or payment.amount)
+            if payment.tariff_code == "single"
+            else payment_total(payment.base_amount or payment.amount, payment.due_date, report_date)
+        )
+        payment.late_fee_amount = late_fee
+        payment.amount = total
 
         admins_result = await s.execute(
             select(Coach).where(
@@ -600,18 +608,6 @@ async def receive_parent_receipt(message: Message):
                     await bot.send_document(admin.telegram_id, file_id, caption=receipt_caption)
             except Exception as exc:
                 logger.warning("Could not forward receipt to admin %s: %s", admin.id, exc)
-            s.add(Notification(
-                coach_id=admin.id,
-                student_id=student.id,
-                type="payment_review",
-                message=(
-                    f"💳 Новый чек на проверку\n"
-                    f"Ребёнок: {student.name}\n"
-                    f"Сумма: {payment.amount} Br\n"
-                    "Откройте раздел «Запросы» в CRM."
-                ),
-                recipient_telegram_id=admin.telegram_id,
-            ))
         await s.commit()
 
     await message.answer("✅ Чек прикреплён и отправлен администраторам на проверку.")
