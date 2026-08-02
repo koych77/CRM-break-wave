@@ -43,6 +43,12 @@ def payment_due_date(value: date) -> date:
     return value.replace(day=PAYMENT_DUE_DAY)
 
 
+def can_select_tariff(on_date: date | None = None) -> bool:
+    """Return whether a parent may still change the tariff for the current month."""
+    reference = on_date or date.today()
+    return reference.day <= TARIFF_SELECTION_DEADLINE_DAY
+
+
 def calculate_late_fee(due_date: date | None, on_date: date | None = None) -> int:
     """Add 10 Br on the 11th and another 10 Br every seven overdue days."""
     if not due_date:

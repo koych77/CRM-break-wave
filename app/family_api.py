@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 import secrets
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
@@ -28,6 +28,7 @@ from app.family import (
     ABSENCE_STATUSES,
     ATTENDANCE_STATUSES,
     TARIFFS,
+    can_select_tariff,
     month_bounds,
     payment_due_date,
     payment_total,
@@ -165,10 +166,16 @@ async def _replace_student_schedules(session, student: Student, schedules: list[
 
 def _invoice_json(payment: Payment, today: date) -> dict:
     base_amount = payment.base_amount or payment.amount
+    calculation_date = today
+    if payment.reported_at and payment.status in {"reported", "paid"}:
+        reported_at = payment.reported_at
+        if reported_at.tzinfo is None:
+            reported_at = reported_at.replace(tzinfo=timezone.utc)
+        calculation_date = reported_at.astimezone(BELARUS_TZ).date()
     late_fee, total = (
         (0, base_amount)
         if payment.tariff_code == "single" or payment.status == "paid"
-        else payment_total(base_amount, payment.due_date, today)
+        else payment_total(base_amount, payment.due_date, calculation_date)
     )
     effective_status = payment.status
     if effective_status == "pending" and payment.due_date and payment.due_date < today:
@@ -189,6 +196,19 @@ def _invoice_json(payment: Payment, today: date) -> dict:
         "period_end": payment.period_end.isoformat() if payment.period_end else None,
         "due_date": payment.due_date.isoformat() if payment.due_date else None,
     }
+
+
+async def _oldest_open_invoice(session, student_id: int) -> Payment | None:
+    """Return the oldest family invoice that still has to be settled."""
+    return (
+        await session.execute(
+            select(Payment).where(
+                Payment.student_id == student_id,
+                Payment.tariff_code.is_not(None),
+                Payment.status.notin_({"paid", "written_off"}),
+            ).order_by(Payment.period_start, Payment.id)
+        )
+    ).scalars().first()
 
 
 @router.post("/parent/register")
@@ -327,6 +347,23 @@ async def parent_context(request: Request):
         response_students = []
         for student in students:
             invoice = await ensure_monthly_invoice(session, student, today)
+            invoices = (
+                await session.execute(
+                    select(Payment).where(
+                        Payment.student_id == student.id,
+                        Payment.tariff_code.is_not(None),
+                        Payment.status != "written_off",
+                    ).order_by(desc(Payment.period_start), desc(Payment.id))
+                )
+            ).scalars().all()
+            open_invoices = sorted(
+                (
+                    item for item in invoices
+                    if item.status not in {"paid", "written_off"}
+                ),
+                key=lambda item: (item.period_start or date.min, item.id),
+            )
+            oldest_open_invoice_id = open_invoices[0].id if open_invoices else None
             makeup_result = await session.execute(
                 select(MakeupCredit).where(
                     MakeupCredit.student_id == student.id,
@@ -367,6 +404,12 @@ async def parent_context(request: Request):
                     "is_primary": item.is_primary,
                 } for item in student.schedules],
                 "invoice": _invoice_json(invoice, today),
+                "invoices": [_invoice_json(item, today) for item in invoices],
+                "oldest_open_invoice_id": oldest_open_invoice_id,
+                "tariff_change_allowed": (
+                    can_select_tariff(today)
+                    and invoice.status in {"pending", "rejected"}
+                ),
                 "makeups": [{
                     "id": item.id,
                     "source_date": item.source_date.isoformat(),
@@ -490,28 +533,26 @@ async def parent_tariff(request: Request):
     if not tariff:
         return JSONResponse({"error": "invalid_tariff"}, 400)
 
-    month_value = date.fromisoformat(body.get("month") or date.today().replace(day=1).isoformat())
+    today = datetime.now(BELARUS_TZ).date()
+    try:
+        month_value = date.fromisoformat(body.get("month") or today.replace(day=1).isoformat())
+    except (TypeError, ValueError):
+        return JSONResponse({"error": "invalid_month", "message": "Неверно указан месяц тарифа"}, 400)
     month_start, month_end = month_bounds(month_value)
+    if month_start != today.replace(day=1):
+        return JSONResponse({
+            "error": "invalid_month",
+            "message": "Тариф можно изменить только для текущего месяца",
+        }, 400)
+    if not can_select_tariff(today):
+        return JSONResponse({
+            "error": "tariff_deadline_passed",
+            "message": "Срок выбора тарифа истёк 5-го числа. Сохранён предыдущий тариф.",
+        }, 409)
     async with async_session() as session:
         student = await get_parent_student(session, parent.id, int(body.get("student_id")))
         if not student:
             return JSONResponse({"error": "student_not_found"}, 404)
-        old_debt = (
-            await session.execute(
-                select(Payment).where(
-                    Payment.student_id == student.id,
-                    Payment.period_start < month_start,
-                    Payment.status != "paid",
-                    Payment.tariff_code.is_not(None),
-                ).order_by(Payment.period_start)
-            )
-        ).scalars().first()
-        if old_debt:
-            return JSONResponse({
-                "error": "old_debt_required",
-                "payment_id": old_debt.id,
-                "message": "Сначала необходимо закрыть самый старый долг",
-            }, 409)
 
         invoice = await ensure_monthly_invoice(session, student, month_start)
         if invoice.status not in {"pending", "rejected"}:
@@ -525,13 +566,17 @@ async def parent_tariff(request: Request):
         invoice.due_date = payment_due_date(month_start)
         invoice.status = "pending"
         invoice.rejection_reason = None
-        invoice.notes = (
-            "Тариф выбран родителем"
-            if date.today().day <= 5
-            else "Тариф выбран родителем после 5 числа"
+        invoice.notes = "Тариф выбран родителем до 5-го числа"
+        await add_audit_log(
+            session,
+            parent.telegram_id,
+            "tariff_selected",
+            "payment",
+            invoice.id,
+            {"tariff_code": invoice.tariff_code, "month": month_start.isoformat()},
         )
         await session.commit()
-        return {"success": True, "invoice": _invoice_json(invoice, date.today())}
+        return {"success": True, "invoice": _invoice_json(invoice, today)}
 
 
 @router.post("/parent/payments/{payment_id}/report")
@@ -555,16 +600,55 @@ async def parent_report_payment(payment_id: int, request: Request):
         if not row:
             return JSONResponse({"error": "payment_not_found"}, 404)
         payment, student = row
+        if not payment.tariff_code:
+            return JSONResponse({"error": "payment_not_found"}, 404)
         if payment.status == "paid":
             return JSONResponse({"error": "already_paid"}, 409)
+        if payment.status == "reported":
+            return JSONResponse({
+                "error": "payment_in_review",
+                "message": "Оплата уже находится на проверке",
+            }, 409)
+        oldest = await _oldest_open_invoice(session, student.id)
+        if oldest and oldest.id != payment.id:
+            return JSONResponse({
+                "error": "oldest_debt_first",
+                "payment_id": oldest.id,
+                "message": "Сначала оплатите самый ранний неоплаченный месяц",
+            }, 409)
+
+        today = datetime.now(BELARUS_TZ).date()
         payment.payment_method = method
-        payment.reported_at = datetime.utcnow()
         payment.rejection_reason = None
         if method == "online" and not payment.receipt_file_id:
+            other_receipt = (
+                await session.execute(
+                    select(Payment).join(Student).where(
+                        Student.parent_id == parent.id,
+                        Payment.status == "awaiting_receipt",
+                        Payment.id != payment.id,
+                    )
+                )
+            ).scalars().first()
+            if other_receipt:
+                return JSONResponse({
+                    "error": "receipt_pending",
+                    "payment_id": other_receipt.id,
+                    "message": "Сначала пришлите чек для ранее выбранной онлайн-оплаты",
+                }, 409)
             payment.status = "awaiting_receipt"
+            payment.reported_at = None
             message = "Пришлите чек фотографией или файлом в этот чат с ботом."
         else:
+            late_fee, total = (
+                (0, payment.base_amount or payment.amount)
+                if payment.tariff_code == "single"
+                else payment_total(payment.base_amount or payment.amount, payment.due_date, today)
+            )
+            payment.late_fee_amount = late_fee
+            payment.amount = total
             payment.status = "reported"
+            payment.reported_at = datetime.utcnow()
             message = "Оплата отправлена тренерам на проверку."
             await _queue_admin_notification(
                 session,
@@ -572,6 +656,14 @@ async def parent_report_payment(payment_id: int, request: Request):
                 f"💳 Оплата на проверку\nРебёнок: {student.name}\nСпособ: {'наличные' if method == 'cash' else 'онлайн'}",
                 student.id,
             )
+        await add_audit_log(
+            session,
+            parent.telegram_id,
+            "payment_reported" if payment.status == "reported" else "payment_receipt_requested",
+            "payment",
+            payment.id,
+            {"method": method, "amount": payment.amount},
+        )
         await session.commit()
         return {"success": True, "status": payment.status, "message": message}
 
@@ -755,6 +847,9 @@ async def admin_requests(request: Request):
                 "method": payment.payment_method,
                 "receipt_attached": bool(payment.receipt_file_id),
                 "amount": payment.amount,
+                "base_amount": payment.base_amount or payment.amount,
+                "late_fee_amount": payment.late_fee_amount or 0,
+                "period_start": payment.period_start.isoformat() if payment.period_start else None,
             } for payment, student in payments],
             "resources": {
                 "coaches": [{
@@ -1021,30 +1116,44 @@ async def admin_review_payment(payment_id: int, request: Request):
         if not row:
             return JSONResponse({"error": "payment_not_found"}, 404)
         payment, student, parent = row
+        if payment.status != "reported":
+            return JSONResponse({
+                "error": "payment_not_reported",
+                "message": "Подтвердить можно только оплату, отправленную родителем на проверку",
+            }, 409)
+        if payment.payment_method == "online" and not payment.receipt_file_id:
+            return JSONResponse({
+                "error": "receipt_required",
+                "message": "Для онлайн-оплаты необходимо прикрепить чек",
+            }, 409)
         if decision == "reject":
             reason = str(body.get("reason") or "").strip()
             if not reason:
                 return JSONResponse({"error": "reason_required"}, 400)
             payment.status = "rejected"
             payment.rejection_reason = reason
+            payment.reported_at = None
+            if payment.payment_method == "online":
+                payment.receipt_file_id = None
             message = f"❌ Оплата для {student.name} отклонена.\nПричина: {reason}"
         elif decision == "approve":
-            older = (
-                await session.execute(
-                    select(Payment).where(
-                        Payment.student_id == student.id,
-                        Payment.period_start < payment.period_start,
-                        Payment.status != "paid",
-                        Payment.tariff_code.is_not(None),
-                    ).order_by(Payment.period_start)
-                )
-            ).scalars().first()
-            if older:
-                return JSONResponse({"error": "oldest_debt_first", "payment_id": older.id}, 409)
+            oldest = await _oldest_open_invoice(session, student.id)
+            if oldest and oldest.id != payment.id:
+                return JSONResponse({
+                    "error": "oldest_debt_first",
+                    "payment_id": oldest.id,
+                    "message": "Сначала необходимо подтвердить самый ранний неоплаченный месяц",
+                }, 409)
+            paid_on = datetime.now(BELARUS_TZ).date()
+            if payment.reported_at:
+                reported_at = payment.reported_at
+                if reported_at.tzinfo is None:
+                    reported_at = reported_at.replace(tzinfo=timezone.utc)
+                paid_on = reported_at.astimezone(BELARUS_TZ).date()
             late_fee, total = (
                 (0, payment.base_amount or payment.amount)
                 if payment.tariff_code == "single"
-                else payment_total(payment.base_amount or payment.amount, payment.due_date, date.today())
+                else payment_total(payment.base_amount or payment.amount, payment.due_date, paid_on)
             )
             payment.late_fee_amount = late_fee
             payment.amount = total

@@ -28,7 +28,13 @@ from sqlalchemy import select, text
 import app.api as api_module
 from app.api import app, get_effective_payment_status, verify_telegram_init_data
 from app.database import async_session, engine, init_db, run_migrations
-from app.family import calculate_late_fee, reconcile_attendance
+from app.family import (
+    calculate_late_fee,
+    can_select_tariff,
+    month_bounds,
+    payment_due_date,
+    reconcile_attendance,
+)
 from app.models import (
     Attendance,
     Coach,
@@ -447,6 +453,11 @@ def test_late_fee_grows_by_ten_rubles_every_seven_days_without_cap():
     assert calculate_late_fee(due, date(2026, 8, 15)) == 60
 
 
+def test_tariff_selection_closes_after_fifth_day():
+    assert can_select_tariff(date(2026, 8, 5)) is True
+    assert can_select_tariff(date(2026, 8, 6)) is False
+
+
 def test_parent_registration_approval_and_family_invoice_use_same_mini_app():
     parent_telegram_id = 3001
     token = "test-parent-invite"
@@ -634,6 +645,189 @@ def test_admin_can_approve_parent_makeup_and_reported_payment():
     assert makeup_review.json()["status"] == "scheduled"
     assert payment_review.status_code == 200
     assert payment_review.json()["status"] == "paid"
+
+
+def test_family_finance_requires_oldest_debt_and_cannot_use_legacy_shortcuts():
+    parent_telegram_id = 4001
+
+    async def prepare_family_debts():
+        async with async_session() as session:
+            parent = ParentAccount(
+                telegram_id=parent_telegram_id,
+                full_name="Finance Parent",
+                phone="+375290000001",
+            )
+            session.add(parent)
+            await session.flush()
+            student = Student(
+                coach_id=SEEDED["own_coach_id"],
+                parent_id=parent.id,
+                name="Finance Child",
+            )
+            session.add(student)
+            await session.flush()
+
+            current_start, current_end = month_bounds(date.today())
+            previous_reference = current_start - timedelta(days=1)
+            previous_start, previous_end = month_bounds(previous_reference)
+            old_payment = Payment(
+                coach_id=student.coach_id,
+                student_id=student.id,
+                amount=140,
+                base_amount=140,
+                lessons_count=8,
+                tariff_code="8",
+                status="pending",
+                period_start=previous_start,
+                period_end=previous_end,
+                due_date=payment_due_date(previous_start),
+            )
+            current_payment = Payment(
+                coach_id=student.coach_id,
+                student_id=student.id,
+                amount=170,
+                base_amount=170,
+                lessons_count=12,
+                tariff_code="12",
+                status="pending",
+                period_start=current_start,
+                period_end=current_end,
+                due_date=payment_due_date(current_start),
+            )
+            session.add_all([old_payment, current_payment])
+            await session.commit()
+            return student.id, old_payment.id, current_payment.id, old_payment.due_date
+
+    student_id, old_payment_id, current_payment_id, old_due_date = asyncio.run(
+        prepare_family_debts()
+    )
+
+    api_module.ADMIN_IDS.append(1001)
+    try:
+        with TestClient(app) as client:
+            context = client.post(
+                "/api/parent/context",
+                json={"initData": telegram_init_data(parent_telegram_id)},
+            )
+            newer_first = client.post(
+                f"/api/parent/payments/{current_payment_id}/report",
+                json={
+                    "initData": telegram_init_data(parent_telegram_id),
+                    "payment_method": "cash",
+                },
+            )
+            oldest_report = client.post(
+                f"/api/parent/payments/{old_payment_id}/report",
+                json={
+                    "initData": telegram_init_data(parent_telegram_id),
+                    "payment_method": "cash",
+                },
+            )
+            legacy_mark = client.post(
+                f"/api/payments/{old_payment_id}/mark-paid",
+                json={"initData": telegram_init_data(1001)},
+            )
+            legacy_update = client.post(
+                f"/api/payments/{old_payment_id}/update",
+                json={
+                    "initData": telegram_init_data(1001),
+                    "payment": {"amount": 1, "status": "paid"},
+                },
+            )
+            legacy_delete = client.post(
+                f"/api/payments/{old_payment_id}/delete",
+                json={"initData": telegram_init_data(1001)},
+            )
+            legacy_create = client.post(
+                "/api/payments/create",
+                json={
+                    "initData": telegram_init_data(1001),
+                    "payment": {
+                        "student_id": student_id,
+                        "amount": 1,
+                        "lessons_count": 1,
+                        "status": "paid",
+                    },
+                },
+            )
+            approve_oldest = client.post(
+                f"/api/admin/payments/{old_payment_id}/review",
+                json={
+                    "initData": telegram_init_data(1001),
+                    "decision": "approve",
+                    "received_by_coach_id": SEEDED["own_coach_id"],
+                },
+            )
+            approve_unreported = client.post(
+                f"/api/admin/payments/{current_payment_id}/review",
+                json={
+                    "initData": telegram_init_data(1001),
+                    "decision": "approve",
+                },
+            )
+    finally:
+        api_module.ADMIN_IDS.remove(1001)
+
+    payload = context.json()["students"][0]
+    assert context.status_code == 200
+    assert payload["oldest_open_invoice_id"] == old_payment_id
+    assert {item["id"] for item in payload["invoices"]} == {
+        old_payment_id,
+        current_payment_id,
+    }
+    assert newer_first.status_code == 409
+    assert newer_first.json()["error"] == "oldest_debt_first"
+    assert oldest_report.status_code == 200
+    assert legacy_mark.status_code == 409
+    assert legacy_update.status_code == 409
+    assert legacy_delete.status_code == 409
+    assert legacy_create.status_code == 409
+    assert approve_oldest.status_code == 200
+    expected_total = 140 + calculate_late_fee(old_due_date, date.today())
+    assert approve_oldest.json()["amount"] == expected_total
+    assert approve_unreported.status_code == 409
+    assert approve_unreported.json()["error"] == "payment_not_reported"
+
+
+def test_online_family_payment_cannot_be_approved_without_receipt():
+    async def prepare_online_payment():
+        async with async_session() as session:
+            student = (
+                await session.execute(
+                    select(Student).where(Student.name == "Finance Child")
+                )
+            ).scalar_one()
+            payment = (
+                await session.execute(
+                    select(Payment).where(
+                        Payment.student_id == student.id,
+                        Payment.status == "pending",
+                    )
+                )
+            ).scalar_one()
+            payment.status = "reported"
+            payment.payment_method = "online"
+            payment.reported_at = datetime.utcnow()
+            payment.receipt_file_id = None
+            await session.commit()
+            return payment.id
+
+    payment_id = asyncio.run(prepare_online_payment())
+    api_module.ADMIN_IDS.append(1001)
+    try:
+        with TestClient(app) as client:
+            response = client.post(
+                f"/api/admin/payments/{payment_id}/review",
+                json={
+                    "initData": telegram_init_data(1001),
+                    "decision": "approve",
+                },
+            )
+    finally:
+        api_module.ADMIN_IDS.remove(1001)
+
+    assert response.status_code == 409
+    assert response.json()["error"] == "receipt_required"
 
 
 def test_student_deletion_removes_personal_data_and_receipts_but_keeps_anonymized_revenue():

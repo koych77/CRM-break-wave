@@ -423,6 +423,30 @@ def get_effective_payment_status(payment: Payment, today: date | None = None) ->
     return "pending"
 
 
+def is_payment_overdue(payment: Payment, today: date | None = None) -> bool:
+    """Return whether an open payment is past its financial due date."""
+    if payment.status in {"paid", "written_off"}:
+        return False
+    reference_date = today or datetime.now(BELARUS_TZ).date()
+    deadline = payment.due_date or payment.period_end
+    return bool(deadline and deadline < reference_date)
+
+
+def get_effective_payment_amount(payment: Payment, today: date | None = None) -> tuple[int, int]:
+    """Return the current late fee and payable total without relying on a scheduler refresh."""
+    if payment.status in {"paid", "reported"} or not payment.tariff_code:
+        return payment.late_fee_amount or 0, payment.amount
+    base_amount = payment.base_amount or payment.amount
+    if payment.tariff_code == "single":
+        return 0, base_amount
+    reference_date = today or datetime.now(BELARUS_TZ).date()
+    return payment_total(
+        base_amount,
+        payment.due_date or payment_due_date(payment.period_start or reference_date),
+        reference_date,
+    )
+
+
 def normalize_schedule_days_payload(days, fallback_days: str = "1,3") -> str:
     """Normalize schedule day payloads to comma-separated weekday values."""
     if isinstance(days, list):
@@ -1174,17 +1198,37 @@ async def api_get_student(student_id: int, request: Request):
         payments_result = await s.execute(
             select(Payment).where(Payment.student_id == student_id).order_by(desc(Payment.created_at))
         )
-        payments = [{
-            "id": p.id,
-            "amount": p.amount,
-            "lessons_count": p.lessons_count,
-            "status": p.status,
-            "period_start": p.period_start.isoformat() if p.period_start else None,
-            "period_end": p.period_end.isoformat() if p.period_end else None,
-            "paid_at": p.paid_at.isoformat() if p.paid_at else None,
-            "is_unlimited": p.is_unlimited,
-            "notes": p.notes,
-        } for p in payments_result.scalars().all()]
+        today = datetime.now(BELARUS_TZ).date()
+        payments = []
+        for payment in payments_result.scalars().all():
+            effective_status = get_effective_payment_status(payment, today)
+            amount = payment.amount
+            late_fee = payment.late_fee_amount or 0
+            if payment.tariff_code and payment.status in {"pending", "rejected", "awaiting_receipt"}:
+                late_fee, amount = (
+                    (0, payment.base_amount or payment.amount)
+                    if payment.tariff_code == "single"
+                    else payment_total(
+                        payment.base_amount or payment.amount,
+                        payment.due_date or payment_due_date(payment.period_start or today),
+                        today,
+                    )
+                )
+            payments.append({
+                "id": payment.id,
+                "amount": amount,
+                "late_fee_amount": late_fee,
+                "lessons_count": payment.lessons_count,
+                "status": effective_status,
+                "stored_status": payment.status,
+                "managed_by_family": bool(payment.tariff_code or st.parent_id),
+                "period_start": payment.period_start.isoformat() if payment.period_start else None,
+                "period_end": payment.period_end.isoformat() if payment.period_end else None,
+                "paid_at": payment.paid_at.isoformat() if payment.paid_at else None,
+                "is_unlimited": payment.is_unlimited,
+                "notes": payment.notes,
+                "rejection_reason": payment.rejection_reason,
+            })
         
         # Get location info (legacy)
         location_name = st.location
@@ -1245,6 +1289,7 @@ async def api_get_student(student_id: int, request: Request):
         return {
             "id": st.id,
             "coach_id": st.coach_id,
+            "has_family_account": bool(st.parent_id),
             "name": st.name,
             "nickname": st.nickname,
             "phone": st.phone,
@@ -1951,13 +1996,34 @@ async def api_payments(request: Request):
             effective_status = get_effective_payment_status(payment, today)
             if status_filter and effective_status != status_filter:
                 continue
+            managed_by_family = bool(payment.tariff_code or student.parent_id)
+            display_amount = payment.amount
+            display_late_fee = payment.late_fee_amount or 0
+            if payment.tariff_code and payment.status in {"pending", "rejected", "awaiting_receipt"}:
+                display_late_fee, display_amount = (
+                    (0, payment.base_amount or payment.amount)
+                    if payment.tariff_code == "single"
+                    else payment_total(
+                        payment.base_amount or payment.amount,
+                        payment.due_date or payment_due_date(payment.period_start or today),
+                        today,
+                    )
+                )
             payments.append({
                 "id": payment.id,
                 "student_id": payment.student_id,
                 "student_name": student.name,
-                "amount": payment.amount,
+                "amount": display_amount,
+                "base_amount": payment.base_amount,
+                "late_fee_amount": display_late_fee,
                 "lessons_count": payment.lessons_count,
                 "status": effective_status,
+                "stored_status": payment.status,
+                "managed_by_family": managed_by_family,
+                "payment_method": payment.payment_method,
+                "receipt_attached": bool(payment.receipt_file_id),
+                "rejection_reason": payment.rejection_reason,
+                "due_date": payment.due_date.isoformat() if payment.due_date else None,
                 "period_start": payment.period_start.isoformat() if payment.period_start else None,
                 "period_end": payment.period_end.isoformat() if payment.period_end else None,
                 "paid_at": payment.paid_at.isoformat() if payment.paid_at else None,
@@ -1985,6 +2051,11 @@ async def api_create_payment(request: Request):
         student = student_result.scalar_one_or_none()
         if not student:
             return JSONResponse({"error": "student_not_found"}, 404)
+        if student.parent_id:
+            return JSONResponse({
+                "error": "family_payment_managed",
+                "message": "Счёт семейного кабинета создаётся автоматически по выбранному тарифу",
+            }, 409)
 
         is_unlimited = normalize_bool(data.get("is_unlimited", False))
         lessons_count = int(data.get("lessons_count", 0)) if not is_unlimited else 0
@@ -2022,11 +2093,22 @@ async def api_mark_payment_paid(payment_id: int, request: Request):
     
     async with async_session() as s:
         result = await s.execute(
-            select(Payment).where(Payment.id == payment_id, Payment.coach_id == coach.id)
+            select(Payment, Student).join(Student).where(
+                Payment.id == payment_id,
+                Payment.coach_id == coach.id,
+            )
         )
-        payment = result.scalar_one_or_none()
-        if not payment:
+        row = result.one_or_none()
+        if not row:
             return JSONResponse({"error": "not_found"}, 404)
+        payment, student = row
+        if payment.tariff_code or student.parent_id:
+            return JSONResponse({
+                "error": "family_payment_review_required",
+                "message": "Семейную оплату можно подтвердить только в разделе «Запросы» после сообщения родителя",
+            }, 409)
+        if payment.status == "paid":
+            return JSONResponse({"error": "already_paid", "message": "Оплата уже подтверждена"}, 409)
         
         payment.status = "paid"
         payment.paid_at = datetime.utcnow()
@@ -2050,11 +2132,25 @@ async def api_update_payment(payment_id: int, request: Request):
     
     async with async_session() as s:
         result = await s.execute(
-            select(Payment).where(Payment.id == payment_id, Payment.coach_id == coach.id)
+            select(Payment, Student).join(Student).where(
+                Payment.id == payment_id,
+                Payment.coach_id == coach.id,
+            )
         )
-        payment = result.scalar_one_or_none()
-        if not payment:
+        row = result.one_or_none()
+        if not row:
             return JSONResponse({"error": "not_found"}, 404)
+        payment, student = row
+        if payment.tariff_code or student.parent_id:
+            return JSONResponse({
+                "error": "family_payment_managed",
+                "message": "Сумма и статус семейного счёта определяются тарифом и процессом подтверждения",
+            }, 409)
+        if payment.status == "paid":
+            return JSONResponse({
+                "error": "paid_payment_immutable",
+                "message": "Подтверждённую оплату нельзя редактировать",
+            }, 409)
         
         logger.info(f"api_update_payment id={payment_id} received data: {data}")
         student_id = payment.student_id
@@ -2107,11 +2203,25 @@ async def api_delete_payment(payment_id: int, request: Request):
     
     async with async_session() as s:
         result = await s.execute(
-            select(Payment).where(Payment.id == payment_id, Payment.coach_id == coach.id)
+            select(Payment, Student).join(Student).where(
+                Payment.id == payment_id,
+                Payment.coach_id == coach.id,
+            )
         )
-        payment = result.scalar_one_or_none()
-        if not payment:
+        row = result.one_or_none()
+        if not row:
             return JSONResponse({"error": "not_found"}, 404)
+        payment, student = row
+        if payment.tariff_code or student.parent_id:
+            return JSONResponse({
+                "error": "family_payment_managed",
+                "message": "Семейный счёт нельзя удалить; его можно подтвердить или отклонить",
+            }, 409)
+        if payment.status == "paid":
+            return JSONResponse({
+                "error": "paid_payment_immutable",
+                "message": "Подтверждённую оплату нельзя удалить",
+            }, 409)
         
         student_id = payment.student_id
         await s.delete(payment)
@@ -3789,9 +3899,9 @@ async def api_finance_summary(request: Request):
             )
         )
         pending_amount = sum(
-            payment.amount
+            get_effective_payment_amount(payment, today)[1]
             for payment in pending_result.scalars().all()
-            if get_effective_payment_status(payment, today) in {"pending", "overdue"}
+            if payment.status not in {"paid", "written_off"}
         )
         
         # Overdue breakdown
@@ -3804,14 +3914,18 @@ async def api_finance_summary(request: Request):
         
         overdue_list = []
         for payment, student in overdue_result.all():
-            if get_effective_payment_status(payment, today) != "overdue":
+            if not is_payment_overdue(payment, today):
                 continue
+            late_fee, amount = get_effective_payment_amount(payment, today)
+            deadline = payment.due_date or payment.period_end
             overdue_list.append({
                 "id": payment.id,
                 "student_name": student.name,
-                "amount": payment.amount,
+                "amount": amount,
+                "late_fee_amount": late_fee,
                 "period_end": payment.period_end.isoformat() if payment.period_end else None,
-                "days_overdue": (today - payment.period_end).days if payment.period_end else 0
+                "due_date": deadline.isoformat() if deadline else None,
+                "days_overdue": (today - deadline).days if deadline else 0,
             })
         
         # Monthly trend (last 6 months) - correct month calculation
@@ -3878,6 +3992,7 @@ async def api_finance_debtors(request: Request):
         students = result.scalars().all()
         
         debtors = {
+            "payment_overdue": [],      # Family invoices past the due date
             "expired_subscription": [],  # Subscription ended
             "ending_soon": [],           # 1-3 days left
             "no_lessons": [],            # 0 lessons remaining
@@ -3888,6 +4003,35 @@ async def api_finance_debtors(request: Request):
         for student in students:
             remaining = student.lessons_remaining if student.lessons_remaining is not None else student.lessons_count
             reasons = []
+
+            oldest_invoice = (
+                await s.execute(
+                    select(Payment).where(
+                        Payment.student_id == student.id,
+                        Payment.tariff_code.is_not(None),
+                        Payment.status.notin_({"paid", "written_off"}),
+                    ).order_by(Payment.period_start, Payment.id)
+                )
+            ).scalars().first()
+            if oldest_invoice and is_payment_overdue(oldest_invoice, today):
+                late_fee, total = get_effective_payment_amount(oldest_invoice, today)
+                deadline = oldest_invoice.due_date or oldest_invoice.period_end
+                debtors["payment_overdue"].append({
+                    "id": student.id,
+                    "name": student.name,
+                    "coach_id": student.coach_id,
+                    "payment_id": oldest_invoice.id,
+                    "amount": total,
+                    "late_fee_amount": late_fee,
+                    "days_overdue": (today - deadline).days if deadline else 0,
+                })
+                reasons.append({
+                    "code": "payment_overdue",
+                    "label": "Не оплачено",
+                    "detail": f"{total} Br · просрочка {(today - deadline).days if deadline else 0} дн.",
+                    "severity": "critical",
+                    "priority": -1,
+                })
             
             # Check lessons
             if not student.is_unlimited and remaining <= 0:
@@ -3975,6 +4119,7 @@ async def api_finance_debtors(request: Request):
         
         return {
             "counts": {
+                "payment_overdue": len(debtors["payment_overdue"]),
                 "expired": len(debtors["expired_subscription"]),
                 "ending_soon": len(debtors["ending_soon"]),
                 "no_lessons": len(debtors["no_lessons"]),

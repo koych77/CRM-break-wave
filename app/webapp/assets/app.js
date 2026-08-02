@@ -940,7 +940,11 @@ async function openStudentDetail(id, options = {}) {
             <div class="info-section">
                 <h3>История оплат</h3>
                 ${student.payments.map(p => {
-                    const statusText = {paid: 'Оплачено', pending: 'Ожидает', overdue: 'Просрочено'}[p.status];
+                    const statusText = {
+                        paid: 'Оплачено', pending: 'Ожидает оплаты', overdue: 'Просрочено',
+                        reported: 'На проверке', awaiting_receipt: 'Ожидается чек',
+                        rejected: 'Отклонено', written_off: 'Списано'
+                    }[p.status] || 'Неизвестный статус';
                     const lessonsText = p.is_unlimited ? '♾️ Безлимит' : formatLessonCount(p.lessons_count || 0);
                     return `
                     <div class="list-item" style="margin-bottom: 8px;">
@@ -948,11 +952,16 @@ async function openStudentDetail(id, options = {}) {
                             <span class="list-item-title">${p.amount.toLocaleString()} Br</span>
                             <span class="payment-status ${p.status}">${statusText}</span>
                         </div>
+                        ${p.late_fee_amount > 0 ? `<div class="list-item-subtitle">Доплата за просрочку: ${p.late_fee_amount} Br</div>` : ''}
                         <div class="list-item-subtitle">${lessonsText}${p.period_start && p.period_end ? ' • ' + formatDate(p.period_start) + ' — ' + formatDate(p.period_end) : ''}</div>
-                        <div style="display: flex; gap: 8px; margin-top: 8px;">
-                            <button class="btn-secondary" style="flex: 1; padding: 6px; font-size: 13px;" onclick="openEditPayment(${p.id})">✏️ Редактировать оплату</button>
-                            <button class="btn-danger" style="flex: 1; padding: 6px; font-size: 13px;" onclick="deletePayment(${p.id})">🗑 Удалить</button>
-                        </div>
+                        ${p.rejection_reason ? `<div class="list-item-subtitle danger-copy">Причина: ${escapeHtml(p.rejection_reason)}</div>` : ''}
+                        ${p.managed_by_family
+                            ? '<div class="list-item-subtitle">Семейный счёт управляется через кабинет родителя и раздел «Запросы».</div>'
+                            : p.status !== 'paid' ? `
+                                <div style="display: flex; gap: 8px; margin-top: 8px;">
+                                    <button class="btn-secondary" style="flex: 1; padding: 6px; font-size: 13px;" onclick="openEditPayment(${p.id})">✏️ Редактировать оплату</button>
+                                    <button class="btn-danger" style="flex: 1; padding: 6px; font-size: 13px;" onclick="deletePayment(${p.id})">🗑 Удалить</button>
+                                </div>` : ''}
                     </div>
                     `;
                 }).join('')}
@@ -975,6 +984,7 @@ async function openStudentDetail(id, options = {}) {
             
             <div class="action-buttons-grid">
                 <button class="btn-primary" onclick="openEditStudent(${student.id})">Редактировать</button>
+                ${!student.has_family_account ? `<button class="btn-secondary" onclick="addPaymentForStudent(${student.id})">Добавить оплату</button>` : ''}
                 <button class="btn-secondary" onclick="markExtraAttendance(${student.id})">Внеплановое занятие</button>
                 <button class="btn-secondary" onclick="viewAttendanceHistory(${student.id})">История посещений</button>
             </div>
@@ -1387,8 +1397,46 @@ function renderPayments(list) {
     
     container.innerHTML = list.map(p => {
         const statusClass = p.status;
-        const statusText = {paid: 'Оплачено', pending: 'Ожидает', overdue: 'Просрочено'}[p.status];
+        const statusText = {
+            paid: 'Оплачено',
+            pending: 'Ожидает оплаты',
+            overdue: 'Просрочено',
+            reported: 'На проверке',
+            awaiting_receipt: 'Ожидается чек',
+            rejected: 'Отклонено',
+            written_off: 'Списано'
+        }[p.status] || 'Неизвестный статус';
         const lessonsText = p.is_unlimited ? '♾️ Безлимит' : formatLessonCount(p.lessons_count || 0);
+        let actions = '';
+        let processHint = '';
+
+        if (p.managed_by_family) {
+            if (p.stored_status === 'reported') {
+                actions = `
+                    <button class="payment-action payment-action-primary" onclick="navigate('requests')">
+                        Проверить в запросах
+                    </button>`;
+            } else if (p.stored_status === 'awaiting_receipt') {
+                processHint = '<div class="list-item-subtitle">Родитель должен прислать чек в чат с ботом.</div>';
+            } else if (!['paid', 'written_off'].includes(p.stored_status)) {
+                processHint = '<div class="list-item-subtitle">Родитель сообщает об оплате через семейный кабинет.</div>';
+            }
+        } else {
+            actions = `
+                ${p.status !== 'paid' ? `
+                    <button class="payment-action payment-action-primary" onclick="markPaymentPaid(${p.id})">
+                        <span aria-hidden="true">✓</span> Отметить оплату
+                    </button>
+                ` : ''}
+                ${p.status !== 'paid' ? `
+                    <button class="payment-action payment-action-secondary" onclick="openEditPayment(${p.id})">
+                        Редактировать
+                    </button>
+                    <button class="payment-action payment-action-danger" onclick="deletePayment(${p.id})">
+                        Удалить
+                    </button>
+                ` : ''}`;
+        }
         
         return `
             <article class="list-item payment-card">
@@ -1397,24 +1445,15 @@ function renderPayments(list) {
                     <span class="payment-status ${statusClass}">${statusText}</span>
                 </div>
                 <div class="payment-amount">${p.amount.toLocaleString()} Br</div>
+                ${p.late_fee_amount > 0 ? `<div class="list-item-subtitle">В том числе доплата: ${p.late_fee_amount} Br</div>` : ''}
                 <div class="list-item-subtitle">${lessonsText}</div>
                 <div class="list-item-meta">
                     ${p.period_start && p.period_end ? 
                         `<span>📅 ${formatDate(p.period_start)} — ${formatDate(p.period_end)}</span>` : ''}
                 </div>
-                <div class="payment-actions">
-                    ${p.status !== 'paid' ? `
-                        <button class="payment-action payment-action-primary" onclick="markPaymentPaid(${p.id})">
-                            <span aria-hidden="true">✓</span> Отметить оплату
-                        </button>
-                    ` : ''}
-                    <button class="payment-action payment-action-secondary" onclick="openEditPayment(${p.id})">
-                        Редактировать
-                    </button>
-                    <button class="payment-action payment-action-danger" onclick="deletePayment(${p.id})">
-                        Удалить
-                    </button>
-                </div>
+                ${p.rejection_reason ? `<div class="list-item-subtitle danger-copy">Причина: ${escapeHtml(p.rejection_reason)}</div>` : ''}
+                ${processHint}
+                ${actions ? `<div class="payment-actions">${actions}</div>` : ''}
             </article>
         `;
     }).join('');
@@ -1522,7 +1561,7 @@ async function deletePayment(paymentId) {
             showNotification('Платёж удалён', 'success');
             await refreshVisibleData(result.student_id || null);
         } else {
-            showNotification('Ошибка удаления', 'error');
+            showNotification(result.message || 'Ошибка удаления', 'error');
         }
     } catch (e) {
         console.error('Delete payment error:', e);
@@ -1596,7 +1635,7 @@ async function savePayment() {
             goBack();
             await refreshVisibleData(affectedStudentId);
         } else {
-            showNotification('Ошибка сохранения', 'error');
+            showNotification(result.message || 'Ошибка сохранения', 'error');
         }
     } catch (e) {
         console.error('Save payment error:', e);
@@ -1619,6 +1658,8 @@ async function markPaymentPaid(id) {
         if (result.success) {
             showNotification('Оплачено!', 'success');
             await refreshVisibleData(result.student_id || null);
+        } else {
+            showNotification(result.message || 'Не удалось подтвердить оплату', 'error');
         }
     } catch (e) {
         console.error('Mark paid error:', e);
@@ -3344,6 +3385,58 @@ function parentPaymentStatus(invoice) {
     return labels[invoice?.status] || 'Ожидает';
 }
 
+function renderParentInvoice(student, invoice) {
+    const isCurrent = invoice.id === student.invoice.id;
+    const isOldestOpen = invoice.id === student.oldest_open_invoice_id;
+    const tariffControl = isCurrent && !['reported', 'awaiting_receipt', 'paid'].includes(invoice.stored_status)
+        ? student.tariff_change_allowed
+            ? `
+                <label class="inline-select">
+                    <span>Тариф можно изменить до 5-го числа</span>
+                    <select onchange="chooseParentTariff(${student.id}, this.value)">
+                        ${Object.entries(parentData.tariffs).map(([code, tariff]) =>
+                            `<option value="${code}" ${code === invoice.tariff_code ? 'selected' : ''}>${escapeHtml(tariff.label)} · ${tariff.price} Br</option>`
+                        ).join('')}
+                    </select>
+                </label>`
+            : '<p class="status-note muted-copy">Выбор тарифа закрыт после 5-го числа. Сохранён тариф предыдущего месяца.</p>'
+        : '';
+
+    let paymentActions = '';
+    if (invoice.stored_status === 'reported') {
+        paymentActions = '<p class="status-note success-copy">Оплата отправлена на проверку.</p>';
+    } else if (invoice.stored_status === 'awaiting_receipt') {
+        paymentActions = '<p class="status-note warning-copy">Пришлите чек фотографией или файлом в чат с ботом.</p>';
+    } else if (!['paid', 'written_off'].includes(invoice.stored_status)) {
+        paymentActions = isOldestOpen
+            ? `
+                <div class="family-actions">
+                    <button type="button" class="btn-primary" onclick="reportParentPayment(${invoice.id}, 'online')">Оплатил онлайн</button>
+                    <button type="button" class="btn-secondary" onclick="reportParentPayment(${invoice.id}, 'cash')">Оплатил наличными</button>
+                </div>`
+            : '<p class="status-note warning-copy">Сначала необходимо закрыть самый ранний неоплаченный месяц.</p>';
+    }
+
+    return `
+        <div class="family-invoice-item ${invoice.status === 'overdue' ? 'is-overdue' : ''}">
+            <div class="family-card-head">
+                <div>
+                    <span class="page-eyebrow">${isCurrent ? 'Текущий абонемент' : 'Абонемент'} · ${formatMonthLabel(String(invoice.period_start || '').slice(0, 7))}</span>
+                    <h4>${escapeHtml(invoice.tariff?.label || 'Тариф не указан')}</h4>
+                </div>
+                <span class="status-chip status-${escapeHtml(invoice.status)}">${parentPaymentStatus(invoice)}</span>
+            </div>
+            <div class="money-breakdown">
+                <span>Стоимость <strong>${invoice.base_amount} Br</strong></span>
+                <span>Доплата <strong>${invoice.late_fee_amount} Br</strong></span>
+                <span class="money-total">Итого <strong>${invoice.amount} Br</strong></span>
+            </div>
+            ${invoice.rejection_reason ? `<p class="danger-copy">Причина: ${escapeHtml(invoice.rejection_reason)}</p>` : ''}
+            ${tariffControl}
+            ${paymentActions}
+        </div>`;
+}
+
 function renderParentContext() {
     const container = document.getElementById('parent-content');
     if (!container || !parentData) return;
@@ -3379,18 +3472,14 @@ function renderParentContext() {
                 </div>
             `).join('')
             : '<p class="muted-copy">Активных отработок нет.</p>';
-        const paymentActions = invoice.stored_status === 'paid'
-            ? ''
-            : invoice.stored_status === 'reported'
-                ? '<p class="status-note success-copy">Оплата отправлена на проверку.</p>'
-                : invoice.stored_status === 'awaiting_receipt'
-                    ? '<p class="status-note warning-copy">Пришлите чек фотографией в чат с ботом.</p>'
-                    : `
-                        <div class="family-actions">
-                            <button type="button" class="btn-primary" onclick="reportParentPayment(${invoice.id}, 'online')">Оплатил онлайн</button>
-                            <button type="button" class="btn-secondary" onclick="reportParentPayment(${invoice.id}, 'cash')">Оплатил наличными</button>
-                        </div>
-                    `;
+        const invoices = [...(student.invoices || [invoice])].sort((left, right) => {
+            const leftOpen = !['paid', 'written_off'].includes(left.stored_status);
+            const rightOpen = !['paid', 'written_off'].includes(right.stored_status);
+            if (leftOpen !== rightOpen) return leftOpen ? -1 : 1;
+            return leftOpen
+                ? String(left.period_start || '').localeCompare(String(right.period_start || ''))
+                : String(right.period_start || '').localeCompare(String(left.period_start || ''));
+        });
         return `
             <article class="family-student-card">
                 <div class="family-card-head">
@@ -3415,31 +3504,12 @@ function renderParentContext() {
                     </label>
                 </section>
 
-                <section class="family-panel invoice-panel ${invoice.status === 'overdue' ? 'is-overdue' : ''}">
-                    <div class="family-card-head">
-                        <div>
-                            <span class="page-eyebrow">Абонемент ${formatMonthLabel(String(invoice.period_start || '').slice(0, 7))}</span>
-                            <h4>${escapeHtml(invoice.tariff?.label || 'Выберите тариф')}</h4>
-                        </div>
-                        <span class="status-chip status-${escapeHtml(invoice.status)}">${parentPaymentStatus(invoice)}</span>
+                <section class="family-panel invoice-panel">
+                    <div class="section-heading-row">
+                        <h4>Счета и оплаты</h4>
+                        <span class="count-badge">${invoices.length}</span>
                     </div>
-                    <div class="money-breakdown">
-                        <span>Стоимость <strong>${invoice.base_amount} Br</strong></span>
-                        <span>Доплата <strong>${invoice.late_fee_amount} Br</strong></span>
-                        <span class="money-total">Итого <strong>${invoice.amount} Br</strong></span>
-                    </div>
-                    ${invoice.rejection_reason ? `<p class="danger-copy">Причина: ${escapeHtml(invoice.rejection_reason)}</p>` : ''}
-                    ${!['reported', 'awaiting_receipt', 'paid'].includes(invoice.stored_status) ? `
-                        <label class="inline-select">
-                            <span>Тариф до 5 числа</span>
-                            <select onchange="chooseParentTariff(${student.id}, this.value)">
-                                ${Object.entries(parentData.tariffs).map(([code, tariff]) =>
-                                    `<option value="${code}" ${code === invoice.tariff_code ? 'selected' : ''}>${escapeHtml(tariff.label)} · ${tariff.price} Br</option>`
-                                ).join('')}
-                            </select>
-                        </label>
-                    ` : ''}
-                    ${paymentActions}
+                    ${invoices.map(item => renderParentInvoice(student, item)).join('')}
                 </section>
 
                 <section class="family-panel">
@@ -3784,7 +3854,8 @@ function renderAdminRequests(requests, invitations) {
                 <article class="request-card">
                     <span class="page-eyebrow">${item.method === 'cash' ? 'Наличные' : 'Онлайн'}${item.receipt_attached ? ' · чек прикреплён в чате' : ''}</span>
                     <h4>${escapeHtml(item.student_name)}</h4>
-                    <p>${item.amount} Br</p>
+                    <p>${item.period_start ? `${formatMonthLabel(String(item.period_start).slice(0, 7))} · ` : ''}${item.amount} Br</p>
+                    ${item.late_fee_amount > 0 ? `<small>Тариф: ${item.base_amount} Br · доплата: ${item.late_fee_amount} Br</small>` : ''}
                     ${item.method === 'cash' ? `<label class="inline-select"><span>Кто принял наличные</span><select id="payment-receiver-${item.id}">${coachOptions}</select></label>` : ''}
                     <div class="family-actions">
                         <button class="btn-primary" onclick="reviewParentPayment(${item.id}, 'approve')">Подтвердить</button>
