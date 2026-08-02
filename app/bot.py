@@ -203,6 +203,22 @@ async def cmd_start(message: Message):
 
     start_parts = (message.text or "").split(maxsplit=1)
     start_payload = start_parts[1].strip() if len(start_parts) > 1 else ""
+    if start_payload in {"registration", "register"}:
+        webapp_url = WEBAPP_URL or "https://your-app.up.railway.app"
+        await message.answer(
+            "👋 <b>Семейная регистрация в Break Wave</b>\n\n"
+            "Заполните данные родителя и добавьте всех детей, которые будут заниматься. "
+            "После отправки тренер проверит расписание и подтвердит каждого ребёнка.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(
+                    text="Заполнить семейную анкету",
+                    web_app=WebAppInfo(url=f"{webapp_url}/?registration=1"),
+                )
+            ]]),
+        )
+        return
+
     if start_payload.startswith("invite_"):
         invite_token = start_payload.removeprefix("invite_")
         async with async_session() as s:
@@ -296,11 +312,18 @@ async def cmd_start(message: Message):
         logger.info(f"Coach found: {coach.first_name} (ID: {user_id})")
     else:
         logger.info(f"Coach not found for user: {user_id}")
+        webapp_url = WEBAPP_URL or "https://your-app.up.railway.app"
         await message.answer(
-            "👋 <b>Добро пожаловать в CRM Break Wave!</b>\n\n"
-            "Эта система для тренеров школы.\n"
-            "Для доступа обратитесь к администратору или используйте секретный код.\n\n"
-            "Если у вас есть код, введите: /coach <код>"
+            "👋 <b>Добро пожаловать в Break Wave!</b>\n\n"
+            "Родители могут заполнить семейную анкету и добавить всех детей.\n\n"
+            "Если вы тренер и у вас есть код доступа, введите: /coach &lt;код&gt;",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(
+                    text="Заполнить семейную анкету",
+                    web_app=WebAppInfo(url=f"{webapp_url}/?registration=1"),
+                )
+            ]]),
         )
         return
     

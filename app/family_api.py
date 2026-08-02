@@ -61,6 +61,13 @@ def _invitation_url(token: str) -> str:
     return f"{WEBAPP_URL}/?invite={token}"
 
 
+def _public_registration_url() -> str:
+    bot_username = (os.getenv("BOT_USERNAME") or BOT_USERNAME).strip().lstrip("@")
+    if bot_username:
+        return f"https://t.me/{bot_username}?start=registration"
+    return f"{WEBAPP_URL}/?registration=1"
+
+
 async def _admin_actor(body: dict) -> tuple[Coach | None, dict | None]:
     init_data = body.get("initData", "")
     user = verify_telegram_init_data(init_data)
@@ -216,83 +223,166 @@ async def parent_register(request: Request):
     body = await request.json()
     user = verify_telegram_init_data(body.get("initData", ""))
     token = str(body.get("invite_token") or "").removeprefix("invite_")
-    if not user or not token:
+    if not user:
         return JSONResponse({"error": "unauthorized"}, 403)
 
     parent_data = body.get("parent") or {}
-    child_data = body.get("child") or {}
-    schedule = _schedule_payload(body.get("proposed_schedule"))
-    required = [
-        str(parent_data.get("full_name") or "").strip(),
-        str(parent_data.get("phone") or "").strip(),
-        str(child_data.get("name") or "").strip(),
-        str(child_data.get("birthday") or "").strip(),
-    ]
-    if not all(required) or not schedule:
+    parent_name = str(parent_data.get("full_name") or "").strip()
+    parent_phone = str(parent_data.get("phone") or "").strip()
+    children_data = body.get("children")
+    if children_data is None:
+        # Keep old one-child invitation links and older Mini App versions working.
+        legacy_child = body.get("child") or {}
+        children_data = [{
+            **legacy_child,
+            "proposed_schedule": body.get("proposed_schedule"),
+        }]
+    if not parent_name or not parent_phone or not isinstance(children_data, list):
         return JSONResponse({"error": "required_fields"}, 400)
+    if not 1 <= len(children_data) <= 10:
+        return JSONResponse({"error": "invalid_children_count"}, 400)
 
-    try:
-        birthday = date.fromisoformat(required[3])
-    except ValueError:
-        return JSONResponse({"error": "invalid_birthday"}, 400)
+    children = []
+    submitted_keys: set[tuple[str, date]] = set()
+    for index, child_data in enumerate(children_data):
+        if not isinstance(child_data, dict):
+            return JSONResponse({"error": "invalid_child", "child_index": index}, 400)
+        child_name = str(child_data.get("name") or "").strip()
+        birthday_value = str(child_data.get("birthday") or "").strip()
+        schedule = _schedule_payload(child_data.get("proposed_schedule"))
+        if not child_name or not birthday_value or not schedule:
+            return JSONResponse({"error": "required_fields", "child_index": index}, 400)
+        try:
+            birthday = date.fromisoformat(birthday_value)
+        except ValueError:
+            return JSONResponse({"error": "invalid_birthday", "child_index": index}, 400)
+        child_key = (child_name.casefold(), birthday)
+        if child_key in submitted_keys:
+            return JSONResponse({
+                "error": "duplicate_child",
+                "child_index": index,
+                "child_name": child_name,
+            }, 409)
+        submitted_keys.add(child_key)
+        children.append({
+            "name": child_name,
+            "birthday": birthday,
+            "phone": str(child_data.get("phone") or "").strip() or None,
+            "schedule": schedule,
+        })
 
     async with async_session() as session:
-        invite_result = await session.execute(
-            select(RegistrationInvite).where(
-                RegistrationInvite.token == token,
-                RegistrationInvite.status == "active",
-                RegistrationInvite.expires_at > datetime.utcnow(),
+        invite = None
+        if token:
+            invite_result = await session.execute(
+                select(RegistrationInvite).where(
+                    RegistrationInvite.token == token,
+                    RegistrationInvite.status == "active",
+                    RegistrationInvite.expires_at > datetime.utcnow(),
+                )
             )
-        )
-        invite = invite_result.scalar_one_or_none()
-        if not invite:
-            return JSONResponse({"error": "invite_expired"}, 410)
+            invite = invite_result.scalar_one_or_none()
+            if not invite:
+                return JSONResponse({"error": "invite_expired"}, 410)
 
         parent_result = await session.execute(
             select(ParentAccount).where(ParentAccount.telegram_id == user["id"])
         )
         parent = parent_result.scalar_one_or_none()
         if parent:
-            parent.full_name = required[0]
-            parent.phone = required[1]
+            parent.full_name = parent_name
+            parent.phone = parent_phone
             parent.bot_blocked_at = None
         else:
             parent = ParentAccount(
                 telegram_id=user["id"],
-                full_name=required[0],
-                phone=required[1],
+                full_name=parent_name,
+                phone=parent_phone,
                 training_reminders_enabled=True,
             )
             session.add(parent)
             await session.flush()
 
-        registration = RegistrationRequest(
-            invite_id=invite.id,
-            parent_id=parent.id,
-            child_name=required[2],
-            child_birthday=birthday,
-            child_phone=str(child_data.get("phone") or "").strip() or None,
-            proposed_schedule=json.dumps(schedule, ensure_ascii=False),
-            status="pending",
+        existing_keys: set[tuple[str, date]] = set()
+        existing_requests = (
+            await session.execute(
+                select(RegistrationRequest).where(
+                    RegistrationRequest.parent_id == parent.id,
+                    RegistrationRequest.status.in_({"pending", "approved"}),
+                )
+            )
+        ).scalars().all()
+        pending_requests_count = sum(
+            item.status == "pending" for item in existing_requests
         )
-        session.add(registration)
-        invite.status = "used"
-        invite.used_at = datetime.utcnow()
+        if pending_requests_count + len(children) > 10:
+            return JSONResponse({"error": "too_many_pending_children"}, 409)
+        existing_keys.update(
+            (item.child_name.casefold(), item.child_birthday)
+            for item in existing_requests
+        )
+        existing_students = (
+            await session.execute(
+                select(Student).where(
+                    Student.parent_id == parent.id,
+                    Student.deleted_at.is_(None),
+                )
+            )
+        ).scalars().all()
+        existing_keys.update(
+            (item.name.casefold(), item.birthday)
+            for item in existing_students
+            if item.birthday
+        )
+        for index, child in enumerate(children):
+            if (child["name"].casefold(), child["birthday"]) in existing_keys:
+                return JSONResponse({
+                    "error": "duplicate_child",
+                    "child_index": index,
+                    "child_name": child["name"],
+                }, 409)
+
+        registrations = []
+        for index, child in enumerate(children):
+            registration = RegistrationRequest(
+                invite_id=invite.id if invite and index == 0 else None,
+                parent_id=parent.id,
+                child_name=child["name"],
+                child_birthday=child["birthday"],
+                child_phone=child["phone"],
+                proposed_schedule=json.dumps(child["schedule"], ensure_ascii=False),
+                status="pending",
+            )
+            session.add(registration)
+            registrations.append(registration)
+        if invite:
+            invite.status = "used"
+            invite.used_at = datetime.utcnow()
         await session.flush()
+
+        children_list = "\n".join(f"• {item.child_name}" for item in registrations)
         await _queue_admin_notification(
             session,
             "registration_request",
-            f"🆕 Новая заявка на регистрацию\nРебёнок: {registration.child_name}\nРодитель: {parent.full_name}",
+            f"🆕 Новая семейная анкета\nРодитель: {parent.full_name}\nДети ({len(registrations)}):\n{children_list}",
         )
-        await add_audit_log(
-            session,
-            user["id"],
-            "registration_submitted",
-            "registration_request",
-            registration.id,
-        )
+        for registration in registrations:
+            await add_audit_log(
+                session,
+                user["id"],
+                "registration_submitted",
+                "registration_request",
+                registration.id,
+            )
         await session.commit()
-        return {"success": True, "request_id": registration.id, "status": "pending"}
+        request_ids = [item.id for item in registrations]
+        return {
+            "success": True,
+            "request_id": request_ids[0],
+            "request_ids": request_ids,
+            "children_count": len(request_ids),
+            "status": "pending",
+        }
 
 
 @router.post("/parent/context")
@@ -757,6 +847,15 @@ async def admin_create_invitation(request: Request):
             "invite_url": invite_url,
             "expires_at": invite.expires_at.isoformat(),
         }
+
+
+@router.post("/admin/registration-link")
+async def admin_registration_link(request: Request):
+    body = await request.json()
+    coach, _ = await _admin_actor(body)
+    if not coach:
+        return JSONResponse({"error": "forbidden"}, 403)
+    return {"url": _public_registration_url()}
 
 
 @router.post("/admin/requests")

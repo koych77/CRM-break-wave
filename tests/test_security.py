@@ -535,6 +535,103 @@ def test_parent_registration_approval_and_family_invoice_use_same_mini_app():
         api_module.ADMIN_IDS.remove(1001)
 
 
+def test_public_family_registration_creates_multiple_child_requests_without_invites():
+    parent_telegram_id = 3101
+    children = [
+        {
+            "name": "Анна Семёнова",
+            "birthday": "2014-03-04",
+            "phone": "+375291111112",
+            "proposed_schedule": [{
+                "days": "1",
+                "times": {"1": "17:00"},
+                "duration": 90,
+                "is_primary": True,
+            }],
+        },
+        {
+            "name": "Павел Семёнов",
+            "birthday": "2017-08-09",
+            "phone": "",
+            "proposed_schedule": [{
+                "days": "3",
+                "times": {"3": "18:30"},
+                "duration": 90,
+                "is_primary": True,
+            }],
+        },
+    ]
+
+    with TestClient(app) as client:
+        auth = client.post(
+            "/api/auth",
+            json={
+                "initData": telegram_init_data(parent_telegram_id),
+                "startParam": "registration",
+            },
+        )
+        assert auth.status_code == 200
+        assert auth.json()["role"] == "guest"
+        assert auth.json()["registration_mode"] == "public"
+        assert auth.json()["invite_token"] is None
+
+        registration = client.post(
+            "/api/parent/register",
+            json={
+                "initData": telegram_init_data(parent_telegram_id),
+                "parent": {
+                    "full_name": "Ольга Семёнова",
+                    "phone": "+375291111110",
+                },
+                "children": children,
+            },
+        )
+        assert registration.status_code == 200
+        payload = registration.json()
+        assert payload["children_count"] == 2
+        assert len(payload["request_ids"]) == 2
+
+        duplicate = client.post(
+            "/api/parent/register",
+            json={
+                "initData": telegram_init_data(parent_telegram_id),
+                "parent": {
+                    "full_name": "Ольга Семёнова",
+                    "phone": "+375291111110",
+                },
+                "children": [children[0]],
+            },
+        )
+        assert duplicate.status_code == 409
+        assert duplicate.json()["error"] == "duplicate_child"
+
+    async def verify_requests():
+        async with async_session() as session:
+            parent = (
+                await session.execute(
+                    select(ParentAccount).where(
+                        ParentAccount.telegram_id == parent_telegram_id
+                    )
+                )
+            ).scalar_one()
+            requests = (
+                await session.execute(
+                    select(RegistrationRequest)
+                    .where(RegistrationRequest.parent_id == parent.id)
+                    .order_by(RegistrationRequest.id)
+                )
+            ).scalars().all()
+            return requests
+
+    requests = asyncio.run(verify_requests())
+    assert [item.child_name for item in requests] == [
+        "Анна Семёнова",
+        "Павел Семёнов",
+    ]
+    assert all(item.invite_id is None for item in requests)
+    assert all(item.status == "pending" for item in requests)
+
+
 def test_absence_deducts_lesson_and_creates_makeup_but_coach_cancellation_does_not_deduct():
     async def exercise_rules():
         async with async_session() as session:

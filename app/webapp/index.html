@@ -9,8 +9,8 @@
     <title>CRM Break Wave</title>
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect width='64' height='64' rx='16' fill='%232DE1F2'/><text x='32' y='41' text-anchor='middle' font-size='22' font-family='Arial' font-weight='700' fill='%2307111F'>BW</text></svg>">
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
-    <link rel="stylesheet" href="/assets/style.css?v=41">
-    <link rel="stylesheet" href="/assets/visual-system.css?v=41">
+    <link rel="stylesheet" href="/assets/style.css?v=42">
+    <link rel="stylesheet" href="/assets/visual-system.css?v=42">
 </head>
 <body>
     <div id="app">
@@ -58,12 +58,12 @@
                 </div>
             </div>
 
-            <!-- Parent registration from a one-time invitation -->
+            <!-- Public family registration and legacy personal invitations -->
             <div id="screen-registration" class="screen">
                 <div class="family-hero">
-                    <span class="page-eyebrow">Приглашение от тренера</span>
-                    <h2>Регистрация в Break Wave</h2>
-                    <p>Только необходимые данные. После отправки тренер проверит анкету и расписание.</p>
+                    <span class="page-eyebrow">Семейная анкета</span>
+                    <h2>Регистрация семьи в Break Wave</h2>
+                    <p>Заполните данные один раз и добавьте всех детей, которые будут заниматься.</p>
                 </div>
                 <form id="parent-registration-form" class="form-container family-form">
                     <h3 class="form-section-title">Родитель</h3>
@@ -76,31 +76,15 @@
                         <input id="reg-parent-phone" type="tel" autocomplete="tel" placeholder="+375 29 000-00-00" required>
                     </div>
 
-                    <h3 class="form-section-title">Ребёнок</h3>
-                    <div class="form-group">
-                        <label for="reg-child-name">ФИО *</label>
-                        <input id="reg-child-name" type="text" required>
-                    </div>
-                    <div class="form-row">
-                        <div class="form-group">
-                            <label for="reg-child-birthday">Дата рождения *</label>
-                            <input id="reg-child-birthday" type="date" required>
-                        </div>
-                        <div class="form-group">
-                            <label for="reg-child-phone">Телефон</label>
-                            <input id="reg-child-phone" type="tel" placeholder="Необязательно">
-                        </div>
-                    </div>
-
                     <div class="section-heading-row family-section-title">
                         <div>
-                            <h3>Расписание</h3>
-                            <p>Укажите дни и время, согласованные с тренером.</p>
+                            <h3>Дети</h3>
+                            <p>Для каждого ребёнка укажите отдельное расписание.</p>
                         </div>
-                        <button type="button" class="section-link" onclick="addRegistrationScheduleRow()">+ День</button>
+                        <button type="button" class="btn-secondary compact-btn" onclick="addRegistrationChild()">+ Добавить ребёнка</button>
                     </div>
-                    <div id="registration-schedule-list" class="schedule-editor"></div>
-                    <button type="submit" class="btn-primary btn-block">Отправить тренеру</button>
+                    <div id="registration-children-list" class="registration-children-list"></div>
+                    <button type="submit" class="btn-primary btn-block">Отправить семейную анкету</button>
                     <p class="privacy-note">Анкета доступна только руководителям школы и назначенному тренеру.</p>
                 </form>
             </div>
@@ -124,7 +108,7 @@
                         <svg width="24" height="24" viewBox="0 0 24 24" fill="none"><path d="M15 18L9 12L15 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
                     </button>
                     <span class="screen-title">Запросы</span>
-                    <button class="btn-primary" onclick="createParentInvitation()">+ Пригласить</button>
+                    <button class="btn-primary" onclick="copyPublicRegistrationLink()">Ссылка на анкету</button>
                 </div>
                 <div id="requests-content" class="request-center">
                     <div class="loading-container"><div class="spinner"></div><p>Загрузка…</p></div>
@@ -173,9 +157,9 @@
                             <div class="action-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="m5 12 4 4L19 6M12 22a10 10 0 1 1 10-10"/></svg></div>
                             <div class="action-label">Отметить занятие</div>
                         </button>
-                        <button class="action-card" onclick="createParentInvitation()">
+                        <button class="action-card" onclick="copyPublicRegistrationLink()">
                             <div class="action-icon" aria-hidden="true">↗</div>
-                            <div class="action-label">Пригласить родителя</div>
+                            <div class="action-label">Ссылка для родителей</div>
                         </button>
                         <button class="action-card" onclick="navigate('requests')">
                             <div class="action-icon" aria-hidden="true">◎</div>
@@ -480,6 +464,6 @@
         <div id="live-region" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
     </div>
 
-    <script src="/assets/app.js?v=41"></script>
+    <script src="/assets/app.js?v=42"></script>
 </body>
 </html>

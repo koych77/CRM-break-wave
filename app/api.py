@@ -617,7 +617,21 @@ async def api_auth(request: Request):
 
     if not coach:
         parent = await get_current_parent(init_data)
-        start_param = str(body.get("startParam") or "").removeprefix("invite_")
+        raw_start_param = str(body.get("startParam") or "").strip()
+        public_registration = raw_start_param in {"registration", "register"}
+        start_param = raw_start_param.removeprefix("invite_")
+        if public_registration:
+            return {
+                "role": "guest",
+                "telegram_id": user["id"],
+                "invite_token": None,
+                "registration_mode": "public",
+                "existing_parent": {
+                    "full_name": parent.full_name,
+                    "phone": parent.phone,
+                } if parent else None,
+                "is_admin": False,
+            }
         if start_param:
             async with async_session() as s:
                 invite_result = await s.execute(
