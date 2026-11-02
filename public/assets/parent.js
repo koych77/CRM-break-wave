@@ -3,7 +3,8 @@
 const PARENT_MONTHS = ['января', 'февраля', 'марта', 'апреля', 'мая', 'июня', 'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря'];
 const PARENT_MONTHS_NOMINATIVE = ['Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь', 'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь'];
 const PARENT_WEEKDAYS = ['Понедельник', 'Вторник', 'Среда', 'Четверг', 'Пятница', 'Суббота', 'Воскресенье'];
-const PARENT_BACK_ICON = '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 5l-7 7 7 7"></path></svg>';
+const PARENT_BACK_ICON = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 4.5L7.5 12l7.5 7.5"></path></svg>';
+const REMOVE_ICON = '<svg width="22" height="22" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="currentColor"></circle><path d="M8.5 8.5l7 7M15.5 8.5l-7 7" fill="none" stroke="#07111f" stroke-width="2" stroke-linecap="round"></path></svg>';
 
 const parentUi = {
     studentId: null,
@@ -63,7 +64,7 @@ function parentPayableInvoice(student) {
 async function loadParentContext() {
     const container = document.getElementById('parent-content');
     if (!container) return;
-    if (!parentData) renderScreenState(container, 'Загружаем кабинет…', {icon: 'BW'});
+    if (!parentData) renderScreenState(container, 'Загружаем кабинет…', {loading: true});
     try {
         parentData = await apiPost('/api/parent/context');
         renderParentContext();
@@ -87,8 +88,10 @@ function renderParentContext() {
         schedule: renderParentSchedule,
     };
     const scrollTop = window.scrollY;
-    container.innerHTML = `<div class="pa">${(student ? views[parentUi.view] : renderParentEmpty)(student)}</div>`;
-    window.scrollTo(0, parentUi.view === 'home' ? scrollTop : 0);
+    const html = `<div class="pa">${(student ? views[parentUi.view] : renderParentEmpty)(student)}</div>`;
+    const atHome = parentUi.view === 'home';
+    paintScreen(container, html, atHome ? `home:${parentUi.studentId}` : parentUi.view, atHome ? 0 : 1);
+    window.scrollTo(0, atHome ? scrollTop : 0);
 }
 
 function parentRegistrationCards() {
@@ -395,7 +398,7 @@ function renderParentSchedule(student) {
                     <div class="pa-schedule-row">
                         <select class="pa-field" aria-label="День" data-pa-row="${index}" data-field="day">${options(row.day)}</select>
                         <input class="pa-field" type="time" aria-label="Время" value="${escapeHtml(row.time)}" data-pa-row="${index}" data-field="time">
-                        <button type="button" class="pa-remove" data-pa="remove-row" data-value="${index}" aria-label="Убрать">×</button>
+                        <button type="button" class="pa-remove" data-pa="remove-row" data-value="${index}" aria-label="Убрать">${REMOVE_ICON}</button>
                     </div>`).join('')}
                 <button type="button" class="pa-btn" data-pa="add-row">Добавить день</button>
                 <div class="pa-label">Тренер подтвердит новое расписание или предложит другое.</div>
@@ -493,9 +496,11 @@ const PARENT_ACTIONS = {
     },
     'toggle-reminder': () => {
         const student = parentStudent();
+        // The switch moves at once; the reload after the request restores it if saving fails.
+        student.training_reminders_enabled = !student.training_reminders_enabled;
         return parentRun(() => apiPost('/api/parent/reminders', {
             student_id: student.id,
-            enabled: !student.training_reminders_enabled,
+            enabled: student.training_reminders_enabled,
         }));
     },
     'submit-cash': () => {

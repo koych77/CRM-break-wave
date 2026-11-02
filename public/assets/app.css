@@ -12,7 +12,13 @@ body {
     -webkit-text-size-adjust: 100%;
 }
 
+body {
+    overflow-x: hidden;
+}
+
 main {
+    position: relative;
+    z-index: 2;
     max-width: 520px;
     margin: 0 auto;
 }
@@ -37,6 +43,7 @@ main {
     display: flex;
     flex-direction: column;
     min-height: var(--tg-viewport-stable-height, 100vh);
+    background: var(--pa-bg);
     color: var(--pa-text);
     font-size: 15px;
     line-height: 1.4;
@@ -86,7 +93,7 @@ main {
     height: 44px;
     border: 0;
     background: transparent;
-    color: var(--pa-text);
+    color: var(--pa-accent);
 }
 
 .pa-body {
@@ -211,9 +218,29 @@ main {
     white-space: nowrap;
 }
 
+.pa-segment {
+    position: relative;
+}
+
+.pa-segment button {
+    position: relative;
+}
+
 .pa-segment button[aria-pressed="true"] {
     background: var(--pa-raised);
     color: var(--pa-text);
+}
+
+.pa-segment.is-sliding button[aria-pressed="true"] {
+    background: transparent;
+}
+
+.pa-segment-thumb {
+    position: absolute;
+    top: 4px;
+    bottom: 4px;
+    border-radius: 10px;
+    background: var(--pa-raised);
 }
 
 .pa-btn {
@@ -319,7 +346,10 @@ main {
     z-index: 5;
     bottom: 0;
     padding: 12px 16px calc(env(safe-area-inset-bottom, 0px) + 20px);
-    background: var(--pa-sunken);
+    border-top: 0.5px solid var(--pa-line);
+    background: rgba(11, 24, 41, 0.78);
+    -webkit-backdrop-filter: saturate(180%) blur(20px);
+    backdrop-filter: saturate(180%) blur(20px);
 }
 
 .pa-foot .pa-btn {
@@ -360,24 +390,57 @@ main {
     flex: none;
     align-items: center;
     box-sizing: border-box;
-    width: 44px;
-    height: 26px;
-    padding: 3px;
-    border-radius: 13px;
+    width: 51px;
+    height: 31px;
+    padding: 2px;
+    border-radius: 16px;
     background: #2a3f58;
 }
 
 .pa-switch-track::after {
     content: "";
-    width: 20px;
-    height: 20px;
-    border-radius: 10px;
-    background: var(--pa-text);
+    width: 27px;
+    height: 27px;
+    border-radius: 14px;
+    background: #fff;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
 }
 
 .pa-switch[aria-pressed="true"] .pa-switch-track {
     justify-content: flex-end;
     background: #06b6d4;
+}
+
+.pa-switch.is-turning-on .pa-switch-track {
+    animation: pa-track-on 280ms ease-out;
+}
+
+.pa-switch.is-turning-on .pa-switch-track::after {
+    animation: pa-knob-on 280ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+.pa-switch.is-turning-off .pa-switch-track {
+    animation: pa-track-off 280ms ease-out;
+}
+
+.pa-switch.is-turning-off .pa-switch-track::after {
+    animation: pa-knob-off 280ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+@keyframes pa-knob-on {
+    from { transform: translateX(-20px); }
+}
+
+@keyframes pa-knob-off {
+    from { transform: translateX(20px); }
+}
+
+@keyframes pa-track-on {
+    from { background: #2a3f58; }
+}
+
+@keyframes pa-track-off {
+    from { background: #06b6d4; }
 }
 
 .pa-field {
@@ -398,6 +461,11 @@ main {
     gap: 6px;
 }
 
+.pa-schedule-row input[type="time"] {
+    padding: 0 6px;
+    font-size: 15px;
+}
+
 @media (max-width: 359px) {
     .pa-schedule-row {
         grid-template-columns: minmax(0, 1fr) 44px;
@@ -413,15 +481,22 @@ main {
     width: 44px;
     height: 44px;
     border: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
     background: transparent;
-    color: var(--pa-muted);
-    font-size: 22px;
+    color: #51647c;
 }
 
 .pa-center {
     flex: 1;
     justify-content: center;
     padding: 24px 16px;
+}
+
+.pa-state {
+    text-align: center;
 }
 
 .pa-center h1 {
@@ -466,7 +541,7 @@ select.pa-field {
     appearance: none;
     padding-right: 30px;
     overflow: hidden;
-    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%23a8b7c9' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%23a8b7c9' stroke-width='2.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M7 9.5l5-5 5 5M7 14.5l5 5 5-5'/%3E%3C/svg%3E");
     background-position: right 10px center;
     background-repeat: no-repeat;
     text-overflow: ellipsis;
@@ -511,10 +586,100 @@ a.pa-btn {
     font-size: 14px;
     font-weight: 600;
     box-shadow: 0 12px 30px rgba(0, 0, 0, 0.4);
+    animation: pa-toast-in 360ms cubic-bezier(0.32, 0.72, 0, 1);
 }
 
 .notification.error {
     background: #fb7185;
+}
+
+@keyframes pa-toast-in {
+    from {
+        opacity: 0;
+        transform: translateY(16px) scale(0.96);
+    }
+}
+
+/* === iOS-style motion === */
+
+/* The previous screen during a slide. */
+.pa-ghost {
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    max-width: 520px;
+    margin: 0 auto;
+    overflow: hidden;
+    pointer-events: none;
+}
+
+.pa-ghost.is-under {
+    z-index: 1;
+}
+
+.pa-ghost.is-over {
+    z-index: 3;
+}
+
+.pa-btn,
+.pa-choice,
+.pa-back,
+.pa-link,
+.pa-remove,
+.pa-switch,
+.pa-segment button,
+.st-nav button,
+.st-role {
+    -webkit-touch-callout: none;
+    touch-action: manipulation;
+    -webkit-user-select: none;
+    user-select: none;
+    transition: opacity 200ms ease-out, transform 200ms ease-out;
+}
+
+.pa-btn:not([disabled]):active,
+.pa-choice:not([disabled]):active {
+    opacity: 0.75;
+    transform: scale(0.98);
+    transition-duration: 0ms;
+}
+
+.pa-back:active,
+.pa-link:active,
+.pa-remove:active,
+.st-nav button:active,
+.st-role:not([disabled]):active {
+    opacity: 0.45;
+    transition-duration: 0ms;
+}
+
+.pa-choice.is-toggled,
+.st-role.is-toggled {
+    animation: pa-toggled 240ms ease-out;
+}
+
+@keyframes pa-toggled {
+    from { transform: scale(0.97); }
+}
+
+.pa-spinner {
+    align-self: center;
+    color: var(--pa-muted);
+    animation: pa-spin 800ms steps(8) infinite;
+}
+
+@keyframes pa-spin {
+    to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .pa *,
+    .notification {
+        animation: none !important;
+        transition: none !important;
+    }
 }
 
 /* === Staff screens === */
@@ -564,10 +729,14 @@ a.pa-btn {
     bottom: 0;
     display: flex;
     padding: 4px 4px calc(env(safe-area-inset-bottom, 0px) + 12px);
-    background: var(--pa-sunken);
+    border-top: 0.5px solid var(--pa-line);
+    background: rgba(11, 24, 41, 0.78);
+    -webkit-backdrop-filter: saturate(180%) blur(20px);
+    backdrop-filter: saturate(180%) blur(20px);
 }
 
 .st-nav button {
+    position: relative;
     display: flex;
     flex: 1;
     flex-direction: column;
@@ -586,6 +755,23 @@ a.pa-btn {
 
 .st-nav span {
     white-space: nowrap;
+}
+
+.st-nav .st-badge {
+    position: absolute;
+    top: 3px;
+    left: calc(50% + 6px);
+    box-sizing: border-box;
+    min-width: 18px;
+    height: 18px;
+    padding: 0 5px;
+    border-radius: 9px;
+    background: #ff3b30;
+    color: #fff;
+    font-size: 11px;
+    font-weight: 700;
+    line-height: 18px;
+    text-align: center;
 }
 
 @media (max-width: 359px) {

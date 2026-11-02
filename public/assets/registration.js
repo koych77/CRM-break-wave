@@ -46,12 +46,12 @@ function paintRegistration() {
                     <div class="pa-schedule-row">
                         <select class="pa-field" aria-label="День" data-reg-row="${rowIndex}" data-child="${childIndex}" data-field="weekday">${weekdays(row.weekday)}</select>
                         <input class="pa-field" type="time" aria-label="Время" data-reg-row="${rowIndex}" data-child="${childIndex}" data-field="time" value="${escapeHtml(row.time)}">
-                        <button type="button" class="pa-remove" data-reg="remove-row" data-child="${childIndex}" data-row="${rowIndex}" aria-label="Убрать">×</button>
+                        <button type="button" class="pa-remove" data-reg="remove-row" data-child="${childIndex}" data-row="${rowIndex}" aria-label="Убрать">${REMOVE_ICON}</button>
                     </div>`).join('')}
                 <button type="button" class="pa-btn" data-reg="add-row" data-child="${childIndex}">Добавить день</button>
             </div>
         </section>`).join('');
-    document.getElementById('parent-content').innerHTML = `
+    paintScreen(document.getElementById('parent-content'), `
         <div class="pa">
             ${registration.canGoBack
                 ? parentBar('Новый ребёнок')
@@ -77,7 +77,7 @@ function paintRegistration() {
             <div class="pa-foot">
                 <button type="button" class="pa-btn is-primary" data-reg="submit" ${registration.busy ? 'disabled' : ''}>${registration.busy ? 'Отправляем…' : 'Отправить анкету'}</button>
             </div>
-        </div>`;
+        </div>`, 'registration', registration.canGoBack ? 1 : 0);
 }
 
 const REGISTRATION_ACTIONS = {

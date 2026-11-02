@@ -1,11 +1,28 @@
 /* === Coach and administrator screens === */
 
+// Tab icons: "shape" fills on the open tab, "lines" stay as strokes, "marks" are cut out of the shape.
 const STAFF_ICONS = {
-    today: 'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM8 12l3 3 5-6',
-    students: 'M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM2 21c0-4 3-6 7-6s7 2 7 6M17 4a4 4 0 0 1 0 7M19 15c2 1 3 3 3 6',
-    requests: 'M4 4h16v12H8l-4 4V4zM8 9h8M8 12h5',
-    money: 'M3 7h18v12H3V7zM3 7l3-3h12l3 3M16 13h2',
-    team: 'M12 8a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM5 22v-4a7 7 0 0 1 14 0v4',
+    today: {
+        shape: 'M5.5 5h13A2.5 2.5 0 0 1 21 7.5v11a2.5 2.5 0 0 1-2.5 2.5h-13A2.5 2.5 0 0 1 3 18.5v-11A2.5 2.5 0 0 1 5.5 5z',
+        lines: 'M8 2.8v3.4M16 2.8v3.4',
+        marks: 'M3 10h18M8 14.5h.01M12 14.5h.01M16 14.5h.01',
+    },
+    students: {
+        shape: 'M9.5 11a3.75 3.75 0 1 0 0-7.5 3.75 3.75 0 0 0 0 7.5zM2.5 20.5c0-4 3.1-6.5 7-6.5s7 2.5 7 6.5z',
+        lines: 'M15.5 3.8a3.7 3.7 0 0 1 0 7M18.5 14.5c1.9.8 3 2.8 3 6',
+    },
+    requests: {
+        shape: 'M12 3.5c5 0 9 3.3 9 7.5s-4 7.5-9 7.5c-1 0-2-.1-2.9-.4l-4.6 2.4 1-3.9C3.9 15.1 3 13.2 3 11c0-4.2 4-7.5 9-7.5z',
+        marks: 'M8 11h.01M12 11h.01M16 11h.01',
+    },
+    money: {
+        shape: 'M5 5h14a2.5 2.5 0 0 1 2.5 2.5v9A2.5 2.5 0 0 1 19 19H5a2.5 2.5 0 0 1-2.5-2.5v-9A2.5 2.5 0 0 1 5 5z',
+        marks: 'M2.5 10h19M6 15h4',
+    },
+    team: {
+        shape: 'M12 11.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7zM5.5 20.5c0-3.7 2.9-6 6.5-6s6.5 2.3 6.5 6z',
+        lines: 'M5.8 5.3a3 3 0 0 0 0 5.6M2.3 19.5c0-2.6 1-4.5 2.8-5.4M18.2 5.3a3 3 0 0 1 0 5.6M21.7 19.5c0-2.6-1-4.5-2.8-5.4',
+    },
 };
 
 const staff = {
@@ -60,6 +77,19 @@ async function staffOpenTab(tab) {
         money: staffLoadMoney,
         team: staffLoadTeam,
     };
+    const loaded = {today: staff.day, students: staff.students.length, requests: staff.requests, money: staff.money, team: staff.team};
+    // A visited tab opens at once and refreshes behind the scenes, as native apps do.
+    if (loaded[tab]) {
+        staffPaint();
+        window.scrollTo(0, 0);
+        try {
+            await loaders[tab]();
+            if (staff.tab === tab && staff.screen === 'root' && !document.activeElement?.matches('input, select, textarea')) staffPaint();
+        } catch (error) {
+            showNotification(error.message, 'error');
+        }
+        return;
+    }
     await staffLoad(loaders[tab]);
     window.scrollTo(0, 0);
 }
@@ -97,19 +127,31 @@ function staffRequestCount() {
     return data.registrations.length + data.makeups.length + data.schedule_changes.length + data.payments.length;
 }
 
+function staffTabIcon(id, active) {
+    const {shape, lines = '', marks = ''} = STAFF_ICONS[id];
+    const markWidth = active ? 2 : 1.8;
+    return `
+        <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="${shape}" ${active ? 'fill="currentColor"' : ''}></path>
+            ${lines ? `<path d="${lines}"></path>` : ''}
+            ${marks ? `<path d="${marks}" stroke-width="${markWidth}" ${active ? 'stroke="#0b1829"' : ''}></path>` : ''}
+        </svg>`;
+}
+
 function staffNav() {
     const count = staffRequestCount();
     const items = [
         ['today', 'Сегодня'],
         ['students', 'Ученики'],
-        ['requests', count ? `Заявки (${count})` : 'Заявки'],
+        ['requests', 'Заявки'],
     ];
     if (staff.me.is_admin) items.push(['money', 'Деньги'], ['team', 'Команда']);
     return `
         <nav class="st-nav" aria-label="Разделы">
             ${items.map(([id, label]) => `
                 <button type="button" data-st="tab" data-value="${id}" ${staff.tab === id ? 'aria-current="page"' : ''}>
-                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${STAFF_ICONS[id]}"></path></svg>
+                    ${staffTabIcon(id, staff.tab === id)}
+                    ${id === 'requests' && count ? `<span class="st-badge" aria-label="Новых: ${count}">${count}</span>` : ''}
                     <span>${label}</span>
                 </button>`).join('')}
         </nav>`;
@@ -132,7 +174,9 @@ function staffPaint() {
     const body = staff.screen === 'root'
         ? `<div class="st-page">${tabs[staff.tab]()}</div>${staffNav()}`
         : screens[staff.screen]();
-    staffRoot().innerHTML = `<div class="pa">${body}</div>`;
+    const depths = {root: 0, student: 1, attendance: 1, form: 2};
+    const key = staff.screen === 'root' ? `tab:${staff.tab}` : staff.screen;
+    paintScreen(staffRoot(), `<div class="pa">${body}</div>`, key, depths[staff.screen]);
     window.scrollTo(0, scrollTop);
 }
 
@@ -332,7 +376,7 @@ function staffFormHtml() {
             <div class="pa-schedule-row">
                 <select class="pa-field" aria-label="День" data-st-row="${index}" data-field="weekday">${weekdays(row.weekday)}</select>
                 <input class="pa-field" type="time" aria-label="Время" data-st-row="${index}" data-field="time" value="${escapeHtml(row.time)}">
-                <button type="button" class="pa-remove" data-st="remove-row" data-value="${index}" aria-label="Убрать">×</button>
+                <button type="button" class="pa-remove" data-st="remove-row" data-value="${index}" aria-label="Убрать">${REMOVE_ICON}</button>
             </div>
             <div class="pa-two">
                 <select class="pa-field" aria-label="Группа" data-st-row="${index}" data-field="group_id">${staffOptions(staff.resources.groups, row.group_id, 'name', 'Группа')}</select>
@@ -540,7 +584,7 @@ function staffResourceList(title, items, kind, placeholder) {
             ${items.map(item => `
                 <div class="pa-row st-resource">
                     <span>${escapeHtml(item.name)}</span>
-                    <button type="button" class="pa-remove" data-st="remove-resource" data-kind="${kind}" data-value="${item.id}" aria-label="Убрать ${escapeHtml(item.name)}">×</button>
+                    <button type="button" class="pa-remove" data-st="remove-resource" data-kind="${kind}" data-value="${item.id}" aria-label="Убрать ${escapeHtml(item.name)}">${REMOVE_ICON}</button>
                 </div>`).join('') || '<div class="pa-muted">Пока пусто</div>'}
             <div class="st-add">
                 <input class="pa-field" aria-label="${placeholder}" placeholder="${placeholder}" data-new-resource="${kind}">
