@@ -1,10 +1,13 @@
 import { coachOptions, requireAdmin, requireCoach } from './auth.js';
 import { all, audit, first, insert, run } from './db.js';
 import {
+  balanceOf,
+  balancesFor,
   ensureAllInvoices,
   ensureInvoice,
   markPaid,
   oldestOpenInvoice,
+  refreshFirstInvoice,
   replaceSchedule,
   saveAttendance,
   schedulesFor,
@@ -15,6 +18,7 @@ import {
   LOW_LESSONS,
   formatDate,
   invoiceStatus,
+  isMonthlyTariff,
   isoNow,
   minskNow,
   monthBounds,
@@ -37,9 +41,9 @@ async function visibleStudent(ctx, coach, studentId) {
   return student;
 }
 
-function studentFlag(student, payStatus) {
+function studentFlag(balance, payStatus) {
   if (payStatus === 'overdue') return 'debt';
-  if (student.lessons_remaining <= LOW_LESSONS) return 'low';
+  if (balance.hasInvoice && balance.left <= LOW_LESSONS) return 'low';
   return null;
 }
 
@@ -63,7 +67,7 @@ async function buildDay(db, coach, date) {
   const scheduled = await all(
     db,
     `SELECT sc.time, sc.location_id, sc.group_id, l.name AS location, g.name AS group_name,
-            s.id AS student_id, s.name, s.nickname, s.lessons_remaining, s.coach_id
+            s.id AS student_id, s.name, s.nickname, s.coach_id
      FROM schedules sc
      JOIN students s ON s.id = sc.student_id
      LEFT JOIN locations l ON l.id = sc.location_id
@@ -77,7 +81,7 @@ async function buildDay(db, coach, date) {
   const makeups = await all(
     db,
     `SELECT m.id AS makeup_id, m.scheduled_time AS time, m.location_id, m.group_id, l.name AS location,
-            g.name AS group_name, s.id AS student_id, s.name, s.nickname, s.lessons_remaining
+            g.name AS group_name, s.id AS student_id, s.name, s.nickname
      FROM makeups m
      JOIN students s ON s.id = m.student_id
      LEFT JOIN locations l ON l.id = m.location_id
@@ -95,10 +99,12 @@ async function buildDay(db, coach, date) {
   const responseBy = new Map(responses.map((row) => [`${row.student_id}|${row.time}`, row.response]));
   const overdue = await all(
     db,
-    `SELECT DISTINCT student_id FROM payments WHERE status = 'pending' AND due_date < ?`,
+    `SELECT DISTINCT student_id FROM payments
+     WHERE status = 'pending' AND due_date < ? AND (kind != 'subscription' OR attended = 1)`,
     minskNow().date,
   );
   const debtors = new Set(overdue.map((row) => row.student_id));
+  const balances = await balancesFor(db, [...new Set([...scheduled, ...makeups].map((row) => row.student_id))], date);
 
   const sessions = new Map();
   const add = (row, source, makeupId = null) => {
@@ -120,7 +126,8 @@ async function buildDay(db, coach, date) {
     if (source === 'makeup') tag = 'Отработка';
     else if (response === 'absent') tag = 'Родитель: не придёт';
     else if (debtors.has(row.student_id)) tag = 'Долг по оплате';
-    else if (row.lessons_remaining <= LOW_LESSONS) tag = `Осталось занятий: ${row.lessons_remaining}`;
+    else if (balances.get(row.student_id).hasInvoice && balances.get(row.student_id).left === 0) tag = 'Занятия в абонементе закончились';
+    else if (balances.get(row.student_id).hasInvoice && balances.get(row.student_id).left <= LOW_LESSONS) tag = `Осталось занятий: ${balances.get(row.student_id).left}`;
     sessions.get(key).roster.push({
       student_id: row.student_id,
       name: row.name,
@@ -182,6 +189,17 @@ export async function saveMarks(ctx) {
       coachId: coach.id,
     });
   }
+  const balances = await balancesFor(db, session.roster.map((item) => item.student_id), body.date);
+  for (const item of session.roster) {
+    if (!balances.get(item.student_id).over) continue;
+    const student = await first(db, 'SELECT * FROM students WHERE id = ?', item.student_id);
+    await notifyParentOfStudent(
+      ctx.env,
+      student,
+      `${student.name}: занятий в этом месяце больше, чем в абонементе.\nМожно перейти на больший абонемент с доплатой разницы.`,
+      `over:${student.id}:${body.date.slice(0, 7)}`,
+    );
+  }
   await audit(db, ctx.actor.user.id, 'attendance_saved', 'session', null, { date: body.date, key: body.key });
   return { success: true };
 }
@@ -211,7 +229,7 @@ export async function cancelSession(ctx) {
     await notifyParentOfStudent(
       env,
       student,
-      `Тренировка ${formatDate(body.date)} в ${session.time} отменена.\n${student.name}: занятие не спишется, появится отработка.`,
+      `Тренировка ${formatDate(body.date)} в ${session.time} отменена.\n${student.name}: занятие не спишется, в оплаченном месяце появится отработка.`,
       `cancel:${student.id}:${body.date}:${session.time}`,
     );
   }
@@ -223,6 +241,7 @@ export async function students(ctx) {
   const coach = requireCoach(ctx.actor);
   const { db } = ctx;
   const today = minskNow().date;
+  await ensureAllInvoices(db, today);
   const rows = await all(
     db,
     `SELECT s.*, p.full_name AS parent_name, p.phone AS parent_account_phone
@@ -230,9 +249,10 @@ export async function students(ctx) {
      WHERE s.is_active = 1 AND s.deleted_at IS NULL${scopeSql(coach)} ORDER BY s.name`,
   );
   const schedules = await schedulesFor(db, rows.map((row) => row.id));
+  const balances = await balancesFor(db, rows.map((row) => row.id), today);
   const open = await all(
     db,
-    `SELECT student_id, status, due_date FROM payments WHERE status NOT IN ('paid', 'written_off')`,
+    `SELECT student_id, kind, attended, status, due_date FROM payments WHERE status NOT IN ('paid', 'written_off', 'skipped')`,
   );
   const overdueIds = new Set(open.filter((item) => invoiceStatus(item, today) === 'overdue').map((item) => item.student_id));
   return {
@@ -243,10 +263,10 @@ export async function students(ctx) {
       phone: row.phone,
       parent_name: row.parent_name,
       parent_phone: row.parent_account_phone || row.parent_phone,
-      lessons_remaining: row.lessons_remaining,
-      lessons_count: row.lessons_count,
+      lessons_remaining: balances.get(row.id).left,
+      lessons_count: balances.get(row.id).total,
       group: schedules.get(row.id)[0]?.group_name ?? null,
-      flag: studentFlag(row, overdueIds.has(row.id) ? 'overdue' : null),
+      flag: studentFlag(balances.get(row.id), overdueIds.has(row.id) ? 'overdue' : null),
     })),
   };
 }
@@ -257,6 +277,7 @@ export async function studentDetail(ctx) {
   const student = await visibleStudent(ctx, coach, ctx.params.id);
   const today = minskNow().date;
   const invoice = await ensureInvoice(db, student, today);
+  const balance = await balanceOf(db, student.id, today);
   const schedule = (await schedulesFor(db, [student.id])).get(student.id);
   const parent = student.parent_id ? await first(db, 'SELECT full_name, phone FROM parents WHERE id = ?', student.parent_id) : null;
   const makeups = await first(
@@ -278,8 +299,10 @@ export async function studentDetail(ctx) {
       birthday: student.birthday,
       notes: student.notes,
       coach_id: student.coach_id,
-      lessons_count: student.lessons_count,
-      lessons_remaining: student.lessons_remaining,
+      lessons_count: balance.total,
+      lessons_remaining: balance.left,
+      lessons_over: balance.over,
+      adjustment: invoice?.adjustment ?? 0,
       training_start_date: student.training_start_date,
       parent_name: parent?.full_name ?? null,
       parent_phone: parent?.phone ?? student.parent_phone,
@@ -323,11 +346,8 @@ function parseStudentFields(body) {
   if (birthday && !validDate(birthday)) throw new ApiError(400, 'invalid_date', 'Проверьте дату рождения');
   const startDate = fields.training_start_date || null;
   if (startDate && !validDate(startDate)) throw new ApiError(400, 'invalid_date', 'Проверьте дату начала');
-  const lessonsCount = Number(fields.lessons_count ?? 0);
-  const lessonsRemaining = Number(fields.lessons_remaining ?? 0);
-  if (!Number.isInteger(lessonsCount) || lessonsCount < 0 || !Number.isInteger(lessonsRemaining) || lessonsRemaining < 0) {
-    throw new ApiError(400, 'invalid_lessons', 'Проверьте количество занятий');
-  }
+  const tariffCode = fields.tariff_code ? String(fields.tariff_code) : null;
+  if (tariffCode && !isMonthlyTariff(tariffCode)) throw new ApiError(400, 'invalid_tariff', 'Такого абонемента нет');
   return {
     name,
     nickname: text(fields.nickname, 50) || null,
@@ -336,8 +356,7 @@ function parseStudentFields(body) {
     birthday,
     notes: text(fields.notes, 2000) || null,
     training_start_date: startDate,
-    lessons_count: lessonsCount,
-    lessons_remaining: lessonsRemaining,
+    tariff_code: tariffCode,
     coach_id: optionalInt(fields.coach_id),
   };
 }
@@ -349,6 +368,16 @@ async function resolveCoachId(ctx, coach, requested) {
   return target.id;
 }
 
+// Staff choose the month's subscription only while it is unpaid and not a partial first month.
+async function applyTariff(db, student, code) {
+  if (!code) return;
+  const today = minskNow().date;
+  const invoice = await ensureInvoice(db, student, today);
+  if (!invoice || invoice.is_partial || !['pending', 'rejected'].includes(invoice.status)) return;
+  const tariff = tariffOf(code);
+  await run(db, 'UPDATE payments SET tariff_code = ?, amount = ?, lessons_count = ? WHERE id = ?', code, tariff.price, tariff.lessons, invoice.id);
+}
+
 export async function createStudent(ctx) {
   const coach = requireCoach(ctx.actor);
   const fields = parseStudentFields(ctx.body);
@@ -356,8 +385,8 @@ export async function createStudent(ctx) {
   const coachId = await resolveCoachId(ctx, coach, fields.coach_id);
   const id = await insert(
     ctx.db,
-    `INSERT INTO students (coach_id, name, nickname, phone, parent_phone, birthday, notes, training_start_date, lessons_count, lessons_remaining, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO students (coach_id, name, nickname, phone, parent_phone, birthday, notes, training_start_date, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     coachId,
     fields.name,
     fields.nickname,
@@ -366,11 +395,10 @@ export async function createStudent(ctx) {
     fields.birthday,
     fields.notes,
     fields.training_start_date,
-    fields.lessons_count,
-    fields.lessons_remaining,
     isoNow(),
   );
   await replaceSchedule(ctx.db, id, schedule);
+  await applyTariff(ctx.db, await first(ctx.db, 'SELECT * FROM students WHERE id = ?', id), fields.tariff_code);
   await audit(ctx.db, ctx.actor.user.id, 'student_created', 'student', id);
   return { success: true, id };
 }
@@ -381,10 +409,12 @@ export async function updateStudent(ctx) {
   const fields = parseStudentFields(ctx.body);
   const schedule = parseStaffSchedule(ctx.body.schedule);
   const coachId = coach.can_admin && fields.coach_id ? await resolveCoachId(ctx, coach, fields.coach_id) : student.coach_id;
+  const scheduleKey = (rows) => rows.map((row) => `${row.weekday}|${row.time}`).sort().join(',');
+  const oldSchedule = (await schedulesFor(ctx.db, [student.id])).get(student.id);
   await run(
     ctx.db,
     `UPDATE students SET coach_id = ?, name = ?, nickname = ?, phone = ?, parent_phone = ?, birthday = ?, notes = ?,
-       training_start_date = ?, lessons_count = ?, lessons_remaining = ? WHERE id = ?`,
+       training_start_date = ? WHERE id = ?`,
     coachId,
     fields.name,
     fields.nickname,
@@ -393,14 +423,32 @@ export async function updateStudent(ctx) {
     fields.birthday,
     fields.notes,
     fields.training_start_date,
-    fields.lessons_count,
-    fields.lessons_remaining,
     student.id,
   );
   await replaceSchedule(ctx.db, student.id, schedule);
-  await audit(ctx.db, ctx.actor.user.id, 'student_updated', 'student', student.id, {
-    lessons_remaining: [student.lessons_remaining, fields.lessons_remaining],
-  });
+  const updated = await first(ctx.db, 'SELECT * FROM students WHERE id = ?', student.id);
+  if (student.training_start_date !== updated.training_start_date || scheduleKey(oldSchedule) !== scheduleKey(schedule)) {
+    await refreshFirstInvoice(ctx.db, updated, minskNow().date);
+  }
+  await applyTariff(ctx.db, updated, fields.tariff_code);
+  await audit(ctx.db, ctx.actor.user.id, 'student_updated', 'student', student.id);
+  return { success: true };
+}
+
+// A manual correction of the month's balance, for mistakes the attendance cannot fix.
+export async function adjustLessons(ctx) {
+  requireAdmin(ctx.actor);
+  const { db, body } = ctx;
+  const student = await first(db, 'SELECT * FROM students WHERE id = ? AND deleted_at IS NULL', positiveInt(ctx.params.id));
+  if (!student) throw new ApiError(404, 'student_not_found', 'Ученик не найден');
+  const delta = Number(body.delta);
+  const reason = text(body.reason, 300);
+  if (!Number.isInteger(delta) || !delta || Math.abs(delta) > 31) throw new ApiError(400, 'invalid_delta', 'Укажите, на сколько занятий изменить остаток');
+  if (!reason) throw new ApiError(400, 'reason_required', 'Укажите причину');
+  const invoice = await ensureInvoice(db, student, minskNow().date);
+  if (!invoice) throw new ApiError(409, 'no_invoice', 'В этом месяце занятий нет');
+  await run(db, 'UPDATE payments SET adjustment = adjustment + ? WHERE id = ?', delta, invoice.id);
+  await audit(db, ctx.actor.user.id, 'lessons_adjusted', 'student', student.id, { delta, reason, month: invoice.period_start });
   return { success: true };
 }
 
@@ -453,7 +501,7 @@ export async function requests(ctx) {
   const payments = coach.can_admin
     ? await all(
         db,
-        `SELECT p.id, p.amount, p.method, p.period_start, p.receipt_file_id, s.name AS student_name
+        `SELECT p.id, p.kind, p.tariff_code, p.amount, p.method, p.period_start, p.receipt_file_id, s.name AS student_name
          FROM payments p JOIN students s ON s.id = p.student_id
          WHERE p.status = 'reported' ORDER BY p.period_start, p.id`,
       )
@@ -486,6 +534,7 @@ export async function requests(ctx) {
     })),
     payments: payments.map((item) => ({
       id: item.id,
+      kind: item.kind,
       amount: item.amount,
       method: item.method,
       period_start: item.period_start,
@@ -554,8 +603,8 @@ export async function reviewRegistration(ctx) {
   } else {
     studentId = await insert(
       db,
-      `INSERT INTO students (coach_id, parent_id, name, nickname, phone, parent_phone, birthday, training_start_date, lessons_count, lessons_remaining, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 8, 0, ?)`,
+      `INSERT INTO students (coach_id, parent_id, name, nickname, phone, parent_phone, birthday, training_start_date, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       coachId,
       request.parent_id,
       request.child_name,
@@ -645,6 +694,7 @@ export async function reviewSchedule(ctx) {
   const rows = parseScheduleRows(JSON.parse(request.proposed_schedule)).map((row) => ({ ...row, ...keep }));
   await replaceSchedule(db, request.student_id, rows);
   await run(db, `UPDATE schedule_requests SET status = 'approved', reviewed_by_coach_id = ? WHERE id = ?`, coach.id, request.id);
+  await refreshFirstInvoice(db, student, minskNow().date);
   await notifyParentOfStudent(env, student, `Новое расписание для ${request.student_name} подтверждено.`);
   await audit(db, ctx.actor.user.id, 'schedule_approved', 'student', request.student_id);
   return { success: true, status: 'approved' };
@@ -659,12 +709,10 @@ export async function reviewPayment(ctx) {
   const student = await first(db, 'SELECT * FROM students WHERE id = ?', payment.student_id);
   if (body.decision === 'reject') {
     const reason = rejectionReason(body);
-    const tariff = tariffOf(payment.tariff_code);
     await run(
       db,
-      `UPDATE payments SET status = 'rejected', rejection_reason = ?, reported_at = NULL, receipt_file_id = NULL, amount = ? WHERE id = ?`,
+      `UPDATE payments SET status = 'rejected', rejection_reason = ?, reported_at = NULL, receipt_file_id = NULL WHERE id = ?`,
       reason,
-      tariff?.price ?? payment.amount,
       payment.id,
     );
     await notifyParentOfStudent(env, student, `Оплата для ${student.name} отклонена.\nПричина: ${reason}`);
@@ -674,9 +722,11 @@ export async function reviewPayment(ctx) {
   if (payment.method === 'online' && !payment.receipt_file_id) {
     throw new ApiError(409, 'receipt_required', 'Для онлайн-оплаты нужен чек');
   }
-  const oldest = await oldestOpenInvoice(db, payment.student_id);
-  if (oldest && oldest.id !== payment.id) {
-    throw new ApiError(409, 'oldest_debt_first', 'Сначала подтвердите самый ранний неоплаченный месяц');
+  if (payment.kind === 'subscription') {
+    const oldest = await oldestOpenInvoice(db, payment.student_id);
+    if (oldest && oldest.id !== payment.id) {
+      throw new ApiError(409, 'oldest_debt_first', 'Сначала подтвердите самый ранний неоплаченный месяц');
+    }
   }
   let receivedBy = null;
   if (payment.method === 'cash') {
@@ -723,16 +773,18 @@ export async function money(ctx) {
   const open = await all(
     db,
     `SELECT p.*, s.name AS student_name, s.parent_id FROM payments p JOIN students s ON s.id = p.student_id
-     WHERE p.status NOT IN ('paid', 'written_off') AND s.is_active = 1 AND s.deleted_at IS NULL
+     WHERE p.status NOT IN ('paid', 'written_off', 'skipped') AND s.is_active = 1 AND s.deleted_at IS NULL
      ORDER BY p.period_start, s.name`,
   );
   const debtors = open
     .filter((item) => item.status !== 'reported')
     .map((item) => ({
       id: item.id,
+      kind: item.kind,
       student_name: item.student_name,
       amount: item.amount,
       status: invoiceStatus(item, today),
+      not_training: item.kind === 'subscription' && !item.attended && item.due_date < today,
       period_start: item.period_start,
       due_date: item.due_date,
       can_remind: Boolean(item.parent_id),
@@ -752,9 +804,11 @@ export async function takeCash(ctx) {
   const payment = await first(db, 'SELECT * FROM payments WHERE id = ?', positiveInt(ctx.params.id));
   if (!payment) throw new ApiError(404, 'payment_not_found', 'Счёт не найден');
   if (['paid', 'written_off'].includes(payment.status)) throw new ApiError(409, 'already_paid', 'Этот месяц уже оплачен');
-  const oldest = await oldestOpenInvoice(db, payment.student_id);
-  if (oldest && oldest.id !== payment.id) {
-    throw new ApiError(409, 'oldest_debt_first', 'Сначала закройте самый ранний неоплаченный месяц');
+  if (payment.kind === 'subscription') {
+    const oldest = await oldestOpenInvoice(db, payment.student_id);
+    if (oldest && oldest.id !== payment.id) {
+      throw new ApiError(409, 'oldest_debt_first', 'Сначала закройте самый ранний неоплаченный месяц');
+    }
   }
   const receivedBy = optionalInt(body.received_by_coach_id) ?? coach.id;
   await run(db, `UPDATE payments SET method = 'cash' WHERE id = ?`, payment.id);
@@ -768,7 +822,7 @@ export async function takeCash(ctx) {
 export async function remindPayment(ctx) {
   requireAdmin(ctx.actor);
   const { db, env } = ctx;
-  const payment = await first(db, `SELECT * FROM payments WHERE id = ? AND status NOT IN ('paid', 'written_off')`, positiveInt(ctx.params.id));
+  const payment = await first(db, `SELECT * FROM payments WHERE id = ? AND status NOT IN ('paid', 'written_off', 'skipped')`, positiveInt(ctx.params.id));
   if (!payment) throw new ApiError(404, 'payment_not_found', 'Счёт не найден');
   const student = await first(db, 'SELECT * FROM students WHERE id = ?', payment.student_id);
   await notifyParentOfStudent(

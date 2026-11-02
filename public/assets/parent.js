@@ -12,6 +12,7 @@ const parentUi = {
     tariff: null,
     method: 'online',
     slot: null,
+    extraId: null,
     scheduleRows: [],
     busy: false,
 };
@@ -72,8 +73,12 @@ function parentStudent() {
 }
 
 function parentPayableInvoice(student) {
-    const invoices = student.invoices || [student.invoice];
-    return invoices.find(item => item.id === student.oldest_open_invoice_id) || null;
+    const wanted = parentUi.extraId || student.oldest_open_invoice_id;
+    return (student.invoices || []).find(item => item.id === wanted) || null;
+}
+
+function parentIsExtra() {
+    return parentUi.extraId !== null;
 }
 
 async function loadParentContext() {
@@ -178,8 +183,27 @@ function parentTrainingCard(student) {
         </section>`;
 }
 
+function parentExtrasBlock(student) {
+    const open = student.open_extras.map(item => `
+        <button type="button" class="pa-btn" data-pa="open-extra" data-id="${item.id}" ${item.stored_status === 'reported' ? 'disabled' : ''}>${escapeHtml(item.label)}: ${item.amount} Br${item.stored_status === 'reported' ? ', на проверке' : ''}</button>`).join('');
+    const offer = student.upgrade_offer;
+    const hasOpenUpgrade = student.open_extras.some(item => item.kind === 'upgrade');
+    return `
+        ${student.lessons_over ? `<div class="pa-warn">Занятий в этом месяце больше, чем в абонементе: на ${student.lessons_over}</div>` : ''}
+        ${offer && !hasOpenUpgrade ? `
+            <div class="pa-muted pa-small">До конца месяца тренировок: ${student.trainings_left}, занятий осталось: ${student.lessons_remaining}.</div>
+            <button type="button" class="pa-btn is-primary" data-pa="buy-upgrade">Перейти на ${offer.lessons} занятий, доплата ${offer.amount} Br</button>` : ''}
+        ${open}
+        ${student.open_extras.some(item => item.kind === 'single') ? '' : '<button type="button" class="pa-link" data-pa="buy-single">Купить разовое занятие за 40 Br</button>'}`;
+}
+
 function parentPaymentBlock(student) {
-    const invoice = parentPayableInvoice(student);
+    if (!student.invoice) {
+        return student.starts_on
+            ? `<div class="pa-muted">Занятия начнутся ${escapeHtml(parentShortDate(student.starts_on))}, счёт придёт в этом месяце.</div>`
+            : '<div class="pa-muted">В этом месяце тренировок нет.</div>';
+    }
+    const invoice = (student.invoices || []).find(item => item.id === student.oldest_open_invoice_id) || null;
     if (!invoice) {
         return `<div class="pa-ok">${escapeHtml(parentMonth(student.invoice))} оплачен</div>`;
     }
@@ -195,9 +219,13 @@ function parentPaymentBlock(student) {
     const rejected = invoice.stored_status === 'rejected'
         ? `<div class="pa-danger">Оплата отклонена${invoice.rejection_reason ? `: ${escapeHtml(invoice.rejection_reason)}` : ''}</div>`
         : '';
-    const summary = invoice.status === 'overdue'
-        ? `<div class="pa-danger">Долг за ${month.toLowerCase()}: ${invoice.amount} Br</div>`
-        : `<div><span class="pa-strong">${month}: ${invoice.amount} Br.</span> Оплатить до ${escapeHtml(parentShortDate(invoice.due_date))}.</div>`;
+    const isLate = parentDate(invoice.due_date) < parentDate(parentToday());
+    let summary = `<div><span class="pa-strong">${month}: ${invoice.amount} Br.</span> Оплатить до ${escapeHtml(parentShortDate(invoice.due_date))}.</div>`;
+    if (invoice.status === 'overdue') {
+        summary = `<div class="pa-danger">Долг за ${month.toLowerCase()}: ${invoice.amount} Br</div>`;
+    } else if (isLate) {
+        summary = `<div><span class="pa-strong">${month}: ${invoice.amount} Br.</span> Если ребёнка в этом месяце не будет, можно не оплачивать.</div>`;
+    }
     return `
         ${rejected}
         ${summary}
@@ -216,12 +244,18 @@ function parentBalanceCard(student) {
             </div>
             <div class="pa-progress"><span style="width: ${percent}%"></span></div>
             ${parentPaymentBlock(student)}
+            ${parentExtrasBlock(student)}
             ${parentHistory(student)}
         </section>`;
 }
 
+function parentToday() {
+    const now = new Date();
+    return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+}
+
 function parentHistory(student) {
-    const paid = (student.invoices || []).filter(item => item.stored_status === 'paid');
+    const paid = (student.invoices || []).filter(item => item.stored_status === 'paid' && item.kind === 'subscription');
     if (!paid.length) return '';
     return `
         <details>
@@ -333,18 +367,19 @@ function renderParentPay(student) {
     const invoice = parentPayableInvoice(student);
     if (!invoice) return renderParentHome(student);
     const firstName = student.name.split(' ')[0];
-    const canChooseTariff = invoice.id === student.invoice.id && student.tariff_change_allowed;
+    const isExtra = parentIsExtra();
+    const canChooseTariff = !isExtra && invoice.id === student.invoice?.id && student.tariff_change_allowed;
     const tariffCode = parentUi.tariff || invoice.tariff_code;
     const amount = canChooseTariff ? parentData.tariffs[tariffCode].price : invoice.amount;
     const tariffBlock = canChooseTariff
         ? `
-            ${Object.entries(parentData.tariffs).map(([code, tariff]) => `
+            ${Object.entries(parentData.tariffs).filter(([code, tariff]) => code !== 'single' && (!student.tariff_upgrade_only || tariff.lessons >= invoice.lessons_count)).map(([code, tariff]) => `
                 <button type="button" class="pa-choice" data-pa="pick-tariff" data-value="${escapeHtml(code)}" aria-pressed="${code === tariffCode}">
                     <span>${escapeHtml(tariff.label)}</span>
                     <span class="pa-strong">${tariff.price} Br</span>
                 </button>`).join('')}
-            <div class="pa-label">Изменить абонемент можно до 5 числа</div>`
-        : `<div class="pa-note">${escapeHtml(invoice.tariff?.label || 'Абонемент')}: ${amount} Br</div>`;
+            <div class="pa-label">${student.tariff_upgrade_only ? 'После 5 числа абонемент можно только увеличить' : 'Изменить абонемент можно до 5 числа'}</div>`
+        : `<div class="pa-note">${escapeHtml(invoice.label)}: ${amount} Br</div>`;
     const online = parentUi.method === 'online';
     const details = parentData.payment_details
         ? `Переведите ${amount} Br по реквизитам:\n${parentData.payment_details}\n\nЗатем прикрепите чек.`
@@ -355,7 +390,7 @@ function renderParentPay(student) {
             <label for="pa-receipt" class="pa-btn ${parentUi.busy ? 'is-busy' : 'is-primary'}">${parentUi.busy ? 'Отправляем…' : 'Прикрепить чек и отправить'}</label>`
         : `<button type="button" class="pa-btn is-primary" data-pa="submit-cash" ${parentUi.busy ? 'disabled' : ''}>${parentUi.busy ? 'Отправляем…' : 'Я передам наличные'}</button>`;
     return `
-        ${parentBar(`Оплата за ${parentMonth(invoice).toLowerCase()}, ${firstName}`)}
+        ${parentBar(isExtra ? `${invoice.kind === 'single' ? 'Разовое занятие' : 'Доплата'}, ${firstName}` : `Оплата за ${parentMonth(invoice).toLowerCase()}, ${firstName}`)}
         <div class="pa-body">
             <div class="pa-group">
                 <h2>Абонемент</h2>
@@ -453,7 +488,7 @@ function parentScheduleRowsFrom(student) {
 }
 
 async function parentSaveTariff(student, invoice) {
-    const canChoose = invoice.id === student.invoice.id && student.tariff_change_allowed;
+    const canChoose = !parentIsExtra() && invoice.id === student.invoice?.id && student.tariff_change_allowed;
     if (canChoose && parentUi.tariff && parentUi.tariff !== invoice.tariff_code) {
         await apiPost('/api/parent/tariff', {student_id: student.id, tariff_code: parentUi.tariff});
     }
@@ -477,15 +512,24 @@ async function parentSubmitReceipt(file) {
             await apiPost(`/api/parent/payments/${invoice.id}/report`, {payment_method: 'online'});
         }
         await parentUploadReceipt(invoice.id, file);
-        Object.assign(parentUi, {view: 'payDone', tariff: null});
+        Object.assign(parentUi, {view: 'payDone', tariff: null, extraId: null});
     });
 }
 
 const PARENT_ACTIONS = {
     'add-child': () => renderRegistration({existingParent: parentData.parent}),
     'pick-student': target => parentGo('home', {studentId: Number(target.dataset.id), tariff: null}),
-    'go-home': () => parentGo('home', {tariff: null, slot: null}),
-    'go-pay': () => parentGo('pay', {tariff: null}),
+    'go-home': () => parentGo('home', {tariff: null, slot: null, extraId: null}),
+    'go-pay': () => parentGo('pay', {tariff: null, extraId: null}),
+    'open-extra': target => parentGo('pay', {tariff: null, extraId: Number(target.dataset.id)}),
+    'buy-upgrade': () => parentRun(async () => {
+        const {id} = await apiPost('/api/parent/upgrade', {student_id: parentStudent().id});
+        Object.assign(parentUi, {view: 'pay', tariff: null, extraId: id});
+    }),
+    'buy-single': () => parentRun(async () => {
+        const {id} = await apiPost('/api/parent/single', {student_id: parentStudent().id});
+        Object.assign(parentUi, {view: 'pay', tariff: null, extraId: id});
+    }),
     'go-makeup': () => parentGo('makeup', {slot: null}),
     'go-schedule': () => parentGo('schedule', {scheduleRows: parentScheduleRowsFrom(parentStudent())}),
     'pick-tariff': target => parentGo('pay', {tariff: target.dataset.value}),
@@ -525,7 +569,7 @@ const PARENT_ACTIONS = {
         return parentRun(async () => {
             await parentSaveTariff(student, invoice);
             await apiPost(`/api/parent/payments/${invoice.id}/report`, {payment_method: 'cash'});
-            Object.assign(parentUi, {view: 'payDone', tariff: null});
+            Object.assign(parentUi, {view: 'payDone', tariff: null, extraId: null});
         });
     },
     'submit-makeup': () => {

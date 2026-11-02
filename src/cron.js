@@ -1,7 +1,7 @@
 // Scheduled jobs. Each daily job runs once, on the first tick after its hour,
 // so a missed tick delays a job instead of losing it.
 import { all, first, run } from './db.js';
-import { ensureAllInvoices, expireMakeups } from './domain.js';
+import { closeUnusedMonths, ensureAllInvoices, expireMakeups } from './domain.js';
 import {
   addDays,
   daysBetween,
@@ -31,8 +31,10 @@ async function paymentReminders(env, today) {
      FROM payments p
      JOIN students s ON s.id = p.student_id
      JOIN parents par ON par.id = s.parent_id
-     WHERE p.status NOT IN ('paid', 'written_off', 'reported') AND s.is_active = 1
+     WHERE p.status NOT IN ('paid', 'written_off', 'reported', 'skipped') AND s.is_active = 1
+       AND (p.kind != 'subscription' OR p.attended = 1 OR p.due_date >= ?)
      ORDER BY s.id, p.period_start`,
+    today,
   );
   const seen = new Set();
   for (const payment of rows) {
@@ -79,7 +81,8 @@ async function adminSummary(env, today) {
   const overdue = await first(
     env.DB,
     `SELECT COUNT(*) AS count, COALESCE(SUM(p.amount), 0) AS total FROM payments p JOIN students s ON s.id = p.student_id
-     WHERE p.status NOT IN ('paid', 'written_off', 'reported') AND p.due_date < ? AND s.is_active = 1`,
+     WHERE p.status NOT IN ('paid', 'written_off', 'reported', 'skipped') AND p.due_date < ? AND s.is_active = 1
+       AND (p.kind != 'subscription' OR p.attended = 1)`,
     today,
   );
   if (!registrations && !schedules && !makeups && !payments && !overdue.count) return;
@@ -205,6 +208,7 @@ export async function runTick(env, date = new Date()) {
   if (now.hour >= DAILY_HOUR) {
     await once(db, `daily:${now.date}`, async () => {
       await expireMakeups(db, now.date);
+      await closeUnusedMonths(db, now.date);
       await ensureAllInvoices(db, now.date);
       await paymentReminders(env, now.date);
       await makeupExpiryReminders(env, now.date);

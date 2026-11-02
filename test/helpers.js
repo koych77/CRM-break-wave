@@ -159,11 +159,11 @@ export async function addParent(app, telegramId, name = 'Родитель') {
   ).id;
 }
 
-export async function addStudent(app, { coachId, parentId = null, name = 'Ученик', left = 8, total = 8, schedule = [] }) {
+export async function addStudent(app, { coachId, parentId = null, name = 'Ученик', startDate = null, schedule = [] }) {
   const { id } = await app.db.prepare(
-    `INSERT INTO students (coach_id, parent_id, name, lessons_count, lessons_remaining, created_at)
-     VALUES (?, ?, ?, ?, ?, '2026-01-01') RETURNING id`,
-  ).bind(coachId, parentId, name, total, left).first();
+    `INSERT INTO students (coach_id, parent_id, name, training_start_date, created_at)
+     VALUES (?, ?, ?, ?, '2026-01-01') RETURNING id`,
+  ).bind(coachId, parentId, name, startDate).first();
   for (const row of schedule) {
     await app.db.prepare('INSERT INTO schedules (student_id, weekday, time, location_id, group_id) VALUES (?, ?, ?, ?, ?)')
       .bind(id, row.weekday, row.time, row.location_id ?? null, row.group_id ?? null).run();

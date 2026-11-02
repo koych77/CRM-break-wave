@@ -1,15 +1,19 @@
 import { coachOptions, requireParent } from './auth.js';
 import { all, audit, first, insert, run } from './db.js';
-import { ensureInvoice, oldestOpenInvoice, schedulesFor, tariffOf } from './domain.js';
+import { balancesFor, ensureInvoice, oldestOpenInvoice, schedulesFor, tariffOf } from './domain.js';
 import { ApiError, optionalInt, positiveInt, text } from './http.js';
 import {
-  TARIFFS,
   addDays,
   canSelectTariff,
+  countTrainings,
   daysBetween,
   invoiceStatus,
+  isMonthlyTariff,
   isoNow,
   minskNow,
+  monthBounds,
+  nextTariff,
+  TARIFFS,
   validDate,
   validTime,
   weekdayOf,
@@ -40,9 +44,20 @@ export function parseScheduleRows(rows) {
   });
 }
 
+function invoiceLabel(payment) {
+  if (payment.kind === 'single') return 'Разовое занятие';
+  if (payment.kind === 'upgrade') return `Доплата до абонемента на ${tariffOf(payment.tariff_code).lessons} занятий`;
+  if (payment.is_partial) return `Занятий до конца месяца: ${payment.lessons_count}`;
+  return tariffOf(payment.tariff_code)?.label ?? 'Абонемент';
+}
+
 function invoiceJson(payment, today) {
   return {
     id: payment.id,
+    kind: payment.kind,
+    is_partial: Boolean(payment.is_partial),
+    label: invoiceLabel(payment),
+    lessons_count: payment.lessons_count,
     tariff_code: payment.tariff_code,
     tariff: tariffOf(payment.tariff_code),
     amount: payment.amount,
@@ -54,6 +69,20 @@ function invoiceJson(payment, today) {
     period_end: payment.period_end,
     due_date: payment.due_date,
     paid_at: payment.paid_at,
+  };
+}
+
+// What a parent may do next when the month has more trainings than lessons bought.
+function upgradeOffer(invoice, paidUpgrades) {
+  if (!invoice || invoice.is_partial || invoice.status !== 'paid') return null;
+  const current = paidUpgrades.reduce((best, item) => (tariffOf(item.tariff_code).lessons > tariffOf(best).lessons ? item.tariff_code : best), invoice.tariff_code);
+  const code = nextTariff(current);
+  if (!code) return null;
+  return {
+    tariff_code: code,
+    lessons: tariffOf(code).lessons,
+    extra_lessons: tariffOf(code).lessons - tariffOf(current).lessons,
+    amount: tariffOf(code).price - tariffOf(current).price,
   };
 }
 
@@ -140,6 +169,9 @@ export async function context(ctx) {
     parent.id,
   );
   const schedules = await schedulesFor(db, students.map((student) => student.id));
+  for (const student of students) await ensureInvoice(db, student, today);
+  const balances = await balancesFor(db, students.map((student) => student.id), today);
+  const { end: monthEnd } = monthBounds(today);
   const response = [];
   for (const student of students) {
     const invoice = await ensureInvoice(db, student, today);
@@ -169,18 +201,33 @@ export async function context(ctx) {
       training.response = saved?.response ?? null;
     }
     const available = makeups.filter((item) => item.status === 'available');
+    const balance = balances.get(student.id);
+    const monthRows = invoices.filter((item) => item.period_start === monthBounds(today).start);
+    const paidUpgrades = monthRows.filter((item) => item.kind === 'upgrade' && item.status === 'paid');
+    const trainingsLeft = countTrainings(schedule, addDays(today, 1), monthEnd)
+      + schedule.filter((row) => row.weekday === weekdayOf(today) && row.time > now.time).length;
+    const offer = upgradeOffer(invoice, paidUpgrades);
+    const canUpgrade = Boolean(invoice) && !invoice.is_partial && ['pending', 'rejected'].includes(invoice.status);
     response.push({
       id: student.id,
       name: student.name,
-      lessons_remaining: student.lessons_remaining,
-      lessons_count: student.lessons_count,
+      lessons_remaining: balance.left,
+      lessons_count: balance.total,
+      lessons_over: balance.over,
+      trainings_left: trainingsLeft,
+      starts_on: invoice ? null : student.training_start_date,
+      upgrade_offer: balance.left < trainingsLeft || balance.over ? offer : null,
+      open_extras: invoices
+        .filter((item) => item.kind !== 'subscription' && !['paid', 'written_off', 'skipped'].includes(item.status))
+        .map((item) => invoiceJson(item, today)),
       training_reminders_enabled: Boolean(student.reminders_enabled),
       next_training: training,
       makeup_slots: available.length ? await makeupSlots(db, student, schedule, today, available[0].expires_at) : [],
-      invoice: invoiceJson(invoice, today),
+      invoice: invoice ? invoiceJson(invoice, today) : null,
       invoices: invoices.map((item) => invoiceJson(item, today)),
       oldest_open_invoice_id: oldest?.id ?? null,
-      tariff_change_allowed: canSelectTariff(today) && ['pending', 'rejected'].includes(invoice.status),
+      tariff_change_allowed: canUpgrade,
+      tariff_upgrade_only: !canSelectTariff(today),
       schedules: schedule.map((row) => ({
         days: String(row.weekday),
         times: { [row.weekday]: row.time },
@@ -335,15 +382,17 @@ export async function chooseTariff(ctx) {
   const parent = requireParent(ctx.actor);
   const { db, body } = ctx;
   const student = await ownStudent(ctx, parent, body.student_id);
+  if (!isMonthlyTariff(body.tariff_code)) throw new ApiError(400, 'invalid_tariff', 'Такого абонемента нет');
   const tariff = tariffOf(body.tariff_code);
-  if (!tariff) throw new ApiError(400, 'invalid_tariff', 'Такого абонемента нет');
   const today = minskNow().date;
-  if (!canSelectTariff(today)) {
-    throw new ApiError(409, 'tariff_deadline_passed', 'Абонемент можно изменить до 5 числа');
-  }
   const invoice = await ensureInvoice(db, student, today);
+  if (!invoice) throw new ApiError(409, 'no_invoice', 'В этом месяце занятий нет');
+  if (invoice.is_partial) throw new ApiError(409, 'tariff_partial', 'В первый месяц оплачиваются занятия до конца месяца');
   if (!['pending', 'rejected'].includes(invoice.status)) {
     throw new ApiError(409, 'payment_in_review', 'Оплата уже на проверке');
+  }
+  if (!canSelectTariff(today) && tariff.lessons < invoice.lessons_count) {
+    throw new ApiError(409, 'tariff_deadline_passed', 'Уменьшить абонемент можно до 5 числа');
   }
   await run(
     db,
@@ -356,6 +405,62 @@ export async function chooseTariff(ctx) {
   return { success: true };
 }
 
+async function openExtra(ctx, student, kind, tariffCode, amount, lessons) {
+  const { db } = ctx;
+  const today = minskNow().date;
+  const { start, end } = monthBounds(today);
+  const existing = await first(
+    db,
+    `SELECT id, status FROM payments WHERE student_id = ? AND period_start = ? AND kind = ? AND status NOT IN ('paid', 'written_off', 'skipped')`,
+    student.id,
+    start,
+    kind,
+  );
+  if (existing) {
+    await run(db, `UPDATE payments SET amount = ?, lessons_count = ?, tariff_code = ? WHERE id = ? AND status IN ('pending', 'rejected')`, amount, lessons, tariffCode, existing.id);
+    return { id: existing.id };
+  }
+  const id = await insert(
+    db,
+    `INSERT INTO payments (student_id, coach_id, kind, amount, lessons_count, tariff_code, status, period_start, period_end, due_date, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)`,
+    student.id,
+    student.coach_id,
+    kind,
+    amount,
+    lessons,
+    tariffCode,
+    start,
+    end,
+    end,
+    isoNow(),
+  );
+  return { id };
+}
+
+export async function requestUpgrade(ctx) {
+  const parent = requireParent(ctx.actor);
+  const { db, body } = ctx;
+  const student = await ownStudent(ctx, parent, body.student_id);
+  const today = minskNow().date;
+  const invoice = await ensureInvoice(db, student, today);
+  const paidUpgrades = await all(
+    db,
+    `SELECT tariff_code FROM payments WHERE student_id = ? AND period_start = ? AND kind = 'upgrade' AND status = 'paid'`,
+    student.id,
+    monthBounds(today).start,
+  );
+  const offer = upgradeOffer(invoice, paidUpgrades);
+  if (!offer) throw new ApiError(409, 'upgrade_unavailable', 'Перейти на больший абонемент сейчас нельзя');
+  return openExtra(ctx, student, 'upgrade', offer.tariff_code, offer.amount, offer.extra_lessons);
+}
+
+export async function requestSingle(ctx) {
+  const parent = requireParent(ctx.actor);
+  const student = await ownStudent(ctx, parent, ctx.body.student_id);
+  return openExtra(ctx, student, 'single', 'single', TARIFFS.single.price, TARIFFS.single.lessons);
+}
+
 export async function reportPayment(ctx) {
   const parent = requireParent(ctx.actor);
   const { db, body, env } = ctx;
@@ -364,9 +469,12 @@ export async function reportPayment(ctx) {
   const payment = await ownPayment(ctx, parent, ctx.params.id);
   if (payment.status === 'paid') throw new ApiError(409, 'already_paid', 'Этот месяц уже оплачен');
   if (payment.status === 'reported') throw new ApiError(409, 'payment_in_review', 'Оплата уже на проверке');
-  const oldest = await oldestOpenInvoice(db, payment.student_id);
-  if (oldest && oldest.id !== payment.id) {
-    throw new ApiError(409, 'oldest_debt_first', 'Сначала оплатите самый ранний неоплаченный месяц');
+  if (payment.status === 'skipped') throw new ApiError(409, 'month_closed', 'Этот месяц закрыт: занятий не было');
+  if (payment.kind === 'subscription') {
+    const oldest = await oldestOpenInvoice(db, payment.student_id);
+    if (oldest && oldest.id !== payment.id) {
+      throw new ApiError(409, 'oldest_debt_first', 'Сначала оплатите самый ранний неоплаченный месяц');
+    }
   }
   if (method === 'online') {
     const waiting = await first(

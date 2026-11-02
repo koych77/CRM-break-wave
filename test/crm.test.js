@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import { runTick } from '../src/cron.js';
+import { balanceOf, closeUnusedMonths, ensureInvoice, markPaid, refreshFirstInvoice, saveAttendance } from '../src/domain.js';
 import {
   TARIFFS,
   addDays,
@@ -10,6 +11,8 @@ import {
   makeupExpiry,
   minskNow,
   monthBounds,
+  partialPrice,
+  tariffForSchedule,
   weekdayOf,
 } from '../src/rules.js';
 import { SUPER_ADMIN, addCoach, addParent, addStudent, createApp, signInitData } from './helpers.js';
@@ -92,7 +95,7 @@ test('family registration creates a student or links an existing one', async () 
   assert.equal(requests.data.registrations.length, 2);
   const [first, second] = requests.data.registrations;
   assert.equal((await app.post(`/api/staff/registrations/${first.id}/review`, 20, { decision: 'approve' })).status, 400);
-  const approved = await app.post(`/api/staff/registrations/${first.id}/review`, 20, { decision: 'approve', start_date: today() });
+  const approved = await app.post(`/api/staff/registrations/${first.id}/review`, 20, { decision: 'approve', start_date: monthBounds(today()).start });
   assert.equal(approved.status, 200);
   const linked = await app.post(`/api/staff/registrations/${second.id}/review`, 20, {
     decision: 'approve',
@@ -104,7 +107,7 @@ test('family registration creates a student or links an existing one', async () 
   const context = await app.post('/api/parent/context', 21);
   assert.deepEqual(context.data.students.map((item) => item.name).sort(), ['Есть В Списке', 'Лев']);
   const kept = context.data.students.find((item) => item.name === 'Есть В Списке');
-  assert.equal(kept.lessons_remaining, 5);
+  assert.equal(kept.lessons_remaining, 8);
   const created = context.data.students.find((item) => item.name === 'Лев');
   assert.equal(created.invoice.amount, 150);
   assert.equal(created.schedules[0].times[1], '18:00');
@@ -207,8 +210,10 @@ test('attendance applies lesson and makeup rules once', async () => {
   const parentId = await addParent(app, 41);
   const date = today();
   const weekday = weekdayOf(date);
-  const studentId = await addStudent(app, { coachId, parentId, left: 8, schedule: [{ weekday, time: '00:01' }] });
-  const left = async () => (await app.db.prepare('SELECT lessons_remaining AS value FROM students WHERE id = ?').bind(studentId).first()).value;
+  const studentId = await addStudent(app, { coachId, parentId, schedule: [{ weekday, time: '00:01' }] });
+  const left = async () => (await app.post(`/api/staff/students/${studentId}`, 40)).data.student.lessons_remaining;
+  const money = await app.post('/api/admin/money', SUPER_ADMIN);
+  await app.post(`/api/admin/payments/${money.data.debtors[0].id}/cash`, SUPER_ADMIN);
   const credits = () => rowCount(app, `SELECT COUNT(*) AS count FROM makeups WHERE student_id = ? AND status = 'available'`, studentId);
 
   const day = await app.post('/api/staff/day', 40, { date });
@@ -249,6 +254,8 @@ test('monthly limit stops new makeups for absences but not for cancellations', a
   const coachId = await addCoach(app, 45);
   const studentId = await addStudent(app, { coachId, schedule: ALL_WEEK('00:01') });
   const { start } = monthBounds(today());
+  const money = await app.post('/api/admin/money', SUPER_ADMIN);
+  await app.post(`/api/admin/payments/${money.data.debtors[0].id}/cash`, SUPER_ADMIN);
   for (let index = 0; index < 8; index += 1) {
     await app.db.prepare(
       `INSERT INTO makeups (student_id, source_date, source_type, expires_at, status, created_at)
@@ -305,15 +312,15 @@ test('payment flow: cash, oldest debt first, no late fee', async () => {
   const app = createApp();
   const coachId = await addCoach(app, 60);
   const parentId = await addParent(app, 61);
-  const studentId = await addStudent(app, { coachId, parentId, left: 0 });
+  const studentId = await addStudent(app, { coachId, parentId });
   const context = await app.post('/api/parent/context', 61);
   const current = context.data.students[0].invoice;
   assert.equal(current.amount, 150);
 
   const previousStart = monthBounds(addDays(monthBounds(today()).start, -1));
   const { id: oldId } = await app.db.prepare(
-    `INSERT INTO payments (student_id, coach_id, amount, lessons_count, tariff_code, status, period_start, period_end, due_date, created_at)
-     VALUES (?, ?, 150, 8, '8', 'pending', ?, ?, ?, '2026-01-01') RETURNING id`,
+    `INSERT INTO payments (student_id, coach_id, amount, lessons_count, tariff_code, attended, status, period_start, period_end, due_date, created_at)
+     VALUES (?, ?, 150, 8, '8', 1, 'pending', ?, ?, ?, '2026-01-01') RETURNING id`,
   ).bind(studentId, coachId, previousStart.start, previousStart.end, `${previousStart.start.slice(0, 8)}10`).first();
 
   const overdue = await app.post('/api/parent/context', 61);
@@ -330,8 +337,7 @@ test('payment flow: cash, oldest debt first, no late fee', async () => {
   assert.equal((await app.post(`/api/admin/payments/${oldId}/review`, 60, { decision: 'approve' })).status, 403);
   const approved = await app.post(`/api/admin/payments/${oldId}/review`, SUPER_ADMIN, { decision: 'approve' });
   assert.equal(approved.data.amount, 150);
-  const student = await app.db.prepare('SELECT lessons_remaining FROM students WHERE id = ?').bind(studentId).first();
-  assert.equal(student.lessons_remaining, 8);
+  assert.equal((await app.post(`/api/staff/students/${studentId}`, 60)).data.student.lessons_remaining, 8);
   assert.equal((await app.post(`/api/admin/payments/${current.id}/review`, SUPER_ADMIN, { decision: 'approve' })).data.error, 'payment_not_reported');
 });
 
@@ -380,15 +386,15 @@ test('tariff change is limited to the first five days and open invoices', async 
   const coachId = await addCoach(app, 80);
   const parentId = await addParent(app, 81);
   const studentId = await addStudent(app, { coachId, parentId });
-  const result = await app.post('/api/parent/tariff', 81, { student_id: studentId, tariff_code: '12' });
-  if (canSelectTariff(today())) {
-    assert.equal(result.status, 200);
-    const { data } = await app.post('/api/parent/context', 81);
-    assert.equal(data.students[0].invoice.amount, 180);
-    assert.equal(data.students[0].invoice.tariff_code, '12');
-  } else {
-    assert.equal(result.data.error, 'tariff_deadline_passed');
-  }
+  // Moving up is allowed all month, moving down only until the 5th.
+  assert.equal((await app.post('/api/parent/tariff', 81, { student_id: studentId, tariff_code: '12' })).status, 200);
+  const { data } = await app.post('/api/parent/context', 81);
+  assert.equal(data.students[0].invoice.amount, 180);
+  assert.equal(data.students[0].invoice.tariff_code, '12');
+  const down = await app.post('/api/parent/tariff', 81, { student_id: studentId, tariff_code: '8' });
+  if (canSelectTariff(today())) assert.equal(down.status, 200);
+  else assert.equal(down.data.error, 'tariff_deadline_passed');
+  assert.equal((await app.post('/api/parent/tariff', 81, { student_id: studentId, tariff_code: 'single' })).status, 400);
   assert.equal((await app.post('/api/parent/tariff', 81, { student_id: studentId, tariff_code: '99' })).status, 400);
 });
 
@@ -396,7 +402,7 @@ test('money screen lists debtors and takes cash', async () => {
   const app = createApp();
   const coachId = await addCoach(app, 90);
   const parentId = await addParent(app, 91);
-  const studentId = await addStudent(app, { coachId, parentId, left: 0 });
+  const studentId = await addStudent(app, { coachId, parentId });
   const before = await app.post('/api/admin/money', SUPER_ADMIN);
   assert.equal(before.data.waiting, 150);
   assert.equal(before.data.debtors[0].student_name, 'Ученик');
@@ -407,8 +413,7 @@ test('money screen lists debtors and takes cash', async () => {
   const after = await app.post('/api/admin/money', SUPER_ADMIN);
   assert.equal(after.data.collected, 150);
   assert.equal(after.data.waiting, 0);
-  const student = await app.db.prepare('SELECT lessons_remaining FROM students WHERE id = ?').bind(studentId).first();
-  assert.equal(student.lessons_remaining, 8);
+  assert.equal((await app.post(`/api/staff/students/${studentId}`, 90)).data.student.lessons_remaining, 8);
 });
 
 test('deleting a student erases personal data but keeps revenue', async () => {
@@ -423,7 +428,7 @@ test('deleting a student erases personal data but keeps revenue', async () => {
   assert.equal(row.name, 'Удалённый ученик');
   assert.equal(row.parent_id, null);
   assert.equal(await rowCount(app, 'SELECT COUNT(*) AS count FROM schedules WHERE student_id = ?', studentId), 0);
-  assert.equal((await app.post('/api/admin/money', SUPER_ADMIN)).data.collected, 150);
+  assert.equal((await app.post('/api/admin/money', SUPER_ADMIN)).data.collected, 200);
   assert.equal((await app.post('/api/staff/students', SUPER_ADMIN)).data.students.length, 0);
 });
 
@@ -569,6 +574,248 @@ test('a webhook failure does not stop the scheduled jobs', async () => {
   await runTick(app.env, new Date('2026-11-03T07:30:00Z'));
   assert.equal(await rowCount(app, 'SELECT COUNT(*) AS count FROM payments'), 1);
   assert.equal(app.telegram.filter((call) => call.method === 'setWebhook').length, 0);
+});
+
+const studentRow = (app, id) => app.db.prepare('SELECT * FROM students WHERE id = ?').bind(id).first();
+const mark = (app, student, date, status = 'present', source = 'scheduled') => saveAttendance(app.db, student, { date, time: '18:00', status, source });
+
+test('the balance belongs to its calendar month', async () => {
+  const app = createApp();
+  const coachId = await addCoach(app, 700);
+  const id = await addStudent(app, { coachId, schedule: [{ weekday: 0, time: '18:00' }, { weekday: 2, time: '18:00' }] });
+  const student = await studentRow(app, id);
+  const october = await ensureInvoice(app.db, student, '2026-10-01');
+  await mark(app, student, '2026-10-05');
+  await mark(app, student, '2026-10-07');
+  // Paying late does not matter: lessons held earlier in the month count.
+  assert.equal(await markPaid(app.db, october, student, coachId), 6);
+
+  // A new month starts from its own subscription, whatever was left or paid before.
+  const november = await ensureInvoice(app.db, student, '2026-11-01');
+  assert.equal(november.tariff_code, '8');
+  assert.deepEqual(
+    (({ total, used, left }) => ({ total, used, left }))(await balanceOf(app.db, id, '2026-11-15')),
+    { total: 8, used: 0, left: 8 },
+  );
+  await mark(app, student, '2026-11-02');
+  assert.equal((await balanceOf(app.db, id, '2026-11-15')).left, 7);
+
+  // A late correction of October leaves November alone.
+  await mark(app, student, '2026-10-12');
+  assert.equal((await balanceOf(app.db, id, '2026-11-15')).left, 7);
+  assert.equal((await balanceOf(app.db, id, '2026-10-15')).left, 5);
+
+  // Makeups and trainer cancellations use no lesson.
+  await mark(app, student, '2026-11-04', 'present', 'makeup');
+  await mark(app, student, '2026-11-09', 'absent', 'coach_cancelled');
+  assert.equal((await balanceOf(app.db, id, '2026-11-15')).used, 1);
+});
+
+test('paying an old debt does not change the current month', async () => {
+  const app = createApp();
+  const coachId = await addCoach(app, 705);
+  const id = await addStudent(app, { coachId });
+  const student = await studentRow(app, id);
+  const october = await ensureInvoice(app.db, student, '2026-10-01');
+  await mark(app, student, '2026-10-05');
+  await ensureInvoice(app.db, student, '2026-11-01');
+  await mark(app, student, '2026-11-02');
+  await mark(app, student, '2026-11-03');
+  assert.equal(await markPaid(app.db, october, student, coachId), 7);
+  assert.equal((await balanceOf(app.db, id, '2026-11-15')).left, 6);
+});
+
+test('a new student gets the subscription that fits the schedule', () => {
+  assert.equal(tariffForSchedule(1), '8');
+  assert.equal(tariffForSchedule(2), '8');
+  assert.equal(tariffForSchedule(3), '12');
+  assert.equal(tariffForSchedule(5), '16');
+  assert.deepEqual(partialPrice(3), { code: '8', amount: 120 });
+  assert.deepEqual(partialPrice(5), { code: '8', amount: 150 });
+  assert.deepEqual(partialPrice(10), { code: '12', amount: 180 });
+});
+
+test('the first month is priced from the start date to the end of the month', async () => {
+  const app = createApp();
+  const coachId = await addCoach(app, 710);
+  // Mondays and Wednesdays from 18 November 2026: 18, 23, 25, 30.
+  const id = await addStudent(app, { coachId, startDate: '2026-11-18', schedule: [{ weekday: 0, time: '18:00' }, { weekday: 2, time: '18:00' }] });
+  const student = await studentRow(app, id);
+  const invoice = await ensureInvoice(app.db, student, '2026-11-18');
+  assert.equal(invoice.is_partial, 1);
+  assert.equal(invoice.lessons_count, 4);
+  assert.equal(invoice.amount, 150);
+  assert.equal(invoice.due_date, '2026-11-18');
+
+  // The next month is a full subscription with the normal deadline.
+  const december = await ensureInvoice(app.db, student, '2026-12-01');
+  assert.equal(december.is_partial, 0);
+  assert.equal(december.lessons_count, 8);
+  assert.equal(december.due_date, '2026-12-10');
+
+  // Few trainings left cost less than a subscription; a changed start date recalculates an unpaid invoice.
+  await app.db.prepare('DELETE FROM payments').run();
+  await app.db.prepare(`UPDATE students SET training_start_date = '2026-11-25' WHERE id = ?`).bind(id).run();
+  const moved = await studentRow(app, id);
+  const later = await ensureInvoice(app.db, moved, '2026-11-25');
+  assert.equal(later.lessons_count, 2);
+  assert.equal(later.amount, 80);
+  await app.db.prepare(`UPDATE students SET training_start_date = '2026-11-30' WHERE id = ?`).bind(id).run();
+  await refreshFirstInvoice(app.db, await studentRow(app, id), '2026-11-25');
+  assert.equal((await ensureInvoice(app.db, await studentRow(app, id), '2026-11-25')).amount, 40);
+});
+
+test('a first invoice follows the schedule entered later and never falls due before the start', async () => {
+  const app = createApp();
+  const coachId = await addCoach(app, 712);
+  const id = await addStudent(app, { coachId, startDate: '2026-11-18' });
+  const invoice = await ensureInvoice(app.db, await studentRow(app, id), '2026-11-15');
+  assert.equal(invoice.is_partial, 0);
+  assert.equal(invoice.due_date, '2026-11-18');
+  await app.db.prepare(`INSERT INTO schedules (student_id, weekday, time) VALUES (?, 0, '18:00')`).bind(id).run();
+  await refreshFirstInvoice(app.db, await studentRow(app, id), '2026-11-15');
+  const refreshed = await ensureInvoice(app.db, await studentRow(app, id), '2026-11-15');
+  assert.equal(refreshed.is_partial, 1);
+  assert.equal(refreshed.lessons_count, 2);
+  assert.equal(refreshed.amount, 80);
+  assert.equal(refreshed.due_date, '2026-11-23');
+});
+
+test('no invoice before the start month or without trainings left', async () => {
+  const app = createApp();
+  const coachId = await addCoach(app, 715);
+  const future = await addStudent(app, { coachId, startDate: '2026-12-01', schedule: [{ weekday: 0, time: '18:00' }] });
+  assert.equal(await ensureInvoice(app.db, await studentRow(app, future), '2026-11-20'), null);
+  // No Sunday remains after 30 November 2026, a Monday.
+  const none = await addStudent(app, { coachId, startDate: '2026-11-30', schedule: [{ weekday: 6, time: '18:00' }] });
+  assert.equal(await ensureInvoice(app.db, await studentRow(app, none), '2026-11-30'), null);
+});
+
+test('an unpaid month without training is not a debt and closes by itself', async () => {
+  const app = createApp();
+  const coachId = await addCoach(app, 720);
+  const id = await addStudent(app, { coachId });
+  const student = await studentRow(app, id);
+  const stored = (paymentId) => app.db.prepare('SELECT * FROM payments WHERE id = ?').bind(paymentId).first();
+
+  const away = await ensureInvoice(app.db, student, '2026-09-01');
+  await mark(app, student, '2026-09-07', 'absent');
+  assert.equal((await stored(away.id)).attended, 0);
+  assert.equal(await app.db.prepare('SELECT COUNT(*) AS count FROM makeups').first().then((row) => row.count), 0);
+  await closeUnusedMonths(app.db, '2026-10-01');
+  assert.equal((await stored(away.id)).status, 'skipped');
+
+  // A training in a month makes the unpaid invoice a debt that stays open, even if it was already closed.
+  await mark(app, student, '2026-09-14');
+  assert.equal((await stored(away.id)).status, 'pending');
+  assert.equal((await stored(away.id)).attended, 1);
+  await closeUnusedMonths(app.db, '2026-10-01');
+  assert.equal((await stored(away.id)).status, 'pending');
+});
+
+test('makeups need a paid month and appear when it gets paid', async () => {
+  const app = createApp();
+  const coachId = await addCoach(app, 725);
+  const id = await addStudent(app, { coachId });
+  const student = await studentRow(app, id);
+  const invoice = await ensureInvoice(app.db, student, '2026-11-01');
+  const credits = () => rowCount(app, `SELECT COUNT(*) AS count FROM makeups WHERE status = 'available'`);
+  await mark(app, student, '2026-11-02', 'absent');
+  assert.equal(await credits(), 0);
+  await markPaid(app.db, invoice, student, coachId);
+  assert.equal(await credits(), 1);
+  await mark(app, student, '2026-11-04', 'absent');
+  assert.equal(await credits(), 2);
+});
+
+test('parents pay the difference to move up, and buy single lessons separately', async () => {
+  const app = createApp();
+  const coachId = await addCoach(app, 730);
+  const parentId = await addParent(app, 731);
+  const id = await addStudent(app, { coachId, parentId, schedule: ALL_WEEK('23:59') });
+  const context = async () => (await app.post('/api/parent/context', 731)).data.students[0];
+  const pay = (paymentId) => app.post(`/api/admin/payments/${paymentId}/cash`, SUPER_ADMIN);
+
+  assert.equal((await app.post('/api/parent/upgrade', 731, { student_id: id })).status, 409);
+  await pay((await context()).invoice.id);
+  const stayed = await context();
+  assert.equal(stayed.lessons_count, 16);
+
+  const payments = await app.db.prepare(`SELECT * FROM payments WHERE student_id = ? AND kind = 'subscription'`).bind(id).first();
+  await app.db.prepare(`UPDATE payments SET tariff_code = '8', amount = 150, lessons_count = 8 WHERE id = ?`).bind(payments.id).run();
+  const upgrade = await app.post('/api/parent/upgrade', 731, { student_id: id });
+  assert.equal(upgrade.status, 200);
+  assert.equal((await app.post('/api/parent/upgrade', 731, { student_id: id })).data.id, upgrade.data.id);
+  const row = await app.db.prepare('SELECT * FROM payments WHERE id = ?').bind(upgrade.data.id).first();
+  assert.equal(row.amount, 30);
+  assert.equal(row.lessons_count, 4);
+  assert.equal((await context()).lessons_count, 8);
+  await pay(upgrade.data.id);
+  assert.equal((await context()).lessons_count, 12);
+
+  const nextUp = await app.post('/api/parent/upgrade', 731, { student_id: id });
+  assert.equal((await app.db.prepare('SELECT amount FROM payments WHERE id = ?').bind(nextUp.data.id).first()).amount, 20);
+  await pay(nextUp.data.id);
+  assert.equal((await context()).lessons_count, 16);
+  assert.equal((await app.post('/api/parent/upgrade', 731, { student_id: id })).status, 409);
+
+  // Single lessons add up, and more than one fits in a month.
+  for (const expected of [17, 18]) {
+    const single = await app.post('/api/parent/single', 731, { student_id: id });
+    assert.equal(single.status, 200);
+    await pay(single.data.id);
+    assert.equal((await context()).lessons_count, expected);
+  }
+  // The next month repeats the subscription, not the extras.
+  const student = await studentRow(app, id);
+  const next = addDays(monthBounds(today()).end, 1);
+  assert.equal((await ensureInvoice(app.db, student, next)).tariff_code, '8');
+  assert.equal((await balanceOf(app.db, id, next)).total, 8);
+});
+
+test('a single lesson covers a visit without creating a debt', async () => {
+  const app = createApp();
+  const coachId = await addCoach(app, 735);
+  const parentId = await addParent(app, 736);
+  const id = await addStudent(app, { coachId, parentId });
+  const student = await studentRow(app, id);
+  const date = today();
+  const single = await app.post('/api/parent/single', 736, { student_id: id });
+  await app.post(`/api/admin/payments/${single.data.id}/cash`, SUPER_ADMIN);
+  await mark(app, student, date);
+  const invoice = await ensureInvoice(app.db, student, date);
+  assert.equal(invoice.attended, 0);
+});
+
+test('administrators correct the balance only with a reason', async () => {
+  const app = createApp();
+  const coachId = await addCoach(app, 740);
+  const id = await addStudent(app, { coachId });
+  const url = `/api/staff/students/${id}/adjust`;
+  assert.equal((await app.post(url, 740, { delta: 1, reason: 'x' })).status, 403);
+  assert.equal((await app.post(url, SUPER_ADMIN, { delta: 1, reason: ' ' })).data.error, 'reason_required');
+  assert.equal((await app.post(url, SUPER_ADMIN, { delta: 0, reason: 'x' })).data.error, 'invalid_delta');
+  assert.equal((await app.post(url, SUPER_ADMIN, { delta: 2, reason: 'Подарок' })).status, 200);
+  const { student } = (await app.post(`/api/staff/students/${id}`, 740)).data;
+  assert.equal(student.lessons_remaining, 10);
+  assert.equal(await rowCount(app, `SELECT COUNT(*) AS count FROM audit_log WHERE action = 'lessons_adjusted'`), 1);
+});
+
+test('the parent is told once when lessons run past the subscription', async () => {
+  const app = createApp();
+  const coachId = await addCoach(app, 745);
+  const parentId = await addParent(app, 746);
+  const date = today();
+  const id = await addStudent(app, { coachId, parentId, schedule: [{ weekday: weekdayOf(date), time: '00:01' }] });
+  const student = await studentRow(app, id);
+  const invoice = await ensureInvoice(app.db, student, date);
+  await app.db.prepare('UPDATE payments SET lessons_count = 0 WHERE id = ?').bind(invoice.id).run();
+  const { data } = await app.post('/api/staff/day', 745, { date });
+  const save = () => app.post('/api/staff/attendance', 745, { date, key: data.sessions[0].key, marks: [{ student_id: id, status: 'present' }] });
+  await save();
+  await save();
+  const notes = await rowCount(app, `SELECT COUNT(*) AS count FROM outbox WHERE text LIKE '%больше, чем в абонементе%'`);
+  assert.equal(notes, 1);
 });
 
 test('outbox keeps going when a parent has blocked the bot', async () => {

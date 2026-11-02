@@ -6,7 +6,7 @@ export const TARIFFS = {
   12: { label: '12 занятий', lessons: 12, price: 180 },
   16: { label: '16 занятий', lessons: 16, price: 200 },
 };
-export const DEFAULT_TARIFF = '8';
+const MONTHLY_TARIFFS = ['8', '12', '16'];
 
 export const PAYMENT_DUE_DAY = 10;
 export const TARIFF_DEADLINE_DAY = 5;
@@ -75,12 +75,47 @@ export function isPaymentReminderDay(today, due) {
   return left < 0 && (-left - 1) % REMINDER_STEP_DAYS === 0;
 }
 
-export function consumesLesson(status, source) {
-  return !['makeup', 'coach_cancelled'].includes(source) && ['present', 'absent'].includes(status);
+// Two trainings a week fit 8 lessons, three fit 12, four and more fit 16.
+export function tariffForSchedule(trainingsPerWeek) {
+  if (trainingsPerWeek >= 4) return '16';
+  return trainingsPerWeek === 3 ? '12' : '8';
 }
 
+export function nextTariff(code) {
+  return MONTHLY_TARIFFS[MONTHLY_TARIFFS.indexOf(String(code)) + 1] ?? null;
+}
+
+export function isMonthlyTariff(code) {
+  return MONTHLY_TARIFFS.includes(String(code));
+}
+
+export function countTrainings(schedule, from, to) {
+  let count = 0;
+  for (let date = from; date <= to; date = addDays(date, 1)) {
+    const weekday = weekdayOf(date);
+    count += schedule.filter((row) => row.weekday === weekday).length;
+  }
+  return count;
+}
+
+export function firstTrainingDate(schedule, from, to) {
+  for (let date = from; date <= to; date = addDays(date, 1)) {
+    const weekday = weekdayOf(date);
+    if (schedule.some((row) => row.weekday === weekday)) return date;
+  }
+  return null;
+}
+
+// A child who starts mid-month pays for the trainings left, never more than a subscription that covers them.
+export function partialPrice(lessons) {
+  const code = MONTHLY_TARIFFS.find((item) => TARIFFS[item].lessons >= lessons) ?? MONTHLY_TARIFFS[MONTHLY_TARIFFS.length - 1];
+  return { code, amount: Math.min(lessons * TARIFFS.single.price, TARIFFS[code].price) };
+}
+
+// A month without training is not a debt: the invoice simply stays unpaid.
 export function invoiceStatus(payment, today) {
-  if (payment.status === 'pending' && payment.due_date < today) return 'overdue';
+  const isDebt = payment.kind !== 'subscription' || payment.attended;
+  if (payment.status === 'pending' && payment.due_date < today && isDebt) return 'overdue';
   return payment.status;
 }
 

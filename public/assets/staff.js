@@ -320,15 +320,16 @@ function staffStudentsHtml() {
 function staffStudentHtml() {
     const item = staff.student;
     if (item.loading) return `${staffBar(item.name)}<div class="st-loading">${IOS_SPINNER}</div>`;
-    const invoiceLabels = {
+    const invoiceLabels = item.invoice ? {
         paid: ['Оплачено', 'pa-ok'],
         pending: [`До ${parentShortDate(item.invoice.due_date)}`, 'pa-warn'],
         overdue: ['Долг', 'pa-danger'],
         reported: ['На проверке', 'pa-warn'],
         awaiting_receipt: ['Ждём чек', 'pa-warn'],
         rejected: ['Отклонено', 'pa-danger'],
-    };
-    const invoice = invoiceLabels[item.invoice.status] || ['', ''];
+        skipped: ['Не занимался', 'pa-muted'],
+    } : {};
+    const invoice = invoiceLabels[item.invoice?.status] || ['', ''];
     const historyLabels = {present: ['Был', 'pa-ok'], absent: ['Не был', 'pa-warn']};
     const history = item.history.map(row => {
         const [label, css] = row.source === 'coach_cancelled' ? ['Отмена', 'pa-muted'] : historyLabels[row.status];
@@ -346,7 +347,8 @@ function staffStudentHtml() {
             <section class="pa-card">
                 <div class="pa-row"><span class="pa-muted">Осталось занятий</span><span class="pa-strong">${item.lessons_remaining} из ${item.lessons_count}</span></div>
                 <div class="pa-row"><span class="pa-muted">Отработки</span><span>${item.makeups}</span></div>
-                <div class="pa-row"><span class="pa-muted">Оплата за ${escapeHtml(PARENT_MONTHS_NOMINATIVE[parentDate(item.invoice.due_date).getMonth()].toLowerCase())}, ${item.invoice.amount} Br</span><span class="${invoice[1]}">${invoice[0]}</span></div>
+                ${item.lessons_over ? `<div class="pa-warn">Сверх абонемента: ${item.lessons_over}</div>` : ''}
+                ${item.invoice ? `<div class="pa-row"><span class="pa-muted">Оплата за ${escapeHtml(PARENT_MONTHS_NOMINATIVE[parentDate(item.invoice.due_date).getMonth()].toLowerCase())}, ${item.invoice.amount} Br</span><span class="${invoice[1]}">${invoice[0]}</span></div>` : '<div class="pa-muted">В этом месяце занятий нет</div>'}
             </section>
             <section class="pa-card">
                 <div class="pa-label">Расписание</div>
@@ -363,6 +365,21 @@ function staffStudentHtml() {
             ${item.notes ? `<section class="pa-card"><div class="pa-label">Заметки</div><div>${escapeHtml(item.notes)}</div></section>` : ''}
             ${history ? `<section class="pa-card"><div class="pa-label">Последние занятия</div>${history}</section>` : ''}
             <button type="button" class="pa-btn" data-st="edit-student">Изменить</button>
+            ${staff.me.is_admin && item.invoice ? `
+                <details class="pa-card">
+                    <summary>Исправить остаток занятий</summary>
+                    <div class="pa-group">
+                        <label class="pa-stack">
+                            <span class="pa-label">На сколько изменить: например, 1 или -1${item.adjustment ? `. Сейчас: ${item.adjustment}` : ''}</span>
+                            <input class="pa-field" inputmode="numeric" data-adjust="delta">
+                        </label>
+                        <label class="pa-stack">
+                            <span class="pa-label">Причина</span>
+                            <input class="pa-field" data-adjust="reason">
+                        </label>
+                        <button type="button" class="pa-btn" data-st="adjust-lessons" data-value="${item.id}">Сохранить поправку</button>
+                    </div>
+                </details>` : ''}
             ${staff.me.is_admin ? '<button type="button" class="pa-link st-danger-link" data-st="delete-student">Удалить ученика</button>' : ''}
         </div>`;
 }
@@ -411,10 +428,14 @@ function staffFormHtml() {
                     </label>` : ''}
             </section>
             <section class="pa-card">
-                <div class="pa-two">
-                    ${field('Занятий в абонементе', 'lessons_count', 'number')}
-                    ${field('Осталось занятий', 'lessons_remaining', 'number')}
-                </div>
+                ${form.tariff_locked ? '' : `
+                    <label class="pa-stack">
+                        <span class="pa-label">Абонемент на этот месяц</span>
+                        <select class="pa-field" data-st-form="tariff_code">
+                            <option value="" ${form.tariff_code ? '' : 'selected'}>По расписанию</option>
+                            ${['8', '12', '16'].map(code => `<option value="${code}" ${String(form.tariff_code) === code ? 'selected' : ''}>${code} занятий</option>`).join('')}
+                        </select>
+                    </label>`}
                 ${field('Дата начала занятий', 'training_start_date', 'date')}
             </section>
             <section class="pa-card">
@@ -536,7 +557,7 @@ function staffRequestsHtml() {
         return `
             <section class="pa-card" data-pay-card="${item.id}">
                 <div>
-                    <div class="pa-label">${item.method === 'cash' ? 'Наличные' : 'Чек на проверку'}</div>
+                    <div class="pa-label">${item.method === 'cash' ? 'Наличные' : 'Чек на проверку'}${{upgrade: ', доплата за абонемент', single: ', разовое занятие'}[item.kind] || ''}</div>
                     <div class="pa-mid">${escapeHtml(item.student_name)}, ${item.amount}&nbsp;Br</div>
                     <div class="pa-muted">${escapeHtml(PARENT_MONTHS_NOMINATIVE[parentDate(item.period_start).getMonth()])}</div>
                 </div>
@@ -562,7 +583,10 @@ function staffMoneyHtml() {
     const rows = data.debtors.map(item => {
         const overdue = item.status === 'overdue';
         const month = PARENT_MONTHS_NOMINATIVE[parentDate(item.period_start).getMonth()];
-        const note = overdue ? `${month}: просрочено` : `${month}: до ${parentShortDate(item.due_date)}`;
+        let note = overdue ? `${month}: просрочено` : `${month}: до ${parentShortDate(item.due_date)}`;
+        if (item.not_training) note = `${month}: пока не занимается`;
+        else if (item.kind === 'upgrade') note = `${month}: доплата за абонемент`;
+        else if (item.kind === 'single') note = `${month}: разовое занятие`;
         const reminded = staff.reminded[item.id];
         return `
             <section class="pa-card">
@@ -697,8 +721,8 @@ function staffStartForm(student) {
             parent_phone: student.parent_phone,
             parent_linked: Boolean(student.parent_name),
             coach_id: student.coach_id,
-            lessons_count: student.lessons_count,
-            lessons_remaining: student.lessons_remaining,
+            tariff_code: student.invoice?.tariff_code ?? '',
+            tariff_locked: Boolean(student.invoice?.is_partial) || !['pending', 'rejected', 'overdue'].includes(student.invoice?.status),
             training_start_date: student.training_start_date,
             notes: student.notes,
             schedule: student.schedule.map(row => ({...row})),
@@ -711,8 +735,8 @@ function staffStartForm(student) {
             phone: '',
             parent_phone: '',
             coach_id: null,
-            lessons_count: 8,
-            lessons_remaining: 8,
+            tariff_code: '',
+            tariff_locked: false,
             training_start_date: '',
             notes: '',
             schedule: [{weekday: 0, time: '18:00', group_id: null, location_id: null}],
@@ -801,7 +825,7 @@ const STAFF_ACTIONS = {
         staffPaint();
     },
     'save-student': () => staffRun(async () => {
-        const {id, schedule, parent_linked: _linked, ...fields} = staff.form;
+        const {id, schedule, parent_linked: _linked, tariff_locked: _locked, ...fields} = staff.form;
         const path = id ? `/api/staff/students/${id}/update` : '/api/staff/students/create';
         const saved = await apiPost(path, {student: fields, schedule});
         await staffLoadStudents();
@@ -845,6 +869,17 @@ const STAFF_ACTIONS = {
             staff.rejecting = null;
             showNotification('Отказ отправлен');
         }, {reload: staffLoadRequests});
+    },
+    'adjust-lessons': target => {
+        const delta = document.querySelector('[data-adjust="delta"]').value;
+        const reason = document.querySelector('[data-adjust="reason"]').value;
+        const id = target.dataset.value;
+        return staffRun(async () => {
+            await apiPost(`/api/staff/students/${id}/adjust`, {delta: Number(delta), reason});
+            staff.student = (await apiPost(`/api/staff/students/${id}`)).student;
+            staff.studentCache[id] = staff.student;
+            showNotification('Остаток исправлен');
+        });
     },
     'load-receipt': target => {
         const id = target.dataset.value;
