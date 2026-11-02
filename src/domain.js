@@ -194,7 +194,7 @@ export async function closeUnusedMonths(db, today) {
   await run(
     db,
     `UPDATE payments SET status = 'skipped'
-     WHERE status IN ('pending', 'rejected') AND period_end < ? AND (kind != 'subscription' OR attended = 0)`,
+     WHERE status IN ('pending', 'rejected', 'awaiting_receipt') AND period_end < ? AND (kind != 'subscription' OR attended = 0)`,
     today,
   );
 }
@@ -211,16 +211,18 @@ export async function markPaid(db, payment, student, coachId, receivedByCoachId 
     payment.id,
   );
   await refreshAttended(db, student.id, payment.period_start);
-  // Missed lessons of an unpaid month earn their makeups once the month is paid.
-  const missed = await all(
-    db,
-    `SELECT * FROM attendance WHERE student_id = ? AND date BETWEEN ? AND ?
-       AND (source = 'coach_cancelled' OR (source = 'scheduled' AND status = 'absent'))`,
-    student.id,
-    payment.period_start,
-    payment.period_end,
-  );
-  for (const attendance of missed) await reconcileAttendance(db, student, attendance);
+  // Missed lessons of an unpaid month earn their makeups once its subscription is paid.
+  if (payment.kind === 'subscription') {
+    const missed = await all(
+      db,
+      `SELECT * FROM attendance WHERE student_id = ? AND date BETWEEN ? AND ?
+         AND (source = 'coach_cancelled' OR (source = 'scheduled' AND status = 'absent'))`,
+      student.id,
+      payment.period_start,
+      payment.period_end,
+    );
+    for (const attendance of missed) await reconcileAttendance(db, student, attendance);
+  }
   return (await balanceOf(db, student.id, payment.period_start)).left;
 }
 
@@ -228,7 +230,7 @@ async function isMonthPaid(db, studentId, date) {
   const { start } = monthBounds(date);
   const paid = await first(
     db,
-    `SELECT id FROM payments WHERE student_id = ? AND period_start = ? AND status = 'paid' LIMIT 1`,
+    `SELECT id FROM payments WHERE student_id = ? AND period_start = ? AND kind = 'subscription' AND status = 'paid'`,
     studentId,
     start,
   );

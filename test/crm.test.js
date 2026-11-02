@@ -681,6 +681,101 @@ test('a first invoice follows the schedule entered later and never falls due bef
   assert.equal(refreshed.due_date, '2026-11-23');
 });
 
+test('a student starting next month has a working card and no invoice yet', async () => {
+  const app = createApp();
+  const coachId = await addCoach(app, 713);
+  const parentId = await addParent(app, 714);
+  const next = addDays(monthBounds(today()).end, 1);
+  const id = await addStudent(app, { coachId, parentId, startDate: next, schedule: [{ weekday: 0, time: '18:00' }] });
+  const detail = await app.post(`/api/staff/students/${id}`, 713);
+  assert.equal(detail.status, 200);
+  assert.equal(detail.data.student.invoice, null);
+  const [child] = (await app.post('/api/parent/context', 714)).data.students;
+  assert.equal(child.invoice, null);
+  assert.equal(child.starts_on, next);
+  assert.ok(child.next_training.date >= next);
+  const early = await app.post('/api/parent/training-response', 714, { student_id: id, date: addDays(today(), 1), time: '18:00', response: 'absent' });
+  assert.ok(early.status >= 400);
+  assert.equal((await app.post('/api/parent/tariff', 714, { student_id: id, tariff_code: '12' })).data.error, 'no_invoice');
+  assert.equal((await app.post('/api/staff/students', 713)).status, 200);
+  assert.equal((await app.post('/api/admin/money', SUPER_ADMIN)).status, 200);
+});
+
+test('an approved schedule change reprices an unpaid first month', async () => {
+  const app = createApp();
+  await addCoach(app, 716);
+  const parentId = await addParent(app, 717);
+  const coachId = (await app.db.prepare('SELECT id FROM coaches WHERE telegram_id = 716').first()).id;
+  const { end } = monthBounds(today());
+  // Starting on the last day of the month: one training on that weekday, none on the one after it.
+  const lastWeekday = weekdayOf(end);
+  const id = await addStudent(app, { coachId, parentId, startDate: end, schedule: [{ weekday: lastWeekday, time: '18:00' }] });
+  if (end > monthBounds(today()).start) {
+    const before = (await app.post('/api/parent/context', 717)).data.students[0].invoice;
+    assert.equal(before.amount, 40);
+    await app.post('/api/parent/schedule-request', 717, {
+      student_id: id,
+      proposed_schedule: [{ weekday: lastWeekday, time: '18:00' }, { weekday: lastWeekday, time: '20:00' }],
+    });
+    const request = (await app.post('/api/staff/requests', 716)).data.schedule_changes[0];
+    assert.equal((await app.post(`/api/staff/schedule-requests/${request.id}/review`, 716, { decision: 'approve' })).status, 200);
+    const after = (await app.post('/api/parent/context', 717)).data.students[0].invoice;
+    assert.equal(after.amount, 80);
+  }
+});
+
+test('a single lesson does not earn makeups for other missed trainings', async () => {
+  const app = createApp();
+  const coachId = await addCoach(app, 718);
+  const parentId = await addParent(app, 719);
+  const id = await addStudent(app, { coachId, parentId });
+  const student = await studentRow(app, id);
+  await mark(app, student, today(), 'absent');
+  const single = await app.post('/api/parent/single', 719, { student_id: id });
+  await app.post(`/api/admin/payments/${single.data.id}/cash`, SUPER_ADMIN);
+  assert.equal(await rowCount(app, 'SELECT COUNT(*) AS count FROM makeups'), 0);
+});
+
+test('an abandoned receipt on a closed month does not block new payments', async () => {
+  const app = createApp();
+  const coachId = await addCoach(app, 721);
+  const id = await addStudent(app, { coachId });
+  const invoice = await ensureInvoice(app.db, await studentRow(app, id), '2026-09-01');
+  await app.db.prepare(`UPDATE payments SET status = 'awaiting_receipt' WHERE id = ?`).bind(invoice.id).run();
+  await closeUnusedMonths(app.db, '2026-10-01');
+  assert.equal((await app.db.prepare('SELECT status FROM payments WHERE id = ?').bind(invoice.id).first()).status, 'skipped');
+  assert.equal((await app.post(`/api/admin/payments/${invoice.id}/cash`, SUPER_ADMIN)).data.error, 'month_closed');
+});
+
+test('offers nobody paid get no reminders, and a failed daily job runs again', async () => {
+  const app = createApp();
+  const coachId = await addCoach(app, 722);
+  const parentId = await addParent(app, 723);
+  const id = await addStudent(app, { coachId, parentId });
+  // 3 November is 7 days before the subscription deadline and an unpaid single lesson would come first by id otherwise.
+  await app.db.prepare(
+    `INSERT INTO payments (student_id, coach_id, kind, amount, lessons_count, tariff_code, period_start, period_end, due_date, created_at)
+     VALUES (?, ?, 'single', 40, 1, 'single', '2026-11-01', '2026-11-30', '2026-11-10', '2026-11-01')`,
+  ).bind(id, coachId).run();
+  const realPrepare = app.db.prepare;
+  let failed = false;
+  app.db.prepare = (sql) => {
+    if (!failed && sql.includes(`SET status = 'skipped'`)) {
+      failed = true;
+      throw new Error('temporary failure');
+    }
+    return realPrepare(sql);
+  };
+  const morning = new Date('2026-11-03T07:30:00Z');
+  await assert.rejects(runTick(app.env, morning));
+  assert.equal(await rowCount(app, `SELECT COUNT(*) AS count FROM job_runs WHERE key = 'daily:2026-11-03'`), 0);
+  await runTick(app.env, new Date('2026-11-03T07:35:00Z'));
+  assert.equal(await rowCount(app, `SELECT COUNT(*) AS count FROM job_runs WHERE key = 'daily:2026-11-03'`), 1);
+  const reminders = app.telegram.filter((call) => call.payload?.text?.includes('Оплата абонемента'));
+  assert.equal(reminders.length, 1);
+  assert.ok(reminders[0].payload.text.includes('150 Br'));
+});
+
 test('no invoice before the start month or without trainings left', async () => {
   const app = createApp();
   const coachId = await addCoach(app, 715);
@@ -814,7 +909,7 @@ test('the parent is told once when lessons run past the subscription', async () 
   const save = () => app.post('/api/staff/attendance', 745, { date, key: data.sessions[0].key, marks: [{ student_id: id, status: 'present' }] });
   await save();
   await save();
-  const notes = await rowCount(app, `SELECT COUNT(*) AS count FROM outbox WHERE text LIKE '%больше, чем в абонементе%'`);
+  const notes = await rowCount(app, `SELECT COUNT(*) AS count FROM outbox WHERE text LIKE '%больше, чем оплачено%'`);
   assert.equal(notes, 1);
 });
 

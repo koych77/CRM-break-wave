@@ -168,7 +168,7 @@ function parentTrainingCard(student) {
         answer = `
             <div class="pa-stack">
                 <div class="pa-warn">Тренер предупреждён</div>
-                <div class="pa-muted pa-small">Занятие спишется, вместо него появится отработка на 2 месяца.</div>
+                <div class="pa-muted pa-small">Занятие спишется. В оплаченном месяце вместо него появится отработка на 2 месяца.</div>
                 <button type="button" class="pa-link" data-pa="rsvp" data-value="">Изменить</button>
             </div>`;
     }
@@ -200,7 +200,7 @@ function parentExtrasBlock(student) {
 function parentPaymentBlock(student) {
     if (!student.invoice) {
         return student.starts_on
-            ? `<div class="pa-muted">Занятия начнутся ${escapeHtml(parentShortDate(student.starts_on))}, счёт придёт в этом месяце.</div>`
+            ? `<div class="pa-muted">Занятия начнутся ${escapeHtml(parentShortDate(student.starts_on))}, тогда же появится счёт.</div>`
             : '<div class="pa-muted">В этом месяце тренировок нет.</div>';
     }
     const invoice = (student.invoices || []).find(item => item.id === student.oldest_open_invoice_id) || null;
@@ -236,6 +236,7 @@ function parentBalanceCard(student) {
     const total = student.lessons_count || 0;
     const left = student.lessons_remaining || 0;
     const percent = total ? Math.min(100, Math.round((left / total) * 100)) : 0;
+    if (!student.invoice) return `<section class="pa-card">${parentPaymentBlock(student)}</section>`;
     return `
         <section class="pa-card">
             <div class="pa-row">

@@ -196,7 +196,7 @@ export async function saveMarks(ctx) {
     await notifyParentOfStudent(
       ctx.env,
       student,
-      `${student.name}: занятий в этом месяце больше, чем в абонементе.\nМожно перейти на больший абонемент с доплатой разницы.`,
+      `${student.name}: занятий в этом месяце больше, чем оплачено.\nДополнительные занятия можно оплатить в кабинете.`,
       `over:${student.id}:${body.date.slice(0, 7)}`,
     );
   }
@@ -307,13 +307,14 @@ export async function studentDetail(ctx) {
       parent_name: parent?.full_name ?? null,
       parent_phone: parent?.phone ?? student.parent_phone,
       makeups: makeups.count,
-      invoice: {
+      invoice: invoice ? {
         id: invoice.id,
         amount: invoice.amount,
         status: invoiceStatus(invoice, today),
         tariff_code: invoice.tariff_code,
+        is_partial: Boolean(invoice.is_partial),
         due_date: invoice.due_date,
-      },
+      } : null,
       schedule: schedule.map((row) => ({
         weekday: row.weekday,
         time: row.time,
@@ -694,7 +695,7 @@ export async function reviewSchedule(ctx) {
   const rows = parseScheduleRows(JSON.parse(request.proposed_schedule)).map((row) => ({ ...row, ...keep }));
   await replaceSchedule(db, request.student_id, rows);
   await run(db, `UPDATE schedule_requests SET status = 'approved', reviewed_by_coach_id = ? WHERE id = ?`, coach.id, request.id);
-  await refreshFirstInvoice(db, student, minskNow().date);
+  await refreshFirstInvoice(db, await first(db, 'SELECT * FROM students WHERE id = ?', request.student_id), minskNow().date);
   await notifyParentOfStudent(env, student, `Новое расписание для ${request.student_name} подтверждено.`);
   await audit(db, ctx.actor.user.id, 'schedule_approved', 'student', request.student_id);
   return { success: true, status: 'approved' };
@@ -804,6 +805,7 @@ export async function takeCash(ctx) {
   const payment = await first(db, 'SELECT * FROM payments WHERE id = ?', positiveInt(ctx.params.id));
   if (!payment) throw new ApiError(404, 'payment_not_found', 'Счёт не найден');
   if (['paid', 'written_off'].includes(payment.status)) throw new ApiError(409, 'already_paid', 'Этот месяц уже оплачен');
+  if (payment.status === 'skipped') throw new ApiError(409, 'month_closed', 'Этот месяц закрыт: занятий не было');
   if (payment.kind === 'subscription') {
     const oldest = await oldestOpenInvoice(db, payment.student_id);
     if (oldest && oldest.id !== payment.id) {

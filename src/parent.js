@@ -86,12 +86,13 @@ function upgradeOffer(invoice, paidUpgrades) {
   };
 }
 
-function nextTraining(schedule, now) {
+function nextTraining(schedule, now, startDate) {
+  const from = startDate && startDate > now.date ? startDate : now.date;
   for (let offset = 0; offset < 14; offset += 1) {
-    const date = addDays(now.date, offset);
+    const date = addDays(from, offset);
     const weekday = weekdayOf(date);
     for (const row of schedule) {
-      if (row.weekday === weekday && (offset > 0 || row.time > now.time)) {
+      if (row.weekday === weekday && (date > now.date || row.time > now.time)) {
         return { date, time: row.time, location_id: row.location_id, location: row.location, group: row.group_name };
       }
     }
@@ -189,7 +190,7 @@ export async function context(ctx) {
       today,
     );
     const schedule = schedules.get(student.id);
-    const training = nextTraining(schedule, now);
+    const training = nextTraining(schedule, now, student.training_start_date);
     if (training) {
       const saved = await first(
         db,
@@ -204,8 +205,11 @@ export async function context(ctx) {
     const balance = balances.get(student.id);
     const monthRows = invoices.filter((item) => item.period_start === monthBounds(today).start);
     const paidUpgrades = monthRows.filter((item) => item.kind === 'upgrade' && item.status === 'paid');
-    const trainingsLeft = countTrainings(schedule, addDays(today, 1), monthEnd)
-      + schedule.filter((row) => row.weekday === weekdayOf(today) && row.time > now.time).length;
+    const notStarted = student.training_start_date && student.training_start_date > today;
+    const trainingsLeft = notStarted
+      ? countTrainings(schedule, student.training_start_date, monthEnd)
+      : countTrainings(schedule, addDays(today, 1), monthEnd)
+        + schedule.filter((row) => row.weekday === weekdayOf(today) && row.time > now.time).length;
     const offer = upgradeOffer(invoice, paidUpgrades);
     const canUpgrade = Boolean(invoice) && !invoice.is_partial && ['pending', 'rejected'].includes(invoice.status);
     response.push({
@@ -338,6 +342,9 @@ export async function trainingResponse(ctx) {
   const student = await ownStudent(ctx, parent, body.student_id);
   if (!validDate(body.date) || !validTime(body.time)) throw new ApiError(400, 'invalid_date', 'Неверная дата');
   if (body.date < minskNow().date) throw new ApiError(409, 'training_passed', 'Эта тренировка уже прошла');
+  if (student.training_start_date && body.date < student.training_start_date) {
+    throw new ApiError(404, 'training_not_found', 'Занятия ещё не начались');
+  }
   if (![null, undefined, 'attending', 'absent'].includes(body.response)) {
     throw new ApiError(400, 'invalid_response', 'Неверный ответ');
   }

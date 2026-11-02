@@ -151,12 +151,15 @@ function clearPending() {
 function runControl(control, action) {
     if (pendingKey === controlKey(control)) return;
     pendingKey = controlKey(control);
-    const result = action(control);
+    let result;
+    try {
+        result = action(control);
+    } finally {
+        if (!result?.then) clearPending();
+    }
     if (result?.then) {
         markPending(document);
-        result.finally(clearPending);
-    } else {
-        clearPending();
+        result.catch(() => {}).then(clearPending);
     }
 }
 

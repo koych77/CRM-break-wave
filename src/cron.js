@@ -19,9 +19,11 @@ const TRAINING_REMINDER_HOUR = 18;
 const UNMARKED_AFTER_MINUTES = 15;
 const UNMARKED_WINDOW_MINUTES = 180;
 
+// Recorded after the job, so a failed run repeats on the next tick; outbox keys stop duplicate messages.
 async function once(db, key, job) {
-  const claimed = await run(db, 'INSERT OR IGNORE INTO job_runs (key, ran_at) VALUES (?, ?)', key, isoNow());
-  if (claimed.meta.changes) await job();
+  if (await first(db, 'SELECT key FROM job_runs WHERE key = ?', key)) return;
+  await job();
+  await run(db, 'INSERT OR IGNORE INTO job_runs (key, ran_at) VALUES (?, ?)', key, isoNow());
 }
 
 async function paymentReminders(env, today) {
@@ -32,7 +34,7 @@ async function paymentReminders(env, today) {
      JOIN students s ON s.id = p.student_id
      JOIN parents par ON par.id = s.parent_id
      WHERE p.status NOT IN ('paid', 'written_off', 'reported', 'skipped') AND s.is_active = 1
-       AND (p.kind != 'subscription' OR p.attended = 1 OR p.due_date >= ?)
+       AND p.kind = 'subscription' AND (p.attended = 1 OR p.due_date >= ?)
      ORDER BY s.id, p.period_start`,
     today,
   );
@@ -139,7 +141,7 @@ async function trainingReminders(env, today) {
     await enqueue(
       env,
       row.telegram_id,
-      `Завтра тренировка\n${row.name}, ${row.time}${row.location ? `, ${row.location}` : ''}\n\nПропуск всё равно списывает занятие, вместо него появится отработка.`,
+      `Завтра тренировка\n${row.name}, ${row.time}${row.location ? `, ${row.location}` : ''}\n\nПропуск всё равно списывает занятие. В оплаченном месяце вместо него появится отработка.`,
       {
         key: `training:${row.id}:${date}:${row.time}`,
         markup: {
