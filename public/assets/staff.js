@@ -474,6 +474,7 @@ function staffRequestsHtml() {
                 <div class="pa-mid">${escapeHtml(item.child_name)}</div>
                 ${item.child_nickname ? `<div class="pa-muted">Никнейм: ${escapeHtml(item.child_nickname)}</div>` : ''}
                 <div class="pa-muted">Дата рождения: ${escapeHtml(parentBirthday(item.child_birthday))}</div>
+                ${item.preferred_coach_name ? `<div class="pa-muted">Выбранный тренер: ${escapeHtml(item.preferred_coach_name)}</div>` : ''}
                 <div class="pa-muted">Родитель: ${escapeHtml(item.parent_name)}, ${escapeHtml(item.parent_phone)}</div>
                 <div class="pa-muted">Удобно: ${escapeHtml(staffScheduleText(item.proposed_schedule))}</div>
             </div>
@@ -499,7 +500,7 @@ function staffRequestsHtml() {
             ${staff.me.is_admin ? `
                 <label class="pa-stack">
                     <span class="pa-label">Тренер</span>
-                    <select class="pa-field" data-review="coach_id">${staffOptions(coaches, null, 'first_name', 'Я')}</select>
+                    <select class="pa-field" data-review="coach_id">${staffOptions(coaches, item.preferred_coach_id, 'first_name', 'Я')}</select>
                 </label>` : ''}
             ${staffDecision('registration', item.id)}
         </section>`).join('');

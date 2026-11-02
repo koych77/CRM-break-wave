@@ -1,4 +1,4 @@
-import { requireParent } from './auth.js';
+import { coachOptions, requireParent } from './auth.js';
 import { all, audit, first, insert, run } from './db.js';
 import { ensureInvoice, oldestOpenInvoice, schedulesFor, tariffOf } from './domain.js';
 import { ApiError, optionalInt, positiveInt, text } from './http.js';
@@ -240,7 +240,11 @@ export async function register(ctx) {
     if (!validDate(child.birthday) || child.birthday > minskNow().date) {
       throw new ApiError(400, 'child_birthday_required', 'Укажите дату рождения ребёнка');
     }
-    return { name, nickname, birthday: child.birthday, phone: text(child.phone, 50) || null, schedule: parseScheduleRows(child.schedule) };
+    const options = coachOptions(ctx.env);
+    if (options.length && !options.some((item) => item.username === child.coach)) {
+      throw new ApiError(400, 'child_coach_required', 'Выберите тренера');
+    }
+    return { name, nickname, coach: options.length ? child.coach : null, birthday: child.birthday, phone: text(child.phone, 50) || null, schedule: parseScheduleRows(child.schedule) };
   });
 
   const parent = await first(
@@ -265,11 +269,12 @@ export async function register(ctx) {
   for (const child of parsed) {
     await insert(
       db,
-      `INSERT INTO registration_requests (parent_id, child_name, child_nickname, child_birthday, child_phone, proposed_schedule, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO registration_requests (parent_id, child_name, child_nickname, preferred_coach, child_birthday, child_phone, proposed_schedule, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       parent.id,
       child.name,
       child.nickname,
+      child.coach,
       child.birthday,
       child.phone,
       JSON.stringify(child.schedule),

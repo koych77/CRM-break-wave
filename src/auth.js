@@ -53,6 +53,11 @@ export function superAdminIds(env) {
     .filter((value) => Number.isInteger(value) && value > 0);
 }
 
+// The coaches parents choose from. Listed in the config, so a coach appears before first opening the bot.
+export function coachOptions(env) {
+  return Array.isArray(env.COACHES) ? env.COACHES : [];
+}
+
 function isListedUsername(env, username) {
   if (!username) return false;
   return String(env.ADMIN_USERNAMES || '')
@@ -67,11 +72,12 @@ export async function loadCoach(env, telegramUser) {
   const isSuper = superAdminIds(env).includes(id);
   let coach = await first(env.DB, 'SELECT * FROM coaches WHERE telegram_id = ?', id);
   if (!coach && (isSuper || isListedUsername(env, username))) {
+    const listed = coachOptions(env).find((item) => item.username.toLowerCase() === username?.toLowerCase());
     await run(
       env.DB,
       'INSERT OR IGNORE INTO coaches (telegram_id, first_name, username, is_admin, is_manager, created_at) VALUES (?, ?, ?, 1, 1, ?)',
       id,
-      firstName,
+      listed?.name ?? firstName,
       username,
       isoNow(),
     );

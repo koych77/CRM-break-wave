@@ -9,7 +9,7 @@ const registration = {
 };
 
 function newRegistrationChild() {
-    return {name: '', nickname: '', birthday: '', schedule: [{weekday: 1, time: '18:00'}]};
+    return {name: '', nickname: '', coach: '', birthday: '', schedule: [{weekday: 1, time: '18:00'}]};
 }
 
 function renderRegistration({existingParent = null} = {}) {
@@ -46,6 +46,14 @@ function paintRegistration() {
                 <span class="pa-label">Дата рождения</span>
                 <input class="pa-field ${child.birthday ? '' : 'is-empty'}" type="date" max="${today}" data-reg-child="${childIndex}" data-field="birthday" value="${escapeHtml(child.birthday)}">
             </label>
+            ${coachOptions.length ? `
+                <label class="pa-stack">
+                    <span class="pa-label">Тренер</span>
+                    <select class="pa-field" data-reg-child="${childIndex}" data-field="coach">
+                        <option value="">Выберите тренера</option>
+                        ${coachOptions.map(option => `<option value="${escapeHtml(option.username)}" ${option.username === child.coach ? 'selected' : ''}>${escapeHtml(option.name)}</option>`).join('')}
+                    </select>
+                </label>` : ''}
             <div class="pa-group">
                 <span class="pa-label">Удобные дни и время</span>
                 ${child.schedule.map((row, rowIndex) => `

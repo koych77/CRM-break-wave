@@ -4,6 +4,7 @@ const API = window.location.origin;
 const tg = window.Telegram?.WebApp;
 let initData = tg?.initData || '';
 let parentData = null;
+let coachOptions = [];
 
 function escapeHtml(value) {
     const map = {'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'};
@@ -235,6 +236,7 @@ async function boot() {
     renderScreenState(container, 'Загружаем…', {loading: true});
     try {
         const me = await apiPost('/api/auth');
+        coachOptions = me.coach_options || [];
         if (me.role === 'parent') await loadParentContext();
         else if (me.role === 'guest') renderRegistration();
         else await startStaff(me);

@@ -141,6 +141,35 @@ test('the family form requires a nickname and a real birth date', async () => {
   assert.deepEqual(list.data.students.map((item) => item.nickname).sort(), ['Лёва', 'Старик']);
 });
 
+test('parents choose a coach and the request suggests that coach', async () => {
+  const app = createApp();
+  app.env.COACHES = [
+    { name: 'Койпиш Максим', username: 'First_Coach' },
+    { name: 'Койпиш Юрий', username: 'Second_Coach' },
+  ];
+  app.env.ADMIN_USERNAMES = 'First_Coach,Second_Coach';
+  await addCoach(app, 600);
+  const parent = { full_name: 'Анна Иванова', phone: '+375291112233' };
+  const child = { name: 'Лев Иванов', nickname: 'Лёва', birthday: '2018-03-04', schedule: [{ weekday: 1, time: '18:00' }] };
+  const send = (coach) => app.post('/api/parent/register', 601, { parent, children: [{ ...child, coach }] });
+
+  assert.deepEqual((await app.post('/api/auth', 601)).data.coach_options.map((item) => item.name), ['Койпиш Максим', 'Койпиш Юрий']);
+  assert.equal((await send('')).data.error, 'child_coach_required');
+  assert.equal((await send('Someone_Else')).data.error, 'child_coach_required');
+  assert.equal((await send('Second_Coach')).status, 200);
+
+  let [request] = (await app.post('/api/staff/requests', 600)).data.registrations;
+  assert.equal(request.preferred_coach_name, 'Койпиш Юрий');
+  assert.equal(request.preferred_coach_id, null);
+
+  // The coach opens the bot later, under the name from the list, and the request now points at them.
+  await app.webhook({ message: { text: '/start', chat: { id: 602, type: 'private' }, from: { id: 602, first_name: 'Юра', username: 'second_coach' } } });
+  const account = await app.db.prepare('SELECT id, first_name FROM coaches WHERE telegram_id = 602').first();
+  assert.equal(account.first_name, 'Койпиш Юрий');
+  [request] = (await app.post('/api/staff/requests', 600)).data.registrations;
+  assert.equal(request.preferred_coach_id, account.id);
+});
+
 test('rejecting requires a reason that reaches the parent', async () => {
   const app = createApp();
   await addCoach(app, 25);

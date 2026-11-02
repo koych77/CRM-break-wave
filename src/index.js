@@ -1,4 +1,4 @@
-import { loadActor, safeEqual } from './auth.js';
+import { coachOptions, loadActor, safeEqual } from './auth.js';
 import { handleUpdate } from './bot.js';
 import { runTick } from './cron.js';
 import { first } from './db.js';
@@ -45,6 +45,7 @@ const routes = [
 
 async function authenticate(env, body) {
   const actor = await loadActor(env, body.initData);
+  const coaches = coachOptions(env).map((item) => ({ name: item.name, username: item.username }));
   if (actor.coach) {
     const { coach } = actor;
     return {
@@ -55,10 +56,10 @@ async function authenticate(env, body) {
     };
   }
   if (actor.parent) {
-    return { role: 'parent', parent_id: actor.parent.id, first_name: actor.parent.full_name };
+    return { role: 'parent', parent_id: actor.parent.id, first_name: actor.parent.full_name, coach_options: coaches };
   }
   // Anyone new opens the family form, whichever button brought them here.
-  return { role: 'guest', first_name: actor.user.first_name || '' };
+  return { role: 'guest', first_name: actor.user.first_name || '', coach_options: coaches };
 }
 
 async function handleApi(request, env, ctx, pathname) {

@@ -21,7 +21,11 @@
   },
   "vars": {
     "WEBAPP_URL": "https://crm-break-wave.koych77.workers.dev",
-    "ADMIN_USERNAMES": "Yury_Kojpish,Bboy_K_Maks"
+    "ADMIN_USERNAMES": "Yury_Kojpish,Bboy_K_Maks",
+    "COACHES": [
+      { "name": "Койпиш Максим", "username": "Bboy_K_Maks" },
+      { "name": "Койпиш Юрий", "username": "Yury_Kojpish" }
+    ]
   }
   // Secrets, set with `wrangler secret put`:
   // BOT_TOKEN, ADMIN_IDS, ADMIN_SECRET, TELEGRAM_WEBHOOK_SECRET, PAYMENT_DETAILS

@@ -1,4 +1,4 @@
-import { requireAdmin, requireCoach } from './auth.js';
+import { coachOptions, requireAdmin, requireCoach } from './auth.js';
 import { all, audit, first, insert, run } from './db.js';
 import {
   ensureAllInvoices,
@@ -462,12 +462,17 @@ export async function requests(ctx) {
     db,
     `SELECT s.id, s.name FROM students s WHERE s.parent_id IS NULL AND s.is_active = 1 AND s.deleted_at IS NULL${scopeSql(coach)} ORDER BY s.name`,
   );
+  const options = coachOptions(ctx.env);
+  const accounts = await all(db, 'SELECT id, username FROM coaches WHERE is_active = 1');
+  const sameName = (left, right) => Boolean(left && right) && left.toLowerCase() === right.toLowerCase();
   return {
     registrations: registrations.map((item) => ({
       id: item.id,
       child_name: item.child_name,
       child_nickname: item.child_nickname,
       child_birthday: item.child_birthday,
+      preferred_coach_name: options.find((option) => sameName(option.username, item.preferred_coach))?.name ?? null,
+      preferred_coach_id: accounts.find((account) => sameName(account.username, item.preferred_coach))?.id ?? null,
       parent_name: item.parent_name,
       parent_phone: item.parent_phone,
       proposed_schedule: JSON.parse(item.proposed_schedule),
