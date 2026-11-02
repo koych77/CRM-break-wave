@@ -112,3 +112,9 @@ data/*.sqlite
 # OS
 .DS_Store
 Thumbs.db
+
+# Cloudflare
+node_modules/
+.wrangler/
+.dev.vars
+.claude/launch.json

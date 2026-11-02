@@ -1,0 +1,27 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "crm-break-wave",
+  "main": "src/index.js",
+  "compatibility_date": "2026-10-12",
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "run_worker_first": ["/api/*", "/telegram/*", "/healthz"]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "crm-break-wave-db",
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "triggers": {
+    "crons": ["*/5 * * * *"]
+  },
+  "vars": {
+    "WEBAPP_URL": "https://crm-break-wave.koych77.workers.dev"
+  }
+  // Secrets, set with `wrangler secret put`:
+  // BOT_TOKEN, ADMIN_IDS, ADMIN_SECRET, TELEGRAM_WEBHOOK_SECRET, PAYMENT_DETAILS
+}
