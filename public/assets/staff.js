@@ -337,7 +337,6 @@ function staffStudentHtml() {
     }).join('');
     const schedule = item.schedule.map(row => `
         <div class="pa-list-row"><span>${PARENT_WEEKDAYS[row.weekday]}</span><span class="pa-list-value pa-strong">${escapeHtml(row.time)}</span></div>`).join('');
-    const percent = item.lessons_count ? Math.max(0, Math.min(100, Math.round((item.lessons_remaining / item.lessons_count) * 100))) : 0;
     const edit = `<button type="button" class="st-icon-btn" data-st="edit-student" aria-label="Изменить">${bwIcon('edit', 22)}</button>`;
     const facts = [
         item.nickname ? ['Никнейм', item.nickname] : null,
@@ -356,7 +355,7 @@ function staffStudentHtml() {
                         <span class="pa-hero-time">${item.lessons_remaining}</span>
                         <span class="pa-muted">из ${item.lessons_count} ${isPaid ? 'занятий осталось' : 'занятий по учёту'}</span>
                     </div>
-                    ${isPaid ? `<div class="pa-progress"><span style="width: ${percent}%"></span></div>` : ''}`
+                    ${isPaid ? bwSegments(item.lessons_remaining, item.lessons_count) : ''}`
                     : '<div class="pa-muted">В этом месяце занятий нет</div>'}
                 <div class="pa-row"><span class="pa-muted">Отработки</span><span class="pa-strong">${item.makeups}</span></div>
                 ${item.lessons_over ? `<div class="pa-warn">Сверх абонемента: ${item.lessons_over}</div>` : ''}

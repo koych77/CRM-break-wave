@@ -182,7 +182,7 @@ function parentTrainingCard(student) {
         return `
             <section class="pa-hero">
                 <div class="pa-eyebrow">Следующая тренировка</div>
-                <div class="pa-mid">Расписание назначит тренер</div>
+                <div class="pa-hero-title">Расписание назначит тренер</div>
             </section>`;
     }
     const answers = [['attending', 'Придёт', 'check'], ['absent', 'Не придёт', 'x']];
@@ -192,10 +192,9 @@ function parentTrainingCard(student) {
     };
     return `
         <section class="pa-hero">
-            <div class="pa-eyebrow">Следующая тренировка</div>
+            <div class="pa-eyebrow">${escapeHtml(parentNearDate(training.date))}</div>
             <div>
-                <div class="pa-hero-time">${escapeHtml(training.time)}</div>
-                <div class="pa-mid">${escapeHtml(parentNearDate(training.date))}</div>
+                <div class="pa-hero-time is-huge">${escapeHtml(training.time)}</div>
                 <div class="pa-muted">${escapeHtml(parentPlace(training))}</div>
             </div>
             <div class="pa-two">
@@ -232,10 +231,7 @@ function parentMonthStatus(student) {
 }
 
 function parentProgress(student) {
-    const total = student.lessons_count || 0;
-    const left = student.lessons_remaining || 0;
-    const percent = total ? Math.max(0, Math.min(100, Math.round((left / total) * 100))) : 0;
-    return `<div class="pa-progress ${left <= LOW_LESSONS ? 'is-low' : ''}"><span style="width: ${percent}%"></span></div>`;
+    return bwSegments(student.lessons_remaining || 0, student.lessons_count || 0);
 }
 
 function parentSubscriptionRow(student) {
@@ -248,6 +244,19 @@ function parentSubscriptionRow(student) {
             </section>`;
     }
     const status = parentMonthStatus(student);
+    if (status.paid) {
+        const note = student.lessons_remaining > 0 ? status.note : status.text;
+        return `
+            <button type="button" class="pa-rowlink pa-subscription" data-pa="go-subscription">
+                <span class="pa-rowlink-main">
+                    <span class="pa-rowlink-title">Осталось занятий</span>
+                    <span class="pa-rowlink-count">${Math.max(student.lessons_remaining, 0)} из ${student.lessons_count}</span>
+                    ${bwIcon('chevron-right', 20)}
+                </span>
+                ${parentProgress(student)}
+                ${note ? `<span class="${status.css} pa-small">${note}</span>` : ''}
+            </button>`;
+    }
     return `
         <button type="button" class="pa-rowlink pa-subscription" data-pa="go-subscription">
             <span class="pa-rowlink-main">
@@ -258,7 +267,6 @@ function parentSubscriptionRow(student) {
                 </span>
                 ${bwIcon('chevron-right', 20)}
             </span>
-            ${status.paid ? parentProgress(student) : ''}
         </button>`;
 }
 
@@ -270,38 +278,25 @@ function parentPaymentPanel(student) {
     if (invoice.stored_status === 'reported') {
         return `<section class="pa-panel is-calm"><div>${month}: ${invoice.amount} Br на проверке</div></section>`;
     }
-    const pay = label => `<button type="button" class="pa-btn is-primary" data-pa="go-pay">${label}</button>`;
+    const panel = (tone, title, buttonLabel, note = '') => `
+        <section class="pa-panel pa-pay ${tone}">
+            <div class="pa-stack">
+                <div class="pa-small">${title}</div>
+                <div class="pa-pay-sum">${invoice.amount} Br</div>
+            </div>
+            <button type="button" class="pa-btn is-primary" data-pa="go-pay">${buttonLabel}</button>
+            ${note ? `<div class="pa-pay-note">${note}</div>` : ''}
+        </section>`;
     if (invoice.stored_status === 'awaiting_receipt') {
-        return `
-            <section class="pa-panel is-warn">
-                <div class="pa-panel-title">Прикрепите чек</div>
-                <div>${month}: ${invoice.amount} Br</div>
-                ${pay(`${bwIcon('upload', 20)}Прикрепить чек`)}
-            </section>`;
+        return panel('is-warn', `Прикрепите чек за ${month.toLowerCase()}`, `${bwIcon('upload', 20)}Чек`);
     }
     const isLate = parentDate(invoice.due_date) < parentDate(parentToday());
-    let tone = 'is-action';
-    let title = `Оплатить до ${escapeHtml(parentShortDate(invoice.due_date))}`;
-    let text = `${month}: ${invoice.amount} Br`;
-    if (invoice.status === 'overdue') {
-        tone = 'is-danger';
-        title = `Долг за ${month.toLowerCase()}`;
-        text = `${invoice.amount} Br`;
-    } else if (isLate) {
-        title = `${month}: ${invoice.amount} Br`;
-        text = 'Если ребёнка в этом месяце не будет, можно не оплачивать.';
-    }
     if (invoice.stored_status === 'rejected') {
-        tone = 'is-danger';
-        title = 'Оплата отклонена';
-        text = `${month}: ${invoice.amount} Br${invoice.rejection_reason ? `. ${escapeHtml(invoice.rejection_reason)}` : ''}`;
+        return panel('is-danger', `Оплата за ${month.toLowerCase()} отклонена`, 'Оплатить', escapeHtml(invoice.rejection_reason || ''));
     }
-    return `
-        <section class="pa-panel ${tone}">
-            <div class="pa-panel-title">${title}</div>
-            <div>${text}</div>
-            ${pay(`Оплатить ${invoice.amount} Br`)}
-        </section>`;
+    if (invoice.status === 'overdue') return panel('is-danger', `Долг за ${month.toLowerCase()}`, 'Оплатить');
+    if (isLate) return panel('is-action', month, 'Оплатить', 'Если ребёнка в этом месяце не будет, можно не оплачивать.');
+    return panel('is-action', `Оплатить до ${escapeHtml(parentShortDate(invoice.due_date))}`, 'Оплатить');
 }
 
 function parentToday() {
@@ -338,22 +333,20 @@ function parentHomeRows(student) {
 }
 
 function renderParentHome(student) {
-    const several = parentData.students.length > 1;
-    const switcher = several
-        ? `<div class="pa-segment">
+    return `
+        <div class="pa-head is-row">
+            <div class="pa-logo">Break Wave</div>
+            <div class="pa-segment is-capsule">
                 ${parentData.students.map(item => `
                     <button type="button" data-pa="pick-student" data-id="${item.id}" aria-pressed="${item.id === student.id}">${escapeHtml(item.name.split(' ')[0])}</button>
                 `).join('')}
-           </div>`
-        : '';
-    return `
-        ${parentHeading(several ? 'Семья' : student.name)}
+            </div>
+        </div>
         <div class="pa-body">
-            ${switcher}
             ${parentRegistrationCards()}
             ${parentTrainingCard(student)}
-            ${parentPaymentPanel(student)}
             ${parentSubscriptionRow(student)}
+            ${parentPaymentPanel(student)}
             ${parentHomeRows(student)}
         </div>`;
 }
@@ -438,7 +431,7 @@ function parentLessonsMakeups(student) {
     return `
         <section class="pa-hero">
             <div class="pa-eyebrow">Доступно</div>
-            <div class="pa-hero-time">${available.length}</div>
+            <div class="pa-hero-time is-huge">${available.length}</div>
             ${available.length ? `<div class="pa-muted">Первая действует до ${escapeHtml(parentShortDate(available[0].expires_at))}</div>` : ''}
             ${available.length ? '<button type="button" class="pa-btn is-primary" data-pa="go-makeup">Записаться на отработку</button>' : ''}
         </section>

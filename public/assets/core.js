@@ -59,6 +59,14 @@ function bwIcon(name, size = 22) {
     return `<svg class="bw-icon" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${BW_ICONS[name]}"></path></svg>`;
 }
 
+// One glowing segment for each lesson of the month, lit while the lesson is still left.
+function bwSegments(left, total) {
+    const lit = Math.max(0, Math.min(left, total));
+    return `<span class="pa-seg" role="img" aria-label="Осталось ${lit} из ${total}">${
+        [...Array(total).keys()].map(index => `<i class="${index < lit ? 'on' : ''}"></i>`).join('')
+    }</span>`;
+}
+
 function bwInitials(name) {
     return String(name || '').trim().split(/\s+/).slice(0, 2).map(word => word[0] || '').join('').toUpperCase();
 }
@@ -139,7 +147,7 @@ function animateControls(container, before) {
     });
 }
 
-// The previous screen stays on top of or under the new one until the slide ends.
+// Screens have no background of their own, so the old one fades out while the new one slides in.
 function slideScreens(container, oldScreen, scrollTop, isPush) {
     const ghost = document.createElement('div');
     ghost.className = `pa-ghost ${isPush ? 'is-under' : 'is-over'}`;
@@ -148,8 +156,8 @@ function slideScreens(container, oldScreen, scrollTop, isPush) {
     document.body.append(ghost);
     ghost.scrollTop = scrollTop;
     const options = {duration: IOS_PUSH_MS, easing: IOS_EASE};
-    const behind = [{transform: 'translateX(0)', opacity: 1}, {transform: 'translateX(-30%)', opacity: 0.5}];
-    const front = [{transform: 'translateX(100%)'}, {transform: 'translateX(0)'}];
+    const behind = [{transform: 'translateX(0)', opacity: 1}, {transform: 'translateX(-24%)', opacity: 0}];
+    const front = [{transform: 'translateX(70%)', opacity: 0}, {transform: 'translateX(0)', opacity: 1}];
     const moves = isPush
         ? [container.animate(front, options), ghost.animate(behind, options)]
         : [container.animate([...behind].reverse(), options), ghost.animate([...front].reverse(), options)];
@@ -277,8 +285,8 @@ async function boot() {
     try {
         tg?.ready();
         tg?.expand();
-        tg?.setHeaderColor?.('#000000');
-        tg?.setBackgroundColor?.('#000000');
+        tg?.setHeaderColor?.('#03070D');
+        tg?.setBackgroundColor?.('#03070D');
         if (tg?.isVersionAtLeast?.('7.7')) tg.disableVerticalSwipes?.();
         if (telegramBackSupported()) {
             document.documentElement.classList.add('tg-back');

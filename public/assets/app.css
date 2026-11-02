@@ -1,45 +1,59 @@
-/* === Break Wave design system: black base, blue surfaces, turquoise accent === */
+/* === Break Wave design system: liquid glass on a dark, glowing background === */
 /* Only black, white, blue, turquoise and light blue. Statuses differ by text and by shade. */
 
 :root {
     color-scheme: dark;
-    --bg-base: #000000;
-    --bg-surface: #0D1826;
-    --bg-raised: #17283F;
+    --bg-base: #03070D;
+    --glass: linear-gradient(160deg, rgba(217, 247, 255, 0.16), rgba(169, 234, 255, 0.05) 55%, rgba(169, 234, 255, 0.08));
+    --glass-raised: linear-gradient(160deg, rgba(217, 247, 255, 0.22), rgba(169, 234, 255, 0.1));
+    --glass-edge: rgba(217, 247, 255, 0.26);
+    --glass-line: rgba(217, 247, 255, 0.14);
+    --glass-shine: inset 0 1px 0 rgba(255, 255, 255, 0.3);
+    --glass-depth: inset 0 1px 0 rgba(255, 255, 255, 0.45), inset 0 -14px 30px rgba(0, 20, 60, 0.22), 0 18px 40px rgba(0, 5, 30, 0.4);
     --text-primary: #FFFFFF;
-    --text-secondary: #AFC4DC;
-    --text-muted: #86A0BD;
+    --text-secondary: #CFE6F7;
+    --text-muted: #A9C6DD;
     --accent: #22D3EE;
-    --accent-text: #000000;
-    --border: #2A4060;
-    --danger-bg: #1D4ED8;
-    --danger-text: #FFFFFF;
-    --warning-bg: #0C2F52;
-    --warning-text: #7DD3FC;
-    --success-bg: #06343F;
-    --success-text: #22D3EE;
-    --info-bg: #0C2F52;
-    --info-text: #BAE6FD;
+    --accent-soft: #7DD3FC;
+    --accent-text: #00122E;
+    --accent-fill: linear-gradient(135deg, #7DD3FC, #22D3EE);
+    --accent-glow: 0 8px 26px rgba(34, 211, 238, 0.42);
+    --blue-fill: linear-gradient(120deg, #1D4ED8, #087FBC);
+    --blue-strong: #1D4ED8;
+    --on-blue: #0B3FA8;
+    --warn-text: #B5E8FF;
+    --ok-text: #7FF0FF;
     --gutter: 16px;
-    --radius-sm: 8px;
-    --radius-md: 12px;
-    --radius-lg: 16px;
-    --radius-xl: 24px;
+    --radius-sm: 10px;
+    --radius-md: 18px;
+    --radius-lg: 26px;
+    --radius-xl: 34px;
     --ease-out: cubic-bezier(0.32, 0.72, 0, 1);
-}
-
-@media (min-width: 390px) {
-    :root {
-        --gutter: 20px;
-    }
 }
 
 html,
 body {
     margin: 0;
     background: var(--bg-base);
-    font-family: 'Golos Text', system-ui, -apple-system, 'Segoe UI', sans-serif;
+    font-family: 'Onest', system-ui, -apple-system, 'Segoe UI', sans-serif;
+    -webkit-font-smoothing: antialiased;
     -webkit-text-size-adjust: 100%;
+}
+
+/* The glows stay in place while the content scrolls over them. */
+body::before {
+    content: "";
+    position: fixed;
+    z-index: 0;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    background:
+        radial-gradient(300px 260px at 92% 8%, #0A4F68, transparent 72%),
+        radial-gradient(360px 340px at 0% 40%, #163FB0, transparent 72%),
+        radial-gradient(320px 280px at 95% 82%, #0A4F68, transparent 72%);
+    pointer-events: none;
 }
 
 /* A sliding screen must not make the page scroll sideways. */
@@ -63,7 +77,6 @@ main {
     display: flex;
     flex-direction: column;
     min-height: var(--tg-viewport-stable-height, 100vh);
-    background: var(--bg-base);
     color: var(--text-primary);
     font-size: 15px;
     line-height: 22px;
@@ -86,35 +99,36 @@ main {
     display: flex;
     flex-direction: column;
     gap: 2px;
-    padding: calc(var(--app-top-inset, 0px) + 16px) var(--gutter) 16px;
+    padding: calc(var(--app-top-inset, 0px) + 14px) var(--gutter) 14px;
+}
+
+.pa-head.is-row {
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.pa-logo {
+    flex: none;
+    font-size: 17px;
+    font-weight: 700;
+    letter-spacing: -0.01em;
 }
 
 .pa-head h1,
 .st-title h1 {
-    font-size: 26px;
+    font-size: 28px;
     font-weight: 700;
-    line-height: 32px;
+    letter-spacing: -0.02em;
+    line-height: 34px;
 }
 
 .pa-brand {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    color: var(--text-secondary);
-    font-size: 12px;
+    color: var(--accent-soft);
+    font-size: 13px;
     font-weight: 600;
-    letter-spacing: 0.12em;
-    line-height: 16px;
-    text-transform: uppercase;
-}
-
-/* The brand mark: a tilted cut, the one graphic device of the school's posters. */
-.pa-brand::before {
-    content: "";
-    width: 14px;
-    height: 10px;
-    background: var(--accent);
-    transform: skewX(-20deg);
+    line-height: 18px;
 }
 
 .pa-bar {
@@ -144,6 +158,16 @@ main {
     min-width: 0;
 }
 
+/* Lines up with the content when there is no back button before it. */
+.pa-bar > div:first-child {
+    padding-left: 10px;
+}
+
+.tg-back .pa-bar > div:first-child,
+.tg-back .pa-back + div {
+    padding-left: 0;
+}
+
 .pa-back {
     display: flex;
     flex: none;
@@ -160,29 +184,31 @@ main {
     display: grid;
     grid-auto-columns: minmax(0, 1fr);
     grid-auto-flow: column;
-    gap: 4px;
+    gap: 5px;
     padding: 0 var(--gutter) 16px;
 }
 
 .pa-steps span {
-    height: 4px;
-    border-radius: 2px;
-    background: var(--bg-raised);
+    height: 8px;
+    border-radius: 4px;
+    background: rgba(217, 247, 255, 0.16);
 }
 
 .pa-steps .is-done {
-    background: var(--accent);
+    background: linear-gradient(180deg, #D9F7FF, #22D3EE);
+    box-shadow: 0 0 12px rgba(34, 211, 238, 0.7);
 }
 
 .pa-step-title {
-    font-size: 19px;
+    font-size: 20px;
     font-weight: 700;
-    line-height: 24px;
+    line-height: 26px;
 }
 
 /* --- Layout --- */
 
 .pa-body {
+    position: relative;
     display: flex;
     flex: 1;
     flex-direction: column;
@@ -236,7 +262,7 @@ main {
 .pa-two {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 8px;
+    gap: 10px;
 }
 
 /* Keeps two fields level when only one label wraps. */
@@ -253,12 +279,10 @@ main {
 }
 
 .pa-eyebrow {
-    color: var(--text-secondary);
-    font-size: 12px;
+    color: #D9F7FF;
+    font-size: 15px;
     font-weight: 600;
-    letter-spacing: 0.08em;
-    line-height: 16px;
-    text-transform: uppercase;
+    line-height: 20px;
 }
 
 .pa-big {
@@ -286,17 +310,18 @@ main {
     font-weight: 600;
 }
 
-.pa-ok { color: var(--success-text); font-weight: 500; }
-.pa-warn { color: var(--warning-text); font-weight: 500; }
-.pa-danger { color: var(--danger-text); font-weight: 500; }
+.pa-ok { color: var(--ok-text); font-weight: 500; }
+.pa-warn { color: var(--warn-text); font-weight: 500; }
+.pa-danger { color: var(--text-primary); font-weight: 700; }
 
 .pa-error {
-    color: var(--danger-text);
+    color: var(--text-primary);
     font-size: 13px;
+    font-weight: 600;
     line-height: 18px;
 }
 
-/* --- Level 1: the stage panel --- */
+/* --- The big glass lens --- */
 
 .pa-hero {
     position: relative;
@@ -305,46 +330,44 @@ main {
     gap: 12px;
     padding: 20px;
     overflow: hidden;
+    border: 1px solid var(--glass-edge);
     border-radius: var(--radius-xl);
-    background: var(--bg-surface);
+    background: var(--glass);
+    box-shadow: var(--glass-depth);
 }
 
-/* A lime cut in the corner keeps the panel recognisable without decoration. */
 .pa-hero::before {
     content: "";
     position: absolute;
-    top: -24px;
-    right: 28px;
-    width: 18px;
-    height: 88px;
-    background: var(--accent);
-    transform: skewX(-20deg);
+    top: 6px;
+    right: 90px;
+    left: 18px;
+    height: 34px;
+    border-radius: 50%;
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.12), transparent);
 }
 
 .pa-hero > * {
     position: relative;
 }
 
-.pa-hero .pa-row {
-    padding-right: 0;
-}
-
-.pa-hero > .pa-eyebrow,
-.pa-hero > .pa-row:first-child {
-    padding-right: 56px;
-}
-
 .pa-hero-time {
-    font-size: 36px;
+    font-size: 44px;
     font-weight: 700;
-    letter-spacing: -0.01em;
-    line-height: 40px;
+    letter-spacing: -0.03em;
+    line-height: 50px;
+}
+
+.pa-hero-time.is-huge {
+    font-size: 72px;
+    letter-spacing: -0.04em;
+    line-height: 76px;
 }
 
 .pa-hero-title {
-    font-size: 26px;
+    font-size: 28px;
     font-weight: 700;
-    line-height: 32px;
+    line-height: 34px;
 }
 
 .pa-hero-count {
@@ -354,15 +377,17 @@ main {
     gap: 8px;
 }
 
-/* --- Level 2: panels with one action --- */
+/* --- Panels --- */
 
 .pa-panel {
     display: flex;
     flex-direction: column;
     gap: 8px;
-    padding: 16px;
+    padding: 16px 18px;
+    border: 1px solid var(--glass-edge);
     border-radius: var(--radius-lg);
-    background: var(--bg-surface);
+    background: var(--glass);
+    box-shadow: var(--glass-shine);
 }
 
 .pa-panel-title {
@@ -376,38 +401,78 @@ main {
     margin-top: 4px;
 }
 
-.pa-panel.is-action {
-    background: var(--bg-raised);
-}
-
-.pa-panel.is-calm {
-    background: var(--info-bg);
-    color: var(--info-text);
-}
-
-.pa-panel.is-warn {
-    background: var(--warning-bg);
-    color: var(--warning-text);
+/* Blue is for what asks for a decision: white text, a white button. */
+.pa-panel.is-action,
+.pa-panel.is-danger {
+    background: var(--blue-fill);
+    box-shadow: var(--glass-shine), 0 14px 30px rgba(0, 5, 40, 0.4);
 }
 
 .pa-panel.is-danger {
-    background: var(--danger-bg);
-    color: var(--danger-text);
+    border: 2px solid #FFFFFF;
+    background: var(--blue-strong);
+}
+
+.pa-panel.is-action .pa-btn.is-primary,
+.pa-panel.is-danger .pa-btn.is-primary,
+.pa-panel.is-warn .pa-btn.is-primary {
+    background: #FFFFFF;
+    box-shadow: none;
+    color: var(--on-blue);
+}
+
+.pa-panel.is-calm {
+    color: var(--warn-text);
+}
+
+.pa-panel.is-warn {
+    background: linear-gradient(160deg, rgba(125, 211, 252, 0.28), rgba(125, 211, 252, 0.12));
+    color: var(--text-primary);
 }
 
 .pa-panel.is-ok {
-    background: var(--success-bg);
-    color: var(--success-text);
+    background: linear-gradient(160deg, rgba(34, 211, 238, 0.26), rgba(34, 211, 238, 0.1));
+    color: var(--text-primary);
 }
 
-/* --- Level 3: rows --- */
+.pa-pay {
+    flex-flow: row wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px 12px;
+    padding: 14px 14px 14px 20px;
+}
+
+.pa-pay-sum {
+    font-size: 28px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    line-height: 32px;
+}
+
+.pa-pay .pa-btn {
+    min-height: 48px;
+    margin-top: 0;
+    padding: 0 22px;
+    border-radius: 24px;
+}
+
+.pa-pay-note {
+    flex-basis: 100%;
+    font-size: 13px;
+    line-height: 18px;
+}
+
+/* --- Rows --- */
 
 .pa-list {
     display: flex;
     flex-direction: column;
     overflow: hidden;
+    border: 1px solid var(--glass-edge);
     border-radius: var(--radius-lg);
-    background: var(--bg-surface);
+    background: var(--glass);
+    box-shadow: var(--glass-shine);
 }
 
 .pa-list-row {
@@ -417,7 +482,7 @@ main {
     box-sizing: border-box;
     width: 100%;
     min-height: 56px;
-    padding: 8px 12px 8px 16px;
+    padding: 8px 12px 8px 18px;
     border: 0;
     background: transparent;
     color: var(--text-primary);
@@ -429,16 +494,18 @@ main {
 .pa-list-row + .pa-list-row,
 .pa-list-row + .pa-switch,
 .pa-switch + .pa-switch {
-    border-top: 1px solid var(--border);
+    border-top: 1px solid var(--glass-line);
 }
 
 .pa-list-alone {
+    border: 1px solid var(--glass-edge);
     border-radius: var(--radius-lg);
-    background: var(--bg-surface);
+    background: var(--glass);
+    box-shadow: var(--glass-shine);
 }
 
 .pa-list-row > .bw-icon:first-child {
-    color: var(--text-secondary);
+    color: var(--accent-soft);
 }
 
 .pa-list-row > .bw-icon:last-child {
@@ -453,33 +520,27 @@ main {
     text-align: right;
 }
 
-.pa-list-value.pa-strong {
+.pa-list-value.pa-strong,
+.pa-list-value.pa-danger {
     color: var(--text-primary);
 }
 
-.pa-list-value.pa-danger {
-    color: var(--danger-text);
-}
-
 .pa-list-value.pa-ok {
-    color: var(--success-text);
+    color: var(--ok-text);
 }
 
-.pa-list-action {
-    color: var(--accent);
-}
-
+.pa-list-action,
 .pa-list-action > .bw-icon:first-child {
-    color: var(--accent);
+    color: var(--accent-soft);
 }
 
 .pa-list-text {
     display: flex;
     flex: 1;
     flex-direction: column;
+    justify-content: center;
     min-width: 0;
     min-height: 44px;
-    justify-content: center;
     padding: 0;
     border: 0;
     background: transparent;
@@ -488,15 +549,18 @@ main {
     text-align: left;
 }
 
+/* The lesson balance on the home screen. */
 .pa-rowlink {
     display: flex;
     flex-direction: column;
-    gap: 12px;
+    gap: 10px;
+    box-sizing: border-box;
     width: 100%;
-    padding: 16px 12px 16px 16px;
-    border: 0;
+    padding: 14px 14px 16px 18px;
+    border: 1px solid var(--glass-edge);
     border-radius: var(--radius-lg);
-    background: var(--bg-surface);
+    background: var(--glass);
+    box-shadow: var(--glass-shine);
     color: var(--text-primary);
     font-size: 15px;
     line-height: 22px;
@@ -509,39 +573,67 @@ main {
     gap: 12px;
 }
 
-.pa-rowlink-main .pa-stack {
+.pa-rowlink-main .pa-stack,
+.pa-rowlink-title {
     flex: 1;
+    min-width: 0;
+}
+
+.pa-rowlink-title {
+    color: var(--text-secondary);
+    font-weight: 500;
+}
+
+.pa-rowlink-count {
+    flex: none;
+    font-size: 20px;
+    font-weight: 700;
 }
 
 .pa-rowlink-main > .bw-icon:first-child {
-    color: var(--text-secondary);
+    color: var(--accent-soft);
 }
 
 .pa-rowlink-main > .bw-icon:last-child {
     color: var(--text-muted);
 }
 
-.pa-rowlink .pa-progress {
-    margin-right: 4px;
+/* One glowing segment for each lesson left. */
+.pa-seg {
+    display: flex;
+    gap: 5px;
+}
+
+.pa-seg i {
+    flex: 1;
+    min-width: 0;
+    height: 10px;
+    border-radius: 5px;
+    background: rgba(217, 247, 255, 0.16);
+}
+
+.pa-seg .on {
+    background: linear-gradient(180deg, #D9F7FF, #22D3EE);
+    box-shadow: 0 0 12px rgba(34, 211, 238, 0.7);
 }
 
 /* --- Status badges: always text, never a bare dot --- */
 
 .pa-badge {
     display: inline-block;
-    padding: 4px 8px;
+    padding: 4px 10px;
     border-radius: var(--radius-sm);
     font-size: 12px;
-    font-weight: 500;
+    font-weight: 600;
     line-height: 16px;
     text-align: center;
     white-space: nowrap;
 }
 
-.pa-badge.is-ok { background: var(--success-bg); color: var(--success-text); }
-.pa-badge.is-warn { background: var(--warning-bg); color: var(--warning-text); }
-.pa-badge.is-danger { background: var(--danger-bg); color: var(--danger-text); }
-.pa-badge.is-neutral { background: var(--bg-raised); color: var(--text-secondary); }
+.pa-badge.is-ok { background: rgba(34, 211, 238, 0.2); color: var(--ok-text); }
+.pa-badge.is-warn { background: rgba(125, 211, 252, 0.2); color: var(--warn-text); }
+.pa-badge.is-danger { background: var(--blue-strong); color: #FFFFFF; }
+.pa-badge.is-neutral { background: rgba(217, 247, 255, 0.12); color: var(--text-secondary); }
 
 /* --- Segments and pills --- */
 
@@ -551,30 +643,35 @@ main {
     grid-auto-columns: minmax(0, 1fr);
     grid-auto-flow: column;
     gap: 4px;
-    padding: 4px;
-    border-radius: var(--radius-md);
-    background: var(--bg-surface);
+    padding: 3px;
+    border: 1px solid var(--glass-edge);
+    border-radius: 25px;
+    background: var(--glass);
 }
 
 .pa-segment button {
     position: relative;
     min-height: 44px;
     min-width: 0;
-    padding: 0 8px;
+    padding: 0 10px;
     overflow: hidden;
     border: 0;
-    border-radius: var(--radius-sm);
+    border-radius: 22px;
     background: transparent;
     color: var(--text-secondary);
-    font-size: 15px;
+    font-size: 14px;
     font-weight: 600;
     text-overflow: ellipsis;
     white-space: nowrap;
 }
 
+.pa-segment button[aria-pressed="true"],
+.pa-segment-thumb {
+    background: #FFFFFF;
+}
+
 .pa-segment button[aria-pressed="true"] {
-    background: var(--bg-raised);
-    color: var(--text-primary);
+    color: #04143A;
 }
 
 .pa-segment.is-sliding button[aria-pressed="true"] {
@@ -583,10 +680,16 @@ main {
 
 .pa-segment-thumb {
     position: absolute;
-    top: 4px;
-    bottom: 4px;
-    border-radius: var(--radius-sm);
-    background: var(--bg-raised);
+    top: 3px;
+    bottom: 3px;
+    border-radius: 22px;
+}
+
+.pa-segment.is-capsule {
+    flex: 0 1 auto;
+    grid-auto-columns: auto;
+    min-width: 0;
+    max-width: 240px;
 }
 
 .pa-pills {
@@ -606,19 +709,19 @@ main {
     flex: none;
     min-height: 44px;
     padding: 0 16px;
-    border: 1px solid var(--border);
-    border-radius: 999px;
-    background: transparent;
+    border: 1px solid var(--glass-edge);
+    border-radius: 22px;
+    background: var(--glass);
     color: var(--text-secondary);
-    font-size: 15px;
-    font-weight: 500;
+    font-size: 14px;
+    font-weight: 600;
     white-space: nowrap;
 }
 
 .pa-pills button[aria-pressed="true"] {
-    border-color: var(--text-primary);
-    background: var(--text-primary);
-    color: var(--bg-base);
+    border-color: #FFFFFF;
+    background: #FFFFFF;
+    color: #04143A;
 }
 
 /* --- Buttons --- */
@@ -630,13 +733,14 @@ main {
     gap: 8px;
     box-sizing: border-box;
     min-height: 52px;
-    padding: 0 16px;
-    border: 0;
-    border-radius: var(--radius-md);
-    background: var(--bg-raised);
+    padding: 0 18px;
+    border: 1px solid var(--glass-edge);
+    border-radius: 26px;
+    background: var(--glass-raised);
+    box-shadow: var(--glass-shine);
     color: var(--text-primary);
     font-size: 15px;
-    font-weight: 600;
+    font-weight: 700;
     line-height: 20px;
     text-align: center;
     cursor: pointer;
@@ -644,13 +748,23 @@ main {
 
 .pa-btn.is-primary,
 .pa-answer[aria-pressed="true"] {
-    background: var(--accent);
+    border-color: transparent;
+    background: var(--accent-fill);
+    box-shadow: var(--accent-glow);
     color: var(--accent-text);
+}
+
+.pa-answer {
+    gap: 6px;
+    padding: 0 6px;
+    white-space: nowrap;
 }
 
 .pa-btn[disabled],
 .pa-btn.is-busy {
-    background: var(--bg-surface);
+    border-color: var(--glass-line);
+    background: rgba(217, 247, 255, 0.06);
+    box-shadow: none;
     color: var(--text-muted);
     cursor: default;
 }
@@ -661,7 +775,7 @@ main {
     padding: 0;
     border: 0;
     background: transparent;
-    color: var(--accent);
+    color: var(--accent-soft);
     font-size: 15px;
     font-weight: 600;
 }
@@ -679,35 +793,18 @@ main {
     box-sizing: border-box;
     width: 44px;
     height: 44px;
-    border: 0;
-    border-radius: var(--radius-md);
-    background: var(--bg-surface);
+    border: 1px solid var(--glass-edge);
+    border-radius: 50%;
+    background: var(--glass-raised);
+    box-shadow: var(--glass-shine);
     color: var(--text-primary);
 }
 
 .st-icon-btn.is-accent {
-    background: var(--accent);
+    border-color: transparent;
+    background: var(--accent-fill);
+    box-shadow: var(--accent-glow);
     color: var(--accent-text);
-}
-
-/* --- Progress --- */
-
-.pa-progress {
-    height: 8px;
-    overflow: hidden;
-    border-radius: 4px;
-    background: var(--bg-raised);
-}
-
-.pa-progress span {
-    display: block;
-    height: 8px;
-    border-radius: 4px;
-    background: var(--accent);
-}
-
-.pa-progress.is-low span {
-    background: var(--warning-text);
 }
 
 /* --- Choices --- */
@@ -720,10 +817,11 @@ main {
     box-sizing: border-box;
     width: 100%;
     min-height: 56px;
-    padding: 8px 16px;
-    border: 2px solid transparent;
+    padding: 8px 18px;
+    border: 1px solid var(--glass-edge);
     border-radius: var(--radius-md);
-    background: var(--bg-surface);
+    background: var(--glass);
+    box-shadow: var(--glass-shine);
     color: var(--text-primary);
     font-size: 15px;
     text-align: left;
@@ -735,9 +833,12 @@ main {
 
 .pa-choice[aria-pressed="true"] {
     border-color: var(--accent);
+    background: linear-gradient(160deg, rgba(34, 211, 238, 0.3), rgba(34, 211, 238, 0.1));
+    box-shadow: 0 0 20px rgba(34, 211, 238, 0.3);
 }
 
 .pa-choice[disabled] {
+    border-color: var(--glass-line);
     color: var(--text-muted);
     cursor: default;
 }
@@ -751,22 +852,22 @@ main {
 }
 
 .pa-note {
-    padding: 12px 16px;
+    padding: 12px 18px;
+    border: 1px solid var(--glass-line);
     border-radius: var(--radius-md);
-    background: var(--bg-surface);
+    background: var(--glass);
     color: var(--text-secondary);
     white-space: pre-line;
 }
 
-/* --- Sticky bars --- */
+/* --- Bars that float above the content --- */
 
 .pa-foot {
     position: sticky;
     z-index: 5;
     bottom: 0;
-    padding: 12px var(--gutter) calc(env(safe-area-inset-bottom, 0px) + 16px);
-    border-top: 1px solid var(--border);
-    background: var(--bg-base);
+    padding: 20px var(--gutter) calc(env(safe-area-inset-bottom, 0px) + 16px);
+    background: linear-gradient(180deg, rgba(3, 7, 13, 0), rgba(3, 7, 13, 0.92) 34%);
 }
 
 .pa-foot .pa-btn {
@@ -786,16 +887,22 @@ main {
     outline-offset: 3px;
 }
 
+/* The only real backdrop blur: it is the one layer content scrolls under. */
 .pa-nav {
     position: sticky;
     z-index: 5;
-    bottom: 0;
+    bottom: calc(env(safe-area-inset-bottom, 0px) + 12px);
     display: flex;
-    min-height: 64px;
     box-sizing: border-box;
-    padding: 4px 4px calc(env(safe-area-inset-bottom, 0px) + 4px);
-    border-top: 1px solid var(--border);
-    background: var(--bg-surface);
+    height: 66px;
+    margin: 0 var(--gutter) calc(env(safe-area-inset-bottom, 0px) + 12px);
+    padding: 5px;
+    border: 1px solid var(--glass-edge);
+    border-radius: 33px;
+    background: rgba(16, 30, 50, 0.72);
+    box-shadow: var(--glass-shine), 0 12px 32px rgba(0, 0, 0, 0.45);
+    -webkit-backdrop-filter: blur(20px);
+    backdrop-filter: blur(20px);
 }
 
 .pa-nav button {
@@ -805,15 +912,15 @@ main {
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    gap: 4px;
+    gap: 2px;
     min-width: 0;
-    min-height: 56px;
     padding: 0 2px;
     border: 0;
+    border-radius: 27px;
     background: transparent;
-    color: var(--text-muted);
+    color: var(--text-secondary);
     font-size: 11px;
-    font-weight: 500;
+    font-weight: 600;
     line-height: 14px;
 }
 
@@ -822,13 +929,14 @@ main {
 }
 
 .pa-nav button[aria-current="page"] {
-    color: var(--accent);
+    background: #FFFFFF;
+    color: var(--on-blue);
 }
 
 .pa-nav .st-badge {
     position: absolute;
-    top: 2px;
-    left: calc(50% + 6px);
+    top: 3px;
+    left: calc(50% + 5px);
     box-sizing: border-box;
     min-width: 18px;
     height: 18px;
@@ -850,7 +958,7 @@ main {
     gap: 12px;
     width: 100%;
     min-height: 56px;
-    padding: 8px 16px;
+    padding: 8px 18px;
     border: 0;
     background: transparent;
     color: var(--text-primary);
@@ -859,7 +967,7 @@ main {
 }
 
 .pa-switch > .bw-icon {
-    color: var(--text-secondary);
+    color: var(--accent-soft);
 }
 
 .pa-switch > span:not(.pa-switch-track) {
@@ -872,28 +980,26 @@ main {
     flex: none;
     align-items: center;
     box-sizing: border-box;
-    width: 48px;
-    height: 28px;
+    width: 50px;
+    height: 30px;
     padding: 3px;
-    border-radius: 14px;
-    background: #2A4060;
+    border-radius: 15px;
+    background: rgba(217, 247, 255, 0.2);
 }
 
 .pa-switch-track::after {
     content: "";
-    width: 22px;
-    height: 22px;
-    border-radius: 11px;
+    width: 24px;
+    height: 24px;
+    border-radius: 12px;
     background: #FFFFFF;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
 }
 
 .pa-switch[aria-pressed="true"] .pa-switch-track {
     justify-content: flex-end;
-    background: var(--accent);
-}
-
-.pa-switch[aria-pressed="true"] .pa-switch-track::after {
-    background: var(--accent-text);
+    background: var(--accent-fill);
+    box-shadow: 0 0 14px rgba(34, 211, 238, 0.5);
 }
 
 .pa-switch.is-turning-on .pa-switch-track::after {
@@ -919,16 +1025,22 @@ main {
     min-width: 0;
     min-height: 52px;
     box-sizing: border-box;
-    padding: 0 12px;
-    border: 1px solid var(--border);
+    padding: 0 14px;
+    border: 1px solid var(--glass-edge);
     border-radius: var(--radius-md);
-    background: var(--bg-raised);
+    background-color: rgba(217, 247, 255, 0.1);
     color: var(--text-primary);
+    font-family: inherit;
     font-size: 16px;
 }
 
 .pa-field::placeholder {
-    color: var(--text-muted);
+    color: var(--text-secondary);
+}
+
+.pa-field option {
+    background: #0B1626;
+    color: #FFFFFF;
 }
 
 .pa-search {
@@ -939,13 +1051,14 @@ main {
 .pa-search .bw-icon {
     position: absolute;
     top: 16px;
-    left: 12px;
+    left: 14px;
     color: var(--text-muted);
     pointer-events: none;
 }
 
 .pa-search .pa-field {
-    padding-left: 40px;
+    padding-left: 42px;
+    border-radius: 26px;
     -webkit-appearance: none;
     appearance: none;
 }
@@ -991,7 +1104,7 @@ select.pa-field {
     appearance: none;
     padding-right: 30px;
     overflow: hidden;
-    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%23AFC4DC' stroke-width='2.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M7 9.5l5-5 5 5M7 14.5l5 5 5-5'/%3E%3C/svg%3E");
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%23CFE6F7' stroke-width='2.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M7 9.5l5-5 5 5M7 14.5l5 5 5-5'/%3E%3C/svg%3E");
     background-position: right 10px center;
     background-repeat: no-repeat;
     text-overflow: ellipsis;
@@ -1026,6 +1139,7 @@ select.pa-field {
 /* --- States --- */
 
 .pa-center {
+    position: relative;
     flex: 1;
     gap: 12px;
     justify-content: center;
@@ -1038,9 +1152,9 @@ select.pa-field {
 }
 
 .pa-center h1 {
-    font-size: 26px;
+    font-size: 28px;
     font-weight: 700;
-    line-height: 32px;
+    line-height: 34px;
 }
 
 .pa-result {
@@ -1048,11 +1162,13 @@ select.pa-field {
     align-items: center;
     justify-content: center;
     align-self: center;
-    width: 72px;
-    height: 72px;
-    border-radius: var(--radius-xl);
-    background: var(--info-bg);
-    color: var(--info-text);
+    width: 76px;
+    height: 76px;
+    border: 1px solid var(--glass-edge);
+    border-radius: 50%;
+    background: var(--glass-raised);
+    box-shadow: var(--glass-depth);
+    color: var(--accent-soft);
 }
 
 .pa-center .pa-btn {
@@ -1061,9 +1177,10 @@ select.pa-field {
 
 .pa-more {
     margin-top: 12px;
-    padding: 0 16px;
+    padding: 0 18px;
+    border: 1px solid var(--glass-edge);
     border-radius: var(--radius-lg);
-    background: var(--bg-surface);
+    background: var(--glass);
 }
 
 .pa-more summary {
@@ -1105,10 +1222,6 @@ select.pa-field {
     outline-offset: 3px;
 }
 
-.pa textarea {
-    font-family: inherit;
-}
-
 a.pa-btn,
 a.st-icon-btn {
     text-decoration: none;
@@ -1122,14 +1235,14 @@ a.st-icon-btn {
     left: var(--gutter);
     max-width: 448px;
     margin: 0 auto;
-    padding: 12px 16px;
-    border-radius: var(--radius-md);
+    padding: 12px 18px;
+    border-radius: 22px;
     background: #FFFFFF;
-    color: #000000;
+    color: #04143A;
     font-size: 15px;
-    font-weight: 500;
+    font-weight: 600;
     line-height: 20px;
-    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.32);
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
     animation: pa-toast-in 240ms var(--ease-out);
 }
 
@@ -1138,8 +1251,8 @@ a.st-icon-btn {
 }
 
 .notification.error {
-    background: var(--danger-bg);
-    color: var(--danger-text);
+    background: var(--blue-strong);
+    color: #FFFFFF;
 }
 
 @keyframes pa-toast-in {
@@ -1204,7 +1317,7 @@ a.st-icon-btn {
 
 button.pa-list-row:not([disabled]):active,
 .pa-switch:active {
-    background: var(--bg-raised);
+    background: rgba(217, 247, 255, 0.12);
     transition-duration: 0ms;
 }
 
@@ -1301,11 +1414,12 @@ button.pa-list-row:not([disabled]):active,
 /* === Staff screens === */
 
 .st-page {
+    position: relative;
     display: flex;
     flex: 1;
     flex-direction: column;
     gap: 12px;
-    padding: calc(var(--app-top-inset, 0px) + 16px) var(--gutter) 24px;
+    padding: calc(var(--app-top-inset, 0px) + 14px) var(--gutter) 24px;
 }
 
 .st-title {
@@ -1346,9 +1460,11 @@ button.pa-list-row:not([disabled]):active,
 }
 
 .st-tile {
-    padding: 12px;
+    padding: 12px 14px;
+    border: 1px solid var(--glass-edge);
     border-radius: var(--radius-md);
-    background: var(--bg-surface);
+    background: var(--glass);
+    box-shadow: var(--glass-shine);
 }
 
 .st-session-time {
@@ -1366,24 +1482,25 @@ button.pa-list-row:not([disabled]):active,
     justify-content: center;
     width: 40px;
     height: 40px;
-    border-radius: var(--radius-md);
-    background: var(--bg-raised);
-    color: var(--text-secondary);
+    border: 1px solid var(--glass-edge);
+    border-radius: 50%;
+    background: var(--glass-raised);
+    color: var(--text-primary);
     font-size: 13px;
     font-weight: 600;
 }
 
 .st-mark.is-absent {
-    background: var(--danger-bg);
+    background: var(--blue-strong);
 }
 
 .st-mark.is-absent .pa-muted {
-    color: var(--danger-text);
+    color: #FFFFFF;
 }
 
 .st-mark.is-absent .st-avatar {
-    background: rgba(0, 0, 0, 0.25);
-    color: var(--danger-text);
+    border-color: rgba(255, 255, 255, 0.5);
+    background: rgba(0, 0, 0, 0.2);
 }
 
 .st-mark-state {
@@ -1400,18 +1517,20 @@ button.pa-list-row:not([disabled]):active,
 }
 
 .st-danger {
-    background: var(--bg-base);
-    color: var(--danger-text);
+    border-color: transparent;
+    background: #FFFFFF;
+    color: var(--on-blue);
 }
 
 .st-danger-soft {
-    background: var(--danger-bg);
-    color: var(--danger-text);
+    border: 2px solid #FFFFFF;
+    background: var(--blue-strong);
+    color: #FFFFFF;
 }
 
 .st-danger-link {
     align-self: center;
-    color: var(--danger-text);
+    color: var(--text-primary);
 }
 
 .st-schedule {
@@ -1419,7 +1538,7 @@ button.pa-list-row:not([disabled]):active,
     flex-direction: column;
     gap: 8px;
     padding-bottom: 12px;
-    border-bottom: 1px solid var(--border);
+    border-bottom: 1px solid var(--glass-line);
 }
 
 .st-textarea {
@@ -1444,10 +1563,10 @@ button.pa-list-row:not([disabled]):active,
     display: inline-flex;
     align-items: center;
     min-height: 44px;
-    padding: 0 12px;
+    padding: 0 14px;
     box-sizing: border-box;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm);
+    border: 1px solid var(--glass-edge);
+    border-radius: 22px;
     background: transparent;
     color: var(--text-secondary);
     font-size: 13px;
@@ -1456,8 +1575,9 @@ button.pa-list-row:not([disabled]):active,
 
 .st-role[aria-pressed="true"],
 .st-role.is-fixed {
-    border-color: var(--text-primary);
-    color: var(--text-primary);
+    border-color: #FFFFFF;
+    background: rgba(217, 247, 255, 0.14);
+    color: #FFFFFF;
 }
 
 .st-add {
