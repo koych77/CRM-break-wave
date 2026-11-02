@@ -115,9 +115,12 @@ async function submitRegistration() {
 document.addEventListener('click', event => {
     const target = event.target.closest('[data-reg]');
     if (!target || target.disabled) return;
-    const repaint = target.dataset.reg !== 'submit';
+    if (target.dataset.reg === 'submit') {
+        runControl(target, REGISTRATION_ACTIONS.submit);
+        return;
+    }
     REGISTRATION_ACTIONS[target.dataset.reg]?.(target);
-    if (repaint) paintRegistration();
+    paintRegistration();
 });
 
 document.addEventListener('input', event => {

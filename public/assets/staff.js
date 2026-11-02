@@ -34,7 +34,8 @@ const staff = {
     session: null,
     marks: {},
     confirmCancel: false,
-    students: [],
+    students: null,
+    studentCache: {},
     query: '',
     student: null,
     form: null,
@@ -77,27 +78,30 @@ async function staffOpenTab(tab) {
         money: staffLoadMoney,
         team: staffLoadTeam,
     };
-    const loaded = {today: staff.day, students: staff.students.length, requests: staff.requests, money: staff.money, team: staff.team};
-    // A visited tab opens at once and refreshes behind the scenes, as native apps do.
-    if (loaded[tab]) {
-        staffPaint();
-        window.scrollTo(0, 0);
-        try {
-            await loaders[tab]();
-            if (staff.tab === tab && staff.screen === 'root' && !document.activeElement?.matches('input, select, textarea')) staffPaint();
-        } catch (error) {
-            showNotification(error.message, 'error');
-        }
-        return;
-    }
-    await staffLoad(loaders[tab]);
+    // The tab opens at once, with a spinner on the first visit, and its data arrives behind the scenes.
+    staffPaint();
     window.scrollTo(0, 0);
+    try {
+        await loaders[tab]();
+        if (staff.tab === tab && staff.screen === 'root' && !document.activeElement?.matches('input, select, textarea')) staffPaint();
+    } catch (error) {
+        if (staff.tab !== tab || staff.screen !== 'root') return;
+        if (staffTabData(tab)) showNotification(error.message, 'error');
+        else renderScreenState(staffRoot(), error.message, {retry: 'staffOpenTab(staff.tab)'});
+    }
+}
+
+function staffTabData(tab) {
+    return {today: staff.day, students: staff.students, requests: staff.requests, money: staff.money, team: staff.team}[tab];
 }
 
 async function staffLoadDay() {
-    staff.day = await apiPost('/api/staff/day', staff.date ? {date: staff.date} : {});
-    staff.date = staff.day.date;
-    if (staff.requests === null) await staffLoadRequests();
+    const [day] = await Promise.all([
+        apiPost('/api/staff/day', staff.date ? {date: staff.date} : {}),
+        staff.requests === null ? staffLoadRequests() : null,
+    ]);
+    staff.day = day;
+    staff.date = day.date;
 }
 
 async function staffLoadStudents() {
@@ -171,13 +175,14 @@ function staffPaint() {
         team: staffTeamHtml,
     };
     const scrollTop = window.scrollY;
+    const page = staffTabData(staff.tab) ? tabs[staff.tab]() : `<div class="st-loading">${IOS_SPINNER}</div>`;
     const body = staff.screen === 'root'
-        ? `<div class="st-page">${tabs[staff.tab]()}</div>${staffNav()}`
+        ? `<div class="st-page">${page}</div>${staffNav()}`
         : screens[staff.screen]();
     const depths = {root: 0, student: 1, attendance: 1, form: 2};
     const key = staff.screen === 'root' ? `tab:${staff.tab}` : staff.screen;
     paintScreen(staffRoot(), `<div class="pa">${body}</div>`, key, depths[staff.screen]);
-    window.scrollTo(0, scrollTop);
+    if (window.scrollY !== scrollTop) window.scrollTo(0, scrollTop);
 }
 
 function staffBar(title, subtitle = '') {
@@ -312,6 +317,7 @@ function staffStudentsHtml() {
 
 function staffStudentHtml() {
     const item = staff.student;
+    if (item.loading) return `${staffBar(item.name)}<div class="st-loading">${IOS_SPINNER}</div>`;
     const invoiceLabels = {
         paid: ['Оплачено', 'pa-ok'],
         pending: [`До ${parentShortDate(item.invoice.due_date)}`, 'pa-warn'],
@@ -643,13 +649,31 @@ function staffOpenSession(key) {
     window.scrollTo(0, 0);
 }
 
-async function staffOpenStudent(id) {
-    await staffRun(async () => {
-        if (!staff.resources.locations.length && !staff.requests) await staffLoadRequests();
-        staff.student = (await apiPost(`/api/staff/students/${id}`)).student;
-        staff.screen = 'student';
-    });
+// The screen slides in at once: from the last known card, or with a spinner on the first visit.
+async function staffOpenStudent(rawId) {
+    const id = Number(rawId);
+    const listed = staff.students?.find(item => item.id === id);
+    staff.student = staff.studentCache[id] || {id, name: listed?.name || '', loading: true};
+    staff.screen = 'student';
+    staffPaint();
     window.scrollTo(0, 0);
+    try {
+        const [detail] = await Promise.all([
+            apiPost(`/api/staff/students/${id}`),
+            staff.requests ? null : staffLoadRequests(),
+        ]);
+        staff.studentCache[id] = detail.student;
+        if (staff.screen === 'student' && staff.student.id === id) {
+            staff.student = detail.student;
+            staffPaint();
+        }
+    } catch (error) {
+        showNotification(error.message, 'error');
+        if (staff.screen === 'student' && staff.student.id === id && staff.student.loading) {
+            staff.screen = 'root';
+            staffPaint();
+        }
+    }
 }
 
 function staffStartForm(student) {
@@ -703,7 +727,9 @@ const STAFF_REVIEW_PATHS = {
 };
 
 const STAFF_ACTIONS = {
-    tab: target => staffOpenTab(target.dataset.value),
+    tab: target => {
+        staffOpenTab(target.dataset.value);
+    },
     back: () => {
         if (staff.screen === 'form' && staff.form.id) {
             staff.screen = 'student';
@@ -716,7 +742,7 @@ const STAFF_ACTIONS = {
         const next = parentDate(staff.date);
         next.setDate(next.getDate() + Number(target.dataset.value));
         staff.date = `${next.getFullYear()}-${String(next.getMonth() + 1).padStart(2, '0')}-${String(next.getDate()).padStart(2, '0')}`;
-        staffLoad(staffLoadDay);
+        return staffLoad(staffLoadDay);
     },
     'open-session': target => staffOpenSession(target.dataset.value),
     'toggle-mark': target => {
@@ -746,7 +772,9 @@ const STAFF_ACTIONS = {
         staff.screen = 'root';
         showNotification('Посещаемость сохранена');
     }, {reload: staffLoadDay}),
-    'open-student': target => staffOpenStudent(target.dataset.value),
+    'open-student': target => {
+        staffOpenStudent(target.dataset.value);
+    },
     'new-student': () => staffRun(async () => {
         if (!staff.requests) await staffLoadRequests();
         staffStartForm(null);
@@ -780,7 +808,7 @@ const STAFF_ACTIONS = {
     },
     approve: target => {
         const {kind, value: id} = target.dataset;
-        staffRun(async () => {
+        return staffRun(async () => {
             await apiPost(STAFF_REVIEW_PATHS[kind](id), {decision: 'approve', ...staffCollectReview(target)});
             showNotification('Подтверждено');
         }, {reload: staffLoadRequests});
@@ -800,7 +828,7 @@ const STAFF_ACTIONS = {
             return;
         }
         const {kind, value: id} = target.dataset;
-        staffRun(async () => {
+        return staffRun(async () => {
             await apiPost(STAFF_REVIEW_PATHS[kind](id), {decision: 'reject', reason: staff.reason});
             staff.rejecting = null;
             showNotification('Отказ отправлен');
@@ -808,7 +836,7 @@ const STAFF_ACTIONS = {
     },
     'load-receipt': target => {
         const id = target.dataset.value;
-        staffRun(async () => {
+        return staffRun(async () => {
             const response = await fetch(`${API}/api/admin/payments/${id}/receipt`, {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
@@ -831,7 +859,7 @@ const STAFF_ACTIONS = {
         const coach = staff.team.coaches.find(item => item.id === Number(target.dataset.value));
         const roles = {is_admin: coach.is_admin, is_manager: coach.is_manager};
         roles[target.dataset.role] = !roles[target.dataset.role];
-        staffRun(() => apiPost(`/api/admin/coaches/${coach.id}/roles`, roles), {reload: staffLoadTeam});
+        return staffRun(() => apiPost(`/api/admin/coaches/${coach.id}/roles`, roles), {reload: staffLoadTeam});
     },
     'copy-link': async () => {
         try {
@@ -845,8 +873,8 @@ const STAFF_ACTIONS = {
     'add-resource': target => {
         const {kind} = target.dataset;
         const input = document.querySelector(`[data-new-resource="${kind}"]`);
-        if (!input.value.trim()) return;
-        staffRun(() => apiPost(`/api/admin/${kind}/create`, {name: input.value}), {reload: staffAfterResourceChange});
+        if (!input.value.trim()) return undefined;
+        return staffRun(() => apiPost(`/api/admin/${kind}/create`, {name: input.value}), {reload: staffAfterResourceChange});
     },
     'remove-resource': target => staffRun(
         () => apiPost(`/api/admin/${target.dataset.kind}/${target.dataset.value}/delete`),
@@ -872,7 +900,8 @@ function tgConfirm(message, onYes) {
 document.addEventListener('click', event => {
     const target = event.target.closest('[data-st]');
     if (!target || target.disabled) return;
-    STAFF_ACTIONS[target.dataset.st]?.(target);
+    const action = STAFF_ACTIONS[target.dataset.st];
+    if (action) runControl(target, action);
 });
 
 document.addEventListener('input', event => {

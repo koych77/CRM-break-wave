@@ -91,7 +91,8 @@ function renderParentContext() {
     const html = `<div class="pa">${(student ? views[parentUi.view] : renderParentEmpty)(student)}</div>`;
     const atHome = parentUi.view === 'home';
     paintScreen(container, html, atHome ? `home:${parentUi.studentId}` : parentUi.view, atHome ? 0 : 1);
-    window.scrollTo(0, atHome ? scrollTop : 0);
+    const nextScroll = atHome ? scrollTop : 0;
+    if (window.scrollY !== nextScroll) window.scrollTo(0, nextScroll);
 }
 
 function parentRegistrationCards() {
@@ -544,7 +545,7 @@ document.addEventListener('click', event => {
     const target = event.target.closest('[data-pa]');
     if (!target || target.disabled) return;
     const action = PARENT_ACTIONS[target.dataset.pa];
-    if (action) action(target);
+    if (action) runControl(target, action);
 });
 
 document.addEventListener('change', event => {

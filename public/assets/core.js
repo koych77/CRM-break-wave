@@ -28,11 +28,13 @@ async function apiPost(path, payload = {}) {
 /* --- iOS-style motion --- */
 
 const IOS_EASE = 'cubic-bezier(0.32, 0.72, 0, 1)';
-const IOS_PUSH_MS = 380;
+const IOS_PUSH_MS = 320;
 const IOS_SPINNER = `<svg class="pa-spinner" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true">${
     [...Array(8).keys()].map(step => `<path d="M12 3v4.2" opacity="${(step + 1) / 8}" transform="rotate(${step * 45} 12 12)"></path>`).join('')
 }</svg>`;
 let currentScreen = null;
+let currentHtml = null;
+let pendingKey = null;
 
 function motionAllowed() {
     return !window.matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -106,11 +108,15 @@ function slideScreens(container, oldScreen, scrollTop, isPush) {
 // Paints a screen. Depth sets the direction: deeper slides in from the right, shallower goes back.
 function paintScreen(container, html, key, depth) {
     const previous = currentScreen;
+    // Unchanged content keeps its DOM, so a background refresh never interrupts a tap or a scroll.
+    if (previous?.key === key && currentHtml === html) return;
+    currentHtml = html;
     const oldScreen = container.firstElementChild;
     const scrollTop = window.scrollY;
     const before = readControls(container);
     container.innerHTML = html;
     currentScreen = {key, depth};
+    markPending(container);
     if (!motionAllowed()) return;
     if (previous?.key === key) {
         animateControls(container, before);
@@ -120,6 +126,36 @@ function paintScreen(container, html, key, depth) {
         if (previous) animateControls(container, before);
     } else if (oldScreen) {
         slideScreens(container, oldScreen, scrollTop, depth > previous.depth);
+    }
+}
+
+function controlKey(control) {
+    const {st, pa, reg, value, kind, id, child, row} = control.dataset;
+    return [st, pa, reg, value, kind, id, child, row].join('|');
+}
+
+function markPending(root) {
+    if (!pendingKey) return;
+    root.querySelectorAll('[data-st], [data-pa], [data-reg]').forEach(control => {
+        if (controlKey(control) === pendingKey) control.classList.add('is-pending');
+    });
+}
+
+function clearPending() {
+    pendingKey = null;
+    document.querySelectorAll('.is-pending').forEach(control => control.classList.remove('is-pending'));
+}
+
+// Shows a tapped control as busy until its request ends and ignores repeated taps on it.
+function runControl(control, action) {
+    if (pendingKey === controlKey(control)) return;
+    pendingKey = controlKey(control);
+    const result = action(control);
+    if (result?.then) {
+        markPending(document);
+        result.finally(clearPending);
+    } else {
+        clearPending();
     }
 }
 
@@ -162,6 +198,7 @@ document.addEventListener('touchstart', () => {}, {passive: true});
 
 function renderScreenState(container, message, {retry, loading} = {}) {
     currentScreen = null;
+    currentHtml = null;
     container.innerHTML = `
         <div class="pa">
             <div class="pa-stack pa-center pa-state" style="gap: 12px">
