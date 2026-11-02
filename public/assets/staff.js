@@ -1,30 +1,5 @@
 /* === Coach and administrator screens === */
 
-// Tab icons: "shape" fills on the open tab, "lines" stay as strokes, "marks" are cut out of the shape.
-const STAFF_ICONS = {
-    today: {
-        shape: 'M5.5 5h13A2.5 2.5 0 0 1 21 7.5v11a2.5 2.5 0 0 1-2.5 2.5h-13A2.5 2.5 0 0 1 3 18.5v-11A2.5 2.5 0 0 1 5.5 5z',
-        lines: 'M8 2.8v3.4M16 2.8v3.4',
-        marks: 'M3 10h18M8 14.5h.01M12 14.5h.01M16 14.5h.01',
-    },
-    students: {
-        shape: 'M9.5 11a3.75 3.75 0 1 0 0-7.5 3.75 3.75 0 0 0 0 7.5zM2.5 20.5c0-4 3.1-6.5 7-6.5s7 2.5 7 6.5z',
-        lines: 'M15.5 3.8a3.7 3.7 0 0 1 0 7M18.5 14.5c1.9.8 3 2.8 3 6',
-    },
-    requests: {
-        shape: 'M12 3.5c5 0 9 3.3 9 7.5s-4 7.5-9 7.5c-1 0-2-.1-2.9-.4l-4.6 2.4 1-3.9C3.9 15.1 3 13.2 3 11c0-4.2 4-7.5 9-7.5z',
-        marks: 'M8 11h.01M12 11h.01M16 11h.01',
-    },
-    money: {
-        shape: 'M5 5h14a2.5 2.5 0 0 1 2.5 2.5v9A2.5 2.5 0 0 1 19 19H5a2.5 2.5 0 0 1-2.5-2.5v-9A2.5 2.5 0 0 1 5 5z',
-        marks: 'M2.5 10h19M6 15h4',
-    },
-    team: {
-        shape: 'M12 11.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7zM5.5 20.5c0-3.7 2.9-6 6.5-6s6.5 2.3 6.5 6z',
-        lines: 'M5.8 5.3a3 3 0 0 0 0 5.6M2.3 19.5c0-2.6 1-4.5 2.8-5.4M18.2 5.3a3 3 0 0 1 0 5.6M21.7 19.5c0-2.6-1-4.5-2.8-5.4',
-    },
-};
-
 const staff = {
     me: null,
     tab: 'today',
@@ -37,10 +12,15 @@ const staff = {
     students: null,
     studentCache: {},
     query: '',
+    studentFilter: 'all',
     student: null,
     form: null,
+    formDirty: false,
     resources: {locations: [], groups: [], coaches: []},
     requests: null,
+    requestFilter: 'all',
+    request: null,
+    review: {},
     rejecting: null,
     reason: '',
     receipts: {},
@@ -131,30 +111,19 @@ function staffRequestCount() {
     return data.registrations.length + data.makeups.length + data.schedule_changes.length + data.payments.length;
 }
 
-function staffTabIcon(id, active) {
-    const {shape, lines = '', marks = ''} = STAFF_ICONS[id];
-    const markWidth = active ? 2 : 1.8;
-    return `
-        <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <path d="${shape}" ${active ? 'fill="currentColor"' : ''}></path>
-            ${lines ? `<path d="${lines}"></path>` : ''}
-            ${marks ? `<path d="${marks}" stroke-width="${markWidth}" ${active ? 'stroke="#0b1829"' : ''}></path>` : ''}
-        </svg>`;
-}
-
 function staffNav() {
     const count = staffRequestCount();
     const items = [
-        ['today', 'Сегодня'],
-        ['students', 'Ученики'],
-        ['requests', 'Заявки'],
+        ['today', 'calendar', 'Сегодня'],
+        ['students', 'users', 'Ученики'],
+        ['requests', 'clipboard', 'Заявки'],
     ];
-    if (staff.me.is_admin) items.push(['money', 'Деньги'], ['team', 'Команда']);
+    if (staff.me.is_admin) items.push(['money', 'wallet', 'Деньги'], ['team', 'settings', 'Команда']);
     return `
-        <nav class="st-nav" aria-label="Разделы">
-            ${items.map(([id, label]) => `
+        <nav class="pa-nav" aria-label="Разделы">
+            ${items.map(([id, icon, label]) => `
                 <button type="button" data-st="tab" data-value="${id}" ${staff.tab === id ? 'aria-current="page"' : ''}>
-                    ${staffTabIcon(id, staff.tab === id)}
+                    ${bwIcon(icon)}
                     ${id === 'requests' && count ? `<span class="st-badge" aria-label="Новых: ${count}">${count}</span>` : ''}
                     <span>${label}</span>
                 </button>`).join('')}
@@ -166,6 +135,7 @@ function staffPaint() {
         attendance: staffAttendanceHtml,
         student: staffStudentHtml,
         form: staffFormHtml,
+        request: staffRequestHtml,
     };
     const tabs = {
         today: staffTodayHtml,
@@ -179,21 +149,38 @@ function staffPaint() {
     const body = staff.screen === 'root'
         ? `<div class="st-page">${page}</div>${staffNav()}`
         : screens[staff.screen]();
-    const depths = {root: 0, student: 1, attendance: 1, form: 2};
+    const depths = {root: 0, student: 1, attendance: 1, request: 1, form: 2};
     const key = staff.screen === 'root' ? `tab:${staff.tab}` : staff.screen;
     paintScreen(staffRoot(), `<div class="pa">${body}</div>`, key, depths[staff.screen]);
     if (window.scrollY !== scrollTop) window.scrollTo(0, scrollTop);
 }
 
-function staffBar(title, subtitle = '') {
+function staffBar(title, subtitle = '', extra = '') {
     return `
         <div class="pa-bar">
-            <button type="button" class="pa-back" data-st="back" aria-label="Назад">${PARENT_BACK_ICON}</button>
+            <button type="button" class="pa-back" data-st="back" data-back aria-label="Назад">${bwIcon('chevron-left', 26)}</button>
             <div>
                 <h1>${escapeHtml(title)}</h1>
                 ${subtitle ? `<div class="pa-muted pa-small">${escapeHtml(subtitle)}</div>` : ''}
             </div>
+            ${extra}
         </div>`;
+}
+
+function staffHeading(title, subtitle = '', extra = '') {
+    return `
+        <div class="st-title">
+            <div>
+                <div class="pa-brand">Break Wave</div>
+                <h1>${escapeHtml(title)}</h1>
+                ${subtitle ? `<div class="pa-muted">${escapeHtml(subtitle)}</div>` : ''}
+            </div>
+            ${extra}
+        </div>`;
+}
+
+function staffBadge(text, tone) {
+    return `<span class="pa-badge ${tone}">${escapeHtml(text)}</span>`;
 }
 
 /* --- Today --- */
@@ -208,41 +195,48 @@ function staffPlace(session) {
     return [session.group ? `${session.group} группа` : null, session.location].filter(Boolean).join(', ') || 'Без группы и зала';
 }
 
+function staffSessionBadge(session, isFuture) {
+    const absent = session.roster.filter(item => item.status === 'absent').length;
+    if (session.cancelled) return staffBadge('Отменена', 'is-danger');
+    if (session.saved) return staffBadge(`Есть ${session.roster.length - absent}, нет ${absent}`, 'is-ok');
+    if (isFuture) return staffBadge('Впереди', 'is-neutral');
+    return staffBadge('Отметить', 'is-warn');
+}
+
 function staffTodayHtml() {
     const {sessions, date, today} = staff.day;
-    const cards = sessions.map(session => {
-        const absent = session.roster.filter(item => item.status === 'absent').length;
-        let status = '<span class="pa-warn pa-small">Не отмечена</span>';
-        if (session.cancelled) status = '<span class="pa-danger pa-small">Отменена</span>';
-        else if (session.saved) status = `<span class="pa-ok pa-small">Есть ${session.roster.length - absent}, нет ${absent}</span>`;
-        else if (date > today) status = '<span class="pa-muted pa-small">Впереди</span>';
-        const label = session.saved ? 'Исправить отметку' : 'Отметить посещаемость';
-        const action = session.cancelled || date > today
-            ? ''
-            : `<button type="button" class="pa-btn ${session.saved ? '' : 'is-primary'}" data-st="open-session" data-value="${escapeHtml(session.key)}">${label}</button>`;
-        return `
-            <section class="pa-card">
-                <div class="pa-row">
-                    <div class="pa-big">${escapeHtml(session.time)}</div>
-                    ${status}
-                </div>
-                <div class="pa-muted">${escapeHtml(staffPlace(session))}, учеников: ${session.roster.length}</div>
-                ${action}
-                ${date > today && !session.cancelled ? `<button type="button" class="pa-btn" data-st="open-session" data-value="${escapeHtml(session.key)}">Состав и отмена</button>` : ''}
-            </section>`;
+    const isFuture = date > today;
+    const active = sessions.filter(session => !session.cancelled);
+    const unmarked = active.filter(session => !session.saved).length;
+    const pupils = active.reduce((sum, session) => sum + session.roster.length, 0);
+    const rows = sessions.map(session => {
+        const inner = `
+            <span class="st-session-time">${escapeHtml(session.time)}</span>
+            <span class="pa-stack">
+                <span class="pa-strong">${escapeHtml(session.group || 'Тренировка')}</span>
+                <span class="pa-muted pa-small">${escapeHtml(session.location || 'Без зала')} · учеников: ${session.roster.length}</span>
+            </span>
+            <span class="pa-list-value">${staffSessionBadge(session, isFuture)}</span>`;
+        return session.cancelled
+            ? `<div class="pa-list-row">${inner}</div>`
+            : `<button type="button" class="pa-list-row" data-st="open-session" data-value="${escapeHtml(session.key)}">${inner}${bwIcon('chevron-right', 20)}</button>`;
     }).join('');
+    const arrows = `
+        <div class="st-arrows">
+            <button type="button" class="st-icon-btn" data-st="shift-day" data-value="-1" aria-label="Предыдущий день">${bwIcon('chevron-left', 24)}</button>
+            <button type="button" class="st-icon-btn" data-st="shift-day" data-value="1" aria-label="Следующий день">${bwIcon('chevron-right', 24)}</button>
+        </div>`;
     return `
-        <div class="st-title">
-            <div>
-                <h1>${escapeHtml(staffDayTitle())}</h1>
-                <div class="pa-muted">${escapeHtml(parentLongDate(date))}</div>
+        ${staffHeading(staffDayTitle(), parentLongDate(date), arrows)}
+        ${sessions.length ? `
+            <div class="st-tiles">
+                <div class="st-tile"><div class="pa-big">${active.length}</div><div class="pa-label">Тренировки</div></div>
+                <div class="st-tile"><div class="pa-big">${pupils}</div><div class="pa-label">Учеников</div></div>
+                <div class="st-tile"><div class="pa-big ${unmarked && !isFuture ? 'pa-warn' : ''}">${isFuture ? '—' : unmarked}</div><div class="pa-label">Не отмечено</div></div>
             </div>
-            <div class="st-arrows">
-                <button type="button" class="pa-back" data-st="shift-day" data-value="-1" aria-label="Предыдущий день">${PARENT_BACK_ICON}</button>
-                <button type="button" class="pa-back st-flip" data-st="shift-day" data-value="1" aria-label="Следующий день">${PARENT_BACK_ICON}</button>
-            </div>
-        </div>
-        ${cards || '<div class="st-empty">В этот день тренировок нет</div>'}`;
+            <div class="pa-list">${rows}</div>`
+            : `<div class="st-empty">${bwIcon('calendar', 32)}<span>На этот день тренировок нет</span>
+                ${date === today ? '' : '<button type="button" class="pa-btn" data-st="go-today">К сегодняшнему дню</button>'}</div>`}`;
 }
 
 function staffAttendanceHtml() {
@@ -252,19 +246,20 @@ function staffAttendanceHtml() {
     const rows = session.roster.map(item => {
         const absent = staff.marks[item.student_id] === 'absent';
         return `
-            <button type="button" class="pa-choice st-mark ${absent ? 'is-absent' : ''}" data-st="toggle-mark" data-value="${item.student_id}" aria-pressed="${absent}" ${future ? 'disabled' : ''}>
+            <button type="button" class="pa-list-row st-mark ${absent ? 'is-absent' : ''}" data-st="toggle-mark" data-value="${item.student_id}" aria-pressed="${absent}" ${future ? 'disabled' : ''}>
+                <span class="st-avatar">${escapeHtml(bwInitials(item.name))}</span>
                 <span class="pa-stack">
                     <span class="pa-strong">${escapeHtml(item.name)}</span>
                     ${item.nickname ? `<span class="pa-muted pa-small">${escapeHtml(item.nickname)}</span>` : ''}
                     ${item.tag ? `<span class="pa-muted pa-small">${escapeHtml(item.tag)}</span>` : ''}
                 </span>
-                ${future ? '' : `<span class="${absent ? 'pa-warn' : 'pa-ok'}">${absent ? 'Нет' : 'Есть'}</span>`}
+                ${future ? '' : `<span class="pa-list-value st-mark-state ${absent ? 'pa-danger' : 'pa-ok'}">${bwIcon(absent ? 'x' : 'check', 20)}${absent ? 'Нет' : 'Есть'}</span>`}
             </button>`;
     }).join('');
     const cancel = staff.confirmCancel
-        ? `<section class="pa-card">
-                <div class="pa-mid">Отменить тренировку?</div>
-                <div class="pa-muted">Занятие не спишется. Все ученики получат отработку, а родители — уведомление.</div>
+        ? `<section class="pa-panel is-danger">
+                <div class="pa-panel-title">Отменить тренировку?</div>
+                <div>Занятие не спишется. Все ученики получат отработку, а родители — уведомление.</div>
                 <div class="pa-two">
                     <button type="button" class="pa-btn st-danger" data-st="cancel-session" ${staff.busy ? 'disabled' : ''}>Отменить</button>
                     <button type="button" class="pa-btn" data-st="keep-session">Не отменять</button>
@@ -272,9 +267,14 @@ function staffAttendanceHtml() {
            </section>`
         : '<button type="button" class="pa-link st-danger-link" data-st="ask-cancel">Отменить тренировку</button>';
     return `
-        ${staffBar(`${session.time}, ${session.group || 'Тренировка'}`, future ? parentLongDate(staff.day.date) : 'Нажмите на тех, кого нет')}
+        ${staffBar(`${session.time}, ${session.group || 'Тренировка'}`, parentLongDate(staff.day.date))}
         <div class="pa-body">
-            ${rows}
+            ${future ? '' : `
+                <div class="pa-row">
+                    <span class="pa-muted">Нажмите на ученика, чтобы отметить отсутствие</span>
+                    <span class="pa-strong">Нет: ${absentCount} из ${session.roster.length}</span>
+                </div>`}
+            ${rows ? `<div class="pa-list">${rows}</div>` : '<div class="st-empty">В этой тренировке нет учеников</div>'}
             ${cancel}
         </div>
         ${future ? '' : `<div class="pa-foot">
@@ -286,34 +286,33 @@ function staffAttendanceHtml() {
 
 function staffStudentRows() {
     const query = staff.query.trim().toLowerCase();
-    const rows = staff.students.filter(item => !query
-        || [item.name, item.nickname, item.parent_name, item.phone, item.parent_phone].some(value => String(value || '').toLowerCase().includes(query)));
-    if (!rows.length) return '<div class="st-empty">Никого не нашли</div>';
-    const flags = {debt: ['Долг', 'pa-danger'], low: ['Мало занятий', 'pa-warn']};
-    return rows.map(item => {
-        const flag = flags[item.flag];
-        return `
-            <button type="button" class="pa-choice" data-st="open-student" data-value="${item.id}">
-                <span class="pa-stack">
-                    <span class="pa-strong">${escapeHtml(item.name)}</span>
-                    ${item.nickname ? `<span class="pa-muted pa-small">${escapeHtml(item.nickname)}</span>` : ''}
-                    <span class="pa-muted pa-small">${item.group ? `${escapeHtml(item.group)}, ` : ''}занятий: ${item.lessons_remaining}</span>
-                </span>
-                ${flag ? `<span class="${flag[1]} pa-small">${flag[0]}</span>` : ''}
-            </button>`;
-    }).join('');
+    const rows = staff.students.filter(item => (staff.studentFilter === 'all' || item.flag === staff.studentFilter)
+        && (!query || [item.name, item.nickname, item.parent_name, item.phone, item.parent_phone].some(value => String(value || '').toLowerCase().includes(query))));
+    if (!staff.students.length) return `<div class="st-empty">${bwIcon('users', 32)}<span>Пока нет учеников</span></div>`;
+    if (!rows.length) return `<div class="st-empty">${query ? 'По запросу ничего не найдено' : 'Учеников с такой меткой нет'}</div>`;
+    const flags = {debt: staffBadge('Долг', 'is-danger'), low: staffBadge('Мало занятий', 'is-warn')};
+    return `<div class="pa-list">${rows.map(item => `
+        <button type="button" class="pa-list-row" data-st="open-student" data-value="${item.id}">
+            <span class="st-avatar">${escapeHtml(bwInitials(item.name))}</span>
+            <span class="pa-stack">
+                <span class="pa-strong">${escapeHtml(item.name)}</span>
+                <span class="pa-muted pa-small">${item.nickname ? `${escapeHtml(item.nickname)} · ` : ''}${item.group ? `${escapeHtml(item.group)}, ` : ''}занятий: ${item.lessons_remaining}</span>
+            </span>
+            <span class="pa-list-value">${flags[item.flag] || ''}</span>
+        </button>`).join('')}</div>`;
 }
 
 function staffStudentsHtml() {
+    const filters = [['all', 'Все'], ['debt', 'Долг'], ['low', 'Мало занятий']];
     return `
-        <div class="st-title">
-            <h1>Ученики</h1>
-            <button type="button" class="pa-link" data-st="new-student">Добавить</button>
-        </div>
-        <label class="pa-stack">
-            <span class="pa-label">Поиск по имени, никнейму или телефону</span>
-            <input class="pa-field" type="search" data-st-input="query" value="${escapeHtml(staff.query)}">
+        ${staffHeading('Ученики', '', `<button type="button" class="st-icon-btn is-accent" data-st="new-student" aria-label="Добавить ученика">${bwIcon('plus', 24)}</button>`)}
+        <label class="pa-search">
+            ${bwIcon('search', 20)}
+            <input class="pa-field" type="search" aria-label="Поиск по имени, никнейму или телефону" placeholder="Имя, никнейм или телефон" data-st-input="query" value="${escapeHtml(staff.query)}">
         </label>
+        <div class="pa-pills">
+            ${filters.map(([id, label]) => `<button type="button" data-st="student-filter" data-value="${id}" aria-pressed="${staff.studentFilter === id}">${label}</button>`).join('')}
+        </div>
         <div class="pa-group" id="st-student-list">${staffStudentRows()}</div>`;
 }
 
@@ -321,66 +320,87 @@ function staffStudentHtml() {
     const item = staff.student;
     if (item.loading) return `${staffBar(item.name)}<div class="st-loading">${IOS_SPINNER}</div>`;
     const invoiceLabels = item.invoice ? {
-        paid: ['Оплачено', 'pa-ok'],
-        pending: [`До ${parentShortDate(item.invoice.due_date)}`, 'pa-warn'],
-        overdue: ['Долг', 'pa-danger'],
-        reported: ['На проверке', 'pa-warn'],
-        awaiting_receipt: ['Ждём чек', 'pa-warn'],
-        rejected: ['Отклонено', 'pa-danger'],
-        skipped: ['Не занимался', 'pa-muted'],
+        paid: ['Оплачено', 'is-ok'],
+        pending: [`До ${parentShortDate(item.invoice.due_date)}`, 'is-warn'],
+        overdue: ['Долг', 'is-danger'],
+        reported: ['На проверке', 'is-warn'],
+        awaiting_receipt: ['Ждём чек', 'is-warn'],
+        rejected: ['Отклонено', 'is-danger'],
+        skipped: ['Не занимался', 'is-neutral'],
     } : {};
-    const invoice = invoiceLabels[item.invoice?.status] || ['', ''];
-    const historyLabels = {present: ['Был', 'pa-ok'], absent: ['Не был', 'pa-warn']};
+    const invoice = invoiceLabels[item.invoice?.status] || ['', 'is-neutral'];
+    const isPaid = item.invoice?.status === 'paid';
+    const historyLabels = {present: ['Был', 'is-ok'], absent: ['Не был', 'is-warn']};
     const history = item.history.map(row => {
-        const [label, css] = row.source === 'coach_cancelled' ? ['Отмена', 'pa-muted'] : historyLabels[row.status];
-        return `<div class="pa-row"><span>${escapeHtml(parentShortDate(row.date))}${row.source === 'makeup' ? ', отработка' : ''}</span><span class="${css}">${label}</span></div>`;
+        const [label, tone] = row.source === 'coach_cancelled' ? ['Отмена', 'is-neutral'] : historyLabels[row.status];
+        return `<div class="pa-list-row"><span>${escapeHtml(parentShortDate(row.date))}${row.source === 'makeup' ? ', отработка' : ''}</span><span class="pa-list-value">${staffBadge(label, tone)}</span></div>`;
     }).join('');
     const schedule = item.schedule.map(row => `
-        <div class="pa-row"><span>${PARENT_WEEKDAYS[row.weekday]}</span><span class="pa-muted">${escapeHtml(row.time)}</span></div>`).join('');
+        <div class="pa-list-row"><span>${PARENT_WEEKDAYS[row.weekday]}</span><span class="pa-list-value pa-strong">${escapeHtml(row.time)}</span></div>`).join('');
+    const percent = item.lessons_count ? Math.max(0, Math.min(100, Math.round((item.lessons_remaining / item.lessons_count) * 100))) : 0;
+    const edit = `<button type="button" class="st-icon-btn" data-st="edit-student" aria-label="Изменить">${bwIcon('edit', 22)}</button>`;
+    const facts = [
+        item.nickname ? ['Никнейм', item.nickname] : null,
+        item.birthday ? ['Дата рождения', parentBirthday(item.birthday)] : null,
+    ].filter(Boolean);
     return `
-        ${staffBar(item.name)}
+        ${staffBar(item.name, item.nickname || '', edit)}
         <div class="pa-body">
-            ${item.nickname || item.birthday ? `<section class="pa-card">
-                ${item.nickname ? `<div class="pa-row"><span class="pa-muted">Никнейм</span><span>${escapeHtml(item.nickname)}</span></div>` : ''}
-                ${item.birthday ? `<div class="pa-row"><span class="pa-muted">Дата рождения</span><span>${escapeHtml(parentBirthday(item.birthday))}</span></div>` : ''}
-            </section>` : ''}
-            <section class="pa-card">
-                <div class="pa-row"><span class="pa-muted">Осталось занятий</span><span class="pa-strong">${item.lessons_remaining} из ${item.lessons_count}</span></div>
-                <div class="pa-row"><span class="pa-muted">Отработки</span><span>${item.makeups}</span></div>
-                ${item.lessons_over ? `<div class="pa-warn">Сверх абонемента: ${item.lessons_over}</div>` : ''}
-                ${item.invoice ? `<div class="pa-row"><span class="pa-muted">Оплата за ${escapeHtml(PARENT_MONTHS_NOMINATIVE[parentDate(item.invoice.due_date).getMonth()].toLowerCase())}, ${item.invoice.amount} Br</span><span class="${invoice[1]}">${invoice[0]}</span></div>` : '<div class="pa-muted">В этом месяце занятий нет</div>'}
-            </section>
-            <section class="pa-card">
-                <div class="pa-label">Расписание</div>
-                ${schedule || '<div>Не назначено</div>'}
-            </section>
-            <section class="pa-card">
-                <div>
-                    <div class="pa-label">Родитель</div>
-                    <div class="pa-mid">${escapeHtml(item.parent_name || 'Не привязан')}</div>
-                    ${item.parent_phone ? `<div class="pa-muted">${escapeHtml(item.parent_phone)}</div>` : ''}
-                </div>
-                ${item.parent_phone ? `<a class="pa-btn" href="tel:${escapeHtml(item.parent_phone.replace(/[^+\d]/g, ''))}">Позвонить</a>` : ''}
-            </section>
-            ${item.notes ? `<section class="pa-card"><div class="pa-label">Заметки</div><div>${escapeHtml(item.notes)}</div></section>` : ''}
-            ${history ? `<section class="pa-card"><div class="pa-label">Последние занятия</div>${history}</section>` : ''}
-            <button type="button" class="pa-btn" data-st="edit-student">Изменить</button>
-            ${staff.me.is_admin && item.invoice ? `
-                <details class="pa-card">
-                    <summary>Исправить остаток занятий</summary>
-                    <div class="pa-group">
-                        <label class="pa-stack">
-                            <span class="pa-label">На сколько изменить: например, 1 или -1${item.adjustment ? `. Сейчас: ${item.adjustment}` : ''}</span>
-                            <input class="pa-field" inputmode="numeric" data-adjust="delta">
-                        </label>
-                        <label class="pa-stack">
-                            <span class="pa-label">Причина</span>
-                            <input class="pa-field" data-adjust="reason">
-                        </label>
-                        <button type="button" class="pa-btn" data-st="adjust-lessons" data-value="${item.id}">Сохранить поправку</button>
+            <section class="pa-hero">
+                ${item.invoice ? `
+                    <div class="pa-row">
+                        <span class="pa-eyebrow">${escapeHtml(PARENT_MONTHS_NOMINATIVE[parentDate(item.invoice.due_date).getMonth()])}, ${item.invoice.amount} Br</span>
+                        ${staffBadge(invoice[0], invoice[1])}
                     </div>
+                    <div class="pa-hero-count">
+                        <span class="pa-hero-time">${item.lessons_remaining}</span>
+                        <span class="pa-muted">из ${item.lessons_count} ${isPaid ? 'занятий осталось' : 'занятий по учёту'}</span>
+                    </div>
+                    ${isPaid ? `<div class="pa-progress"><span style="width: ${percent}%"></span></div>` : ''}`
+                    : '<div class="pa-muted">В этом месяце занятий нет</div>'}
+                <div class="pa-row"><span class="pa-muted">Отработки</span><span class="pa-strong">${item.makeups}</span></div>
+                ${item.lessons_over ? `<div class="pa-warn">Сверх абонемента: ${item.lessons_over}</div>` : ''}
+            </section>
+            <h2 class="pa-section">Родитель</h2>
+            <div class="pa-list">
+                <div class="pa-list-row">
+                    ${bwIcon('user')}
+                    <span class="pa-stack">
+                        <span class="pa-strong">${escapeHtml(item.parent_name || 'Не привязан')}</span>
+                        ${item.parent_phone ? `<span class="pa-muted pa-small">${escapeHtml(item.parent_phone)}</span>` : ''}
+                    </span>
+                    ${item.parent_phone ? `<a class="st-icon-btn is-accent" href="tel:${escapeHtml(item.parent_phone.replace(/[^+\d]/g, ''))}" aria-label="Позвонить">${bwIcon('phone', 22)}</a>` : ''}
+                </div>
+            </div>
+            <h2 class="pa-section">Расписание</h2>
+            <div class="pa-list">${schedule || '<div class="pa-list-row pa-muted">Не назначено</div>'}</div>
+            ${facts.length ? `
+                <h2 class="pa-section">Данные</h2>
+                <div class="pa-list">${facts.map(([label, value]) => `
+                    <div class="pa-list-row"><span class="pa-muted">${label}</span><span class="pa-list-value">${escapeHtml(value)}</span></div>`).join('')}
+                </div>` : ''}
+            ${item.notes ? `
+                <h2 class="pa-section">Заметки</h2>
+                <div class="pa-note">${escapeHtml(item.notes)}</div>` : ''}
+            <h2 class="pa-section">Последние занятия</h2>
+            <div class="pa-list">${history || '<div class="pa-list-row pa-muted">Занятий пока нет</div>'}</div>
+            ${staff.me.is_admin ? `
+                <details class="pa-more">
+                    <summary>${bwIcon('sliders', 20)}Дополнительно</summary>
+                    ${item.invoice ? `
+                        <div class="pa-group">
+                            <label class="pa-stack">
+                                <span class="pa-label">На сколько изменить остаток: например, 1 или -1${item.adjustment ? `. Сейчас: ${item.adjustment}` : ''}</span>
+                                <input class="pa-field" inputmode="numeric" data-adjust="delta">
+                            </label>
+                            <label class="pa-stack">
+                                <span class="pa-label">Причина</span>
+                                <input class="pa-field" data-adjust="reason">
+                            </label>
+                            <button type="button" class="pa-btn" data-st="adjust-lessons" data-value="${item.id}">Сохранить поправку</button>
+                        </div>` : ''}
+                    <button type="button" class="pa-btn st-danger-soft" data-st="delete-student">${bwIcon('trash', 20)}Удалить ученика</button>
                 </details>` : ''}
-            ${staff.me.is_admin ? '<button type="button" class="pa-link st-danger-link" data-st="delete-student">Удалить ученика</button>' : ''}
         </div>`;
 }
 
@@ -405,7 +425,7 @@ function staffFormHtml() {
             <div class="pa-schedule-row">
                 <select class="pa-field" aria-label="День" data-st-row="${index}" data-field="weekday">${weekdays(row.weekday)}</select>
                 <input class="pa-field" type="time" aria-label="Время" data-st-row="${index}" data-field="time" value="${escapeHtml(row.time)}">
-                <button type="button" class="pa-remove" data-st="remove-row" data-value="${index}" aria-label="Убрать">${REMOVE_ICON}</button>
+                <button type="button" class="pa-remove" data-st="remove-row" data-value="${index}" aria-label="Убрать">${bwIcon('x', 20)}</button>
             </div>
             <div class="pa-two">
                 <select class="pa-field" aria-label="Группа" data-st-row="${index}" data-field="group_id">${staffOptions(staff.resources.groups, row.group_id, 'name', 'Группа')}</select>
@@ -415,40 +435,32 @@ function staffFormHtml() {
     return `
         ${staffBar(form.id ? 'Изменить ученика' : 'Новый ученик')}
         <div class="pa-body">
-            <section class="pa-card">
-                ${field('Имя и фамилия', 'name')}
-                ${field('Никнейм', 'nickname')}
-                ${field('Дата рождения', 'birthday', 'date')}
-                ${field('Телефон ученика', 'phone', 'tel')}
-                ${form.parent_linked ? '' : field('Телефон родителя', 'parent_phone', 'tel')}
-                ${staff.me.is_admin ? `
-                    <label class="pa-stack">
-                        <span class="pa-label">Тренер</span>
-                        <select class="pa-field" data-st-form="coach_id">${staffOptions(staff.resources.coaches, form.coach_id, 'first_name', 'Я')}</select>
-                    </label>` : ''}
-            </section>
-            <section class="pa-card">
-                ${form.tariff_locked ? '' : `
-                    <label class="pa-stack">
-                        <span class="pa-label">Абонемент на этот месяц</span>
-                        <select class="pa-field" data-st-form="tariff_code">
-                            <option value="" ${form.tariff_code ? '' : 'selected'}>По расписанию</option>
-                            ${['8', '12', '16'].map(code => `<option value="${code}" ${String(form.tariff_code) === code ? 'selected' : ''}>${code} занятий</option>`).join('')}
-                        </select>
-                    </label>`}
-                ${field('Дата начала занятий', 'training_start_date', 'date')}
-            </section>
-            <section class="pa-card">
-                <div class="pa-label">Расписание</div>
-                ${rows}
-                <button type="button" class="pa-btn" data-st="add-row">Добавить день</button>
-            </section>
-            <section class="pa-card">
+            <h2 class="pa-section">Личные данные</h2>
+            ${field('Имя и фамилия', 'name')}
+            ${field('Никнейм', 'nickname')}
+            ${field('Дата рождения', 'birthday', 'date')}
+            ${field('Телефон ученика', 'phone', 'tel')}
+            ${form.parent_linked ? '' : field('Телефон родителя', 'parent_phone', 'tel')}
+            <h2 class="pa-section">Занятия</h2>
+            ${staff.me.is_admin ? `
                 <label class="pa-stack">
-                    <span class="pa-label">Заметки</span>
-                    <textarea class="pa-field st-textarea" data-st-form="notes">${escapeHtml(form.notes ?? '')}</textarea>
-                </label>
-            </section>
+                    <span class="pa-label">Тренер</span>
+                    <select class="pa-field" data-st-form="coach_id">${staffOptions(staff.resources.coaches, form.coach_id, 'first_name', 'Я')}</select>
+                </label>` : ''}
+            ${form.tariff_locked ? '' : `
+                <label class="pa-stack">
+                    <span class="pa-label">Абонемент на этот месяц</span>
+                    <select class="pa-field" data-st-form="tariff_code">
+                        <option value="" ${form.tariff_code ? '' : 'selected'}>По расписанию</option>
+                        ${['8', '12', '16'].map(code => `<option value="${code}" ${String(form.tariff_code) === code ? 'selected' : ''}>${code} занятий</option>`).join('')}
+                    </select>
+                </label>`}
+            ${field('Дата начала занятий', 'training_start_date', 'date')}
+            <h2 class="pa-section">Расписание</h2>
+            ${rows}
+            <button type="button" class="pa-btn" data-st="add-row">${bwIcon('plus', 20)}Добавить день</button>
+            <h2 class="pa-section">Заметки</h2>
+            <textarea class="pa-field st-textarea" aria-label="Заметки" data-st-form="notes">${escapeHtml(form.notes ?? '')}</textarea>
         </div>
         <div class="pa-foot">
             <button type="button" class="pa-btn is-primary" data-st="save-student" ${staff.busy ? 'disabled' : ''}>${staff.busy ? 'Сохраняем…' : 'Сохранить'}</button>
@@ -461,7 +473,7 @@ function staffScheduleText(rows) {
     return rows.map(row => `${PARENT_WEEKDAYS[row.weekday]} ${row.time}`).join(', ') || 'нет';
 }
 
-function staffDecision(kind, id) {
+function staffDecision(kind, id, approveLabel = 'Подтвердить') {
     const key = `${kind}:${id}`;
     if (staff.rejecting === key) {
         const empty = !staff.reason.trim();
@@ -478,102 +490,148 @@ function staffDecision(kind, id) {
             </div>`;
     }
     return `
-        <div class="pa-two">
-            <button type="button" class="pa-btn is-primary" data-st="approve" data-kind="${kind}" data-value="${id}">Подтвердить</button>
-            <button type="button" class="pa-btn" data-st="reject" data-kind="${kind}" data-value="${id}">Отказать</button>
+        <div class="pa-group">
+            <button type="button" class="pa-btn is-primary" data-st="approve" data-kind="${kind}" data-value="${id}">${bwIcon('check', 20)}${approveLabel}</button>
+            <button type="button" class="pa-link st-reject" data-st="reject" data-kind="${kind}" data-value="${id}">Отказать</button>
         </div>`;
+}
+
+function staffRequestRow(kind, item, title, subtitle, label) {
+    return `
+        <button type="button" class="pa-list-row" data-st="open-request" data-kind="${kind}" data-value="${item.id}">
+            <span class="pa-stack">
+                <span class="pa-eyebrow">${escapeHtml(label)}</span>
+                <span class="pa-strong">${escapeHtml(title)}</span>
+                <span class="pa-muted pa-small">${escapeHtml(subtitle)}</span>
+            </span>
+            <span class="pa-list-value"></span>
+            ${bwIcon('chevron-right', 20)}
+        </button>`;
+}
+
+function staffPaymentLabel(item) {
+    return `${item.method === 'cash' ? 'Наличные' : 'Чек на проверку'}${{upgrade: ', доплата', single: ', разовое'}[item.kind] || ''}`;
 }
 
 function staffRequestsHtml() {
     const data = staff.requests;
+    const types = [
+        ['registrations', 'Анкеты', data.registrations.length],
+        ['makeups', 'Отработки', data.makeups.length],
+        ['schedule_changes', 'Расписание', data.schedule_changes.length],
+        ['payments', 'Оплаты', data.payments.length],
+    ].filter(([, , count]) => count);
+    const filter = types.some(([id]) => id === staff.requestFilter) ? staff.requestFilter : 'all';
+    const shows = id => filter === 'all' || filter === id;
+    const registrations = shows('registrations') && data.registrations.length ? `<div class="pa-list">${data.registrations.map(item =>
+        staffRequestRow('registration', item, item.child_name, `Родитель: ${item.parent_name}`, 'Новая семья')).join('')}</div>` : '';
+    const payments = shows('payments') && data.payments.length ? `<div class="pa-list">${data.payments.map(item =>
+        staffRequestRow('payment', item, `${item.student_name}, ${item.amount} Br`, PARENT_MONTHS_NOMINATIVE[parentDate(item.period_start).getMonth()], staffPaymentLabel(item))).join('')}</div>` : '';
+    const makeups = shows('makeups') ? data.makeups.map(item => `
+        <section class="pa-panel">
+            <div class="pa-eyebrow">Отработка</div>
+            <div class="pa-panel-title">${escapeHtml(item.student_name)}</div>
+            <div class="pa-muted">Хочет прийти: ${escapeHtml(parentLongDate(item.requested_date))}${item.requested_time ? `, ${escapeHtml(item.requested_time)}` : ''}</div>
+            ${staffDecision('makeup', item.id)}
+        </section>`).join('') : '';
+    const schedules = shows('schedule_changes') ? data.schedule_changes.map(item => `
+        <section class="pa-panel">
+            <div class="pa-eyebrow">Смена расписания</div>
+            <div class="pa-panel-title">${escapeHtml(item.student_name)}</div>
+            <div class="pa-muted">Сейчас: ${escapeHtml(staffScheduleText(item.current_schedule))}</div>
+            <div>Просит: ${escapeHtml(staffScheduleText(item.proposed_schedule))}</div>
+            ${staffDecision('schedule', item.id)}
+        </section>`).join('') : '';
+    const content = registrations + payments + makeups + schedules;
+    return `
+        ${staffHeading('Заявки', staffRequestCount() ? `Ждут решения: ${staffRequestCount()}` : '')}
+        ${types.length > 1 ? `<div class="pa-pills">
+            <button type="button" data-st="request-filter" data-value="all" aria-pressed="${filter === 'all'}">Все</button>
+            ${types.map(([id, label, count]) => `<button type="button" data-st="request-filter" data-value="${id}" aria-pressed="${filter === id}">${label} ${count}</button>`).join('')}
+        </div>` : ''}
+        ${content || `<div class="st-empty">${bwIcon('check', 32)}<span>Все заявки разобраны</span></div>`}`;
+}
+
+function staffRegistrationHtml(item) {
+    const data = staff.requests;
     const {groups, locations, coaches} = staff.resources;
-    const today = staff.day?.today || '';
-    const registrations = data.registrations.map(item => `
-        <section class="pa-card" data-reg-card="${item.id}">
-            <div>
-                <div class="pa-label">Новая семья</div>
-                <div class="pa-mid">${escapeHtml(item.child_name)}</div>
-                ${item.child_nickname ? `<div class="pa-muted">Никнейм: ${escapeHtml(item.child_nickname)}</div>` : ''}
-                <div class="pa-muted">Дата рождения: ${escapeHtml(parentBirthday(item.child_birthday))}</div>
-                ${item.preferred_coach_name ? `<div class="pa-muted">Выбранный тренер: ${escapeHtml(item.preferred_coach_name)}</div>` : ''}
-                <div class="pa-muted">Родитель: ${escapeHtml(item.parent_name)}, ${escapeHtml(item.parent_phone)}</div>
-                <div class="pa-muted">Удобно: ${escapeHtml(staffScheduleText(item.proposed_schedule))}</div>
+    const review = staff.review;
+    const facts = [
+        item.child_nickname ? ['Никнейм', item.child_nickname] : null,
+        ['Дата рождения', parentBirthday(item.child_birthday)],
+        item.preferred_coach_name ? ['Выбранный тренер', item.preferred_coach_name] : null,
+        ['Родитель', item.parent_name],
+        ['Телефон', item.parent_phone],
+        ['Удобно', staffScheduleText(item.proposed_schedule)],
+    ].filter(Boolean);
+    return `
+        ${staffBar(item.child_name, 'Новая семья')}
+        <div class="pa-body" data-reg-card="${item.id}">
+            <div class="pa-list">${facts.map(([label, value]) => `
+                <div class="pa-list-row"><span class="pa-muted">${label}</span><span class="pa-list-value">${escapeHtml(value)}</span></div>`).join('')}
             </div>
+            <h2 class="pa-section">Куда записать</h2>
             ${data.linkable_students.length ? `
                 <label class="pa-stack">
                     <span class="pa-label">Если ребёнок уже есть в списке</span>
-                    <select class="pa-field" data-review="link_student_id">${staffOptions(data.linkable_students, null, 'name', 'Новый ученик')}</select>
+                    <select class="pa-field" data-review="link_student_id">${staffOptions(data.linkable_students, review.link_student_id, 'name', 'Новый ученик')}</select>
                 </label>` : ''}
             <div class="pa-two">
                 <label class="pa-stack">
                     <span class="pa-label">Группа</span>
-                    <select class="pa-field" data-review="group_id">${staffOptions(groups, null)}</select>
+                    <select class="pa-field" data-review="group_id">${staffOptions(groups, review.group_id)}</select>
                 </label>
                 <label class="pa-stack">
                     <span class="pa-label">Зал</span>
-                    <select class="pa-field" data-review="location_id">${staffOptions(locations, null)}</select>
+                    <select class="pa-field" data-review="location_id">${staffOptions(locations, review.location_id)}</select>
                 </label>
             </div>
             <label class="pa-stack">
                 <span class="pa-label">Начало занятий</span>
-                <input class="pa-field" type="date" data-review="start_date" value="${escapeHtml(today)}">
+                <input class="pa-field" type="date" data-review="start_date" value="${escapeHtml(review.start_date ?? staff.day?.today ?? '')}">
             </label>
             ${staff.me.is_admin ? `
                 <label class="pa-stack">
                     <span class="pa-label">Тренер</span>
-                    <select class="pa-field" data-review="coach_id">${staffOptions(coaches, item.preferred_coach_id, 'first_name', 'Я')}</select>
+                    <select class="pa-field" data-review="coach_id">${staffOptions(coaches, review.coach_id ?? item.preferred_coach_id, 'first_name', 'Я')}</select>
                 </label>` : ''}
-            ${staffDecision('registration', item.id)}
-        </section>`).join('');
-    const makeups = data.makeups.map(item => `
-        <section class="pa-card">
-            <div>
-                <div class="pa-label">Отработка</div>
-                <div class="pa-mid">${escapeHtml(item.student_name)}</div>
-                <div class="pa-muted">Хочет прийти: ${escapeHtml(parentLongDate(item.requested_date))}${item.requested_time ? `, ${escapeHtml(item.requested_time)}` : ''}</div>
-            </div>
-            ${staffDecision('makeup', item.id)}
-        </section>`).join('');
-    const schedules = data.schedule_changes.map(item => `
-        <section class="pa-card">
-            <div>
-                <div class="pa-label">Смена расписания</div>
-                <div class="pa-mid">${escapeHtml(item.student_name)}</div>
-                <div class="pa-muted">Сейчас: ${escapeHtml(staffScheduleText(item.current_schedule))}</div>
-                <div class="pa-muted">Просит: ${escapeHtml(staffScheduleText(item.proposed_schedule))}</div>
-            </div>
-            ${staffDecision('schedule', item.id)}
-        </section>`).join('');
-    const payments = data.payments.map(item => {
-        const receipt = staff.receipts[item.id];
-        let preview = '';
-        if (item.has_receipt) {
-            preview = receipt
-                ? (receipt.type.startsWith('image/')
-                    ? `<img class="st-receipt" src="${receipt.url}" alt="Чек">`
-                    : `<a class="pa-btn" href="${receipt.url}" target="_blank" rel="noopener">Открыть файл чека</a>`)
-                : `<button type="button" class="pa-btn" data-st="load-receipt" data-value="${item.id}">Показать чек</button>`;
-        }
-        return `
-            <section class="pa-card" data-pay-card="${item.id}">
-                <div>
-                    <div class="pa-label">${item.method === 'cash' ? 'Наличные' : 'Чек на проверку'}${{upgrade: ', доплата за абонемент', single: ', разовое занятие'}[item.kind] || ''}</div>
-                    <div class="pa-mid">${escapeHtml(item.student_name)}, ${item.amount}&nbsp;Br</div>
-                    <div class="pa-muted">${escapeHtml(PARENT_MONTHS_NOMINATIVE[parentDate(item.period_start).getMonth()])}</div>
-                </div>
-                ${preview}
-                ${item.method === 'cash' ? `
-                    <label class="pa-stack">
-                        <span class="pa-label">Кто принял деньги</span>
-                        <select class="pa-field" data-review="received_by_coach_id">${staffOptions(coaches, null, 'first_name', 'Я')}</select>
-                    </label>` : ''}
-                ${staffDecision('payment', item.id)}
-            </section>`;
-    }).join('');
-    const content = registrations + makeups + schedules + payments;
+            ${staffDecision('registration', item.id, 'Принять')}
+        </div>`;
+}
+
+function staffPaymentHtml(item) {
+    const receipt = staff.receipts[item.id];
+    let preview = '';
+    if (item.has_receipt) {
+        preview = receipt
+            ? (receipt.type.startsWith('image/')
+                ? `<img class="st-receipt" src="${receipt.url}" alt="Чек">`
+                : `<a class="pa-btn" href="${receipt.url}" target="_blank" rel="noopener">Открыть файл чека</a>`)
+            : `<button type="button" class="pa-btn" data-st="load-receipt" data-value="${item.id}">${bwIcon('receipt', 20)}Показать чек</button>`;
+    }
     return `
-        <div class="st-title"><h1>Заявки</h1></div>
-        ${content || '<div class="st-empty">Все заявки разобраны</div>'}`;
+        ${staffBar(item.student_name, staffPaymentLabel(item))}
+        <div class="pa-body" data-pay-card="${item.id}">
+            <section class="pa-hero">
+                <div class="pa-eyebrow">${escapeHtml(PARENT_MONTHS_NOMINATIVE[parentDate(item.period_start).getMonth()])}</div>
+                <div class="pa-hero-time">${item.amount}&nbsp;Br</div>
+            </section>
+            ${preview}
+            ${item.method === 'cash' ? `
+                <label class="pa-stack">
+                    <span class="pa-label">Кто принял деньги</span>
+                    <select class="pa-field" data-review="received_by_coach_id">${staffOptions(staff.resources.coaches, staff.review.received_by_coach_id, 'first_name', 'Я')}</select>
+                </label>` : ''}
+            ${staffDecision('payment', item.id, item.method === 'cash' ? 'Подтвердить получение' : 'Подтвердить оплату')}
+        </div>`;
+}
+
+function staffRequestHtml() {
+    const {kind, id} = staff.request;
+    const list = kind === 'registration' ? staff.requests.registrations : staff.requests.payments;
+    const item = list.find(row => row.id === id);
+    if (!item) return `${staffBar('Заявка')}<div class="st-empty">Заявка уже разобрана</div>`;
+    return kind === 'registration' ? staffRegistrationHtml(item) : staffPaymentHtml(item);
 }
 
 /* --- Money and team --- */
@@ -589,48 +647,46 @@ function staffMoneyHtml() {
         else if (item.kind === 'single') note = `${month}: разовое занятие`;
         const reminded = staff.reminded[item.id];
         return `
-            <section class="pa-card">
+            <section class="pa-panel">
                 <div class="pa-row">
-                    <div class="pa-mid">${escapeHtml(item.student_name)}</div>
-                    <div class="pa-mid">${item.amount} Br</div>
+                    <div class="pa-panel-title">${escapeHtml(item.student_name)}</div>
+                    <div class="pa-panel-title">${item.amount} Br</div>
                 </div>
                 <div class="${overdue ? 'pa-danger' : 'pa-warn'} pa-small">${escapeHtml(note)}</div>
                 <div class="pa-two">
-                    <button type="button" class="pa-btn" data-st="take-cash" data-value="${item.id}">Принять наличные</button>
-                    <button type="button" class="pa-btn" data-st="remind" data-value="${item.id}" ${reminded || !item.can_remind ? 'disabled' : ''}>${reminded ? 'Отправлено' : item.can_remind ? 'Напомнить' : 'Нет родителя'}</button>
+                    <button type="button" class="pa-btn" data-st="take-cash" data-value="${item.id}">${bwIcon('wallet', 20)}Наличные</button>
+                    <button type="button" class="pa-btn" data-st="remind" data-value="${item.id}" ${reminded || !item.can_remind ? 'disabled' : ''}>${item.can_remind && !reminded ? bwIcon('bell', 20) : ''}${reminded ? 'Отправлено' : item.can_remind ? 'Напомнить' : 'Нет родителя'}</button>
                 </div>
             </section>`;
     }).join('');
     return `
-        <div class="st-title">
-            <div>
-                <h1>Деньги</h1>
-                <div class="pa-muted">${escapeHtml(PARENT_MONTHS_NOMINATIVE[Number(data.month.slice(5)) - 1])}</div>
-            </div>
-        </div>
-        <div class="pa-two">
-            <div class="st-tile"><div class="pa-label">Получено</div><div class="pa-big">${data.collected} Br</div></div>
-            <div class="st-tile"><div class="pa-label">Ещё ждём</div><div class="pa-big">${data.waiting} Br</div></div>
-        </div>
-        ${data.in_review ? `<button type="button" class="pa-btn" data-st="tab" data-value="requests">На проверке: ${data.in_review}</button>` : ''}
-        <h2 class="pa-mid">Не оплатили</h2>
+        ${staffHeading('Деньги', PARENT_MONTHS_NOMINATIVE[Number(data.month.slice(5)) - 1])}
+        <section class="pa-hero">
+            <div class="pa-eyebrow">Получено</div>
+            <div class="pa-hero-time">${data.collected}&nbsp;Br</div>
+            <div class="pa-row"><span class="pa-muted">Ещё ждём</span><span class="pa-strong">${data.waiting} Br</span></div>
+        </section>
+        ${data.in_review ? `<button type="button" class="pa-list-row pa-list-alone" data-st="tab" data-value="requests">${bwIcon('clock')}<span class="pa-strong">На проверке: ${data.in_review}</span><span class="pa-list-value"></span>${bwIcon('chevron-right', 20)}</button>` : ''}
+        <h2 class="pa-section">Не оплатили</h2>
         ${rows || '<div class="st-empty">Все оплатили</div>'}`;
 }
 
 function staffResourceList(title, items, kind, placeholder) {
     return `
-        <section class="pa-card">
-            <div class="pa-mid">${title}</div>
+        <h2 class="pa-section">${title}</h2>
+        <div class="pa-list">
             ${items.map(item => `
-                <div class="pa-row st-resource">
+                <div class="pa-list-row">
+                    ${bwIcon(kind === 'locations' ? 'building' : 'users')}
                     <span>${escapeHtml(item.name)}</span>
-                    <button type="button" class="pa-remove" data-st="remove-resource" data-kind="${kind}" data-value="${item.id}" aria-label="Убрать ${escapeHtml(item.name)}">${REMOVE_ICON}</button>
-                </div>`).join('') || '<div class="pa-muted">Пока пусто</div>'}
-            <div class="st-add">
-                <input class="pa-field" aria-label="${placeholder}" placeholder="${placeholder}" data-new-resource="${kind}">
-                <button type="button" class="pa-btn" data-st="add-resource" data-kind="${kind}">Добавить</button>
-            </div>
-        </section>`;
+                    <span class="pa-list-value"></span>
+                    <button type="button" class="pa-remove" data-st="remove-resource" data-kind="${kind}" data-value="${item.id}" aria-label="Убрать ${escapeHtml(item.name)}">${bwIcon('x', 20)}</button>
+                </div>`).join('') || '<div class="pa-list-row pa-muted">Пока пусто</div>'}
+        </div>
+        <div class="st-add">
+            <input class="pa-field" aria-label="${placeholder}" placeholder="${placeholder}" data-new-resource="${kind}">
+            <button type="button" class="pa-btn" data-st="add-resource" data-kind="${kind}">Добавить</button>
+        </div>`;
 }
 
 function staffTeamHtml() {
@@ -638,22 +694,21 @@ function staffTeamHtml() {
     const role = (coach, key, label) => `
         <button type="button" class="st-role" data-st="toggle-role" data-value="${coach.id}" data-role="${key}" aria-pressed="${coach[key]}" ${coach.locked ? 'disabled' : ''}>${label}</button>`;
     return `
-        <div class="st-title"><h1>Команда</h1></div>
+        ${staffHeading('Команда')}
+        <h2 class="pa-section">Сотрудники</h2>
         ${data.coaches.map(coach => `
-            <section class="pa-card">
-                <div class="pa-mid">${escapeHtml(coach.name)}</div>
+            <section class="pa-panel">
+                <div class="pa-panel-title">${escapeHtml(coach.name)}</div>
                 <div class="st-roles">
                     <span class="st-role is-fixed">Тренер</span>
                     ${role(coach, 'is_admin', 'Администратор')}
                     ${role(coach, 'is_manager', 'Руководитель')}
                 </div>
             </section>`).join('')}
-        <section class="pa-card">
-            <div>
-                <div class="pa-mid">Регистрация семей</div>
-                <div class="pa-muted">Отправьте родителям ссылку, и анкета придёт в раздел «Заявки».</div>
-            </div>
-            <button type="button" class="pa-btn is-primary" data-st="copy-link">${staff.copied ? 'Ссылка скопирована' : 'Скопировать ссылку'}</button>
+        <h2 class="pa-section">Регистрация семей</h2>
+        <section class="pa-panel">
+            <div class="pa-muted">Отправьте родителям ссылку, и анкета придёт в раздел «Заявки».</div>
+            <button type="button" class="pa-btn is-primary" data-st="copy-link">${bwIcon(staff.copied ? 'check' : 'link', 20)}${staff.copied ? 'Ссылка скопирована' : 'Скопировать ссылку'}</button>
         </section>
         ${staffResourceList('Залы', data.locations, 'locations', 'Новый зал')}
         ${staffResourceList('Группы', data.groups, 'groups', 'Новая группа')}`;
@@ -742,6 +797,7 @@ function staffStartForm(student) {
             schedule: [{weekday: 0, time: '18:00', group_id: null, location_id: null}],
         };
     staff.screen = 'form';
+    staff.formDirty = false;
     staffPaint();
     window.scrollTo(0, 0);
 }
@@ -767,12 +823,40 @@ const STAFF_ACTIONS = {
         staffOpenTab(target.dataset.value);
     },
     back: () => {
-        if (staff.screen === 'form' && staff.form.id) {
-            staff.screen = 'student';
-            staffPaint();
-            return;
-        }
-        staffOpenTab(staff.tab);
+        const leave = () => {
+            staff.formDirty = false;
+            if (staff.screen === 'form' && staff.form.id) {
+                staff.screen = 'student';
+                staffPaint();
+                return;
+            }
+            staffOpenTab(staff.tab);
+        };
+        if (staff.screen === 'form' && staff.formDirty) tgConfirm('Выйти без сохранения? Изменения пропадут.', leave);
+        else leave();
+    },
+    'go-today': () => {
+        staff.date = null;
+        return staffLoad(staffLoadDay);
+    },
+    'student-filter': target => {
+        staff.studentFilter = target.dataset.value;
+        staffPaint();
+    },
+    'request-filter': target => {
+        staff.requestFilter = target.dataset.value;
+        staffPaint();
+    },
+    'open-request': target => {
+        Object.assign(staff, {
+            screen: 'request',
+            request: {kind: target.dataset.kind, id: Number(target.dataset.value)},
+            review: {},
+            rejecting: null,
+            reason: '',
+        });
+        staffPaint();
+        window.scrollTo(0, 0);
     },
     'shift-day': target => {
         const next = parentDate(staff.date);
@@ -828,6 +912,7 @@ const STAFF_ACTIONS = {
         const {id, schedule, parent_linked: _linked, tariff_locked: _locked, ...fields} = staff.form;
         const path = id ? `/api/staff/students/${id}/update` : '/api/staff/students/create';
         const saved = await apiPost(path, {student: fields, schedule});
+        staff.formDirty = false;
         await staffLoadStudents();
         staff.student = (await apiPost(`/api/staff/students/${id || saved.id}`)).student;
         staff.tab = 'students';
@@ -846,6 +931,7 @@ const STAFF_ACTIONS = {
         const {kind, value: id} = target.dataset;
         return staffRun(async () => {
             await apiPost(STAFF_REVIEW_PATHS[kind](id), {decision: 'approve', ...staffCollectReview(target)});
+            staff.screen = 'root';
             showNotification('Подтверждено');
         }, {reload: staffLoadRequests});
     },
@@ -867,6 +953,7 @@ const STAFF_ACTIONS = {
         return staffRun(async () => {
             await apiPost(STAFF_REVIEW_PATHS[kind](id), {decision: 'reject', reason: staff.reason});
             staff.rejecting = null;
+            staff.screen = 'root';
             showNotification('Отказ отправлен');
         }, {reload: staffLoadRequests});
     },
@@ -894,10 +981,14 @@ const STAFF_ACTIONS = {
             staff.receipts[id] = {url: URL.createObjectURL(blob), type: blob.type};
         });
     },
-    'take-cash': target => staffRun(async () => {
-        await apiPost(`/api/admin/payments/${target.dataset.value}/cash`);
-        showNotification('Оплата принята');
-    }, {reload: staffLoadMoney}),
+    'take-cash': target => {
+        const item = staff.money.debtors.find(row => row.id === Number(target.dataset.value));
+        const month = PARENT_MONTHS_NOMINATIVE[parentDate(item.period_start).getMonth()].toLowerCase();
+        tgConfirm(`Принять ${item.amount} Br наличными: ${item.student_name}, ${month}?`, () => staffRun(async () => {
+            await apiPost(`/api/admin/payments/${item.id}/cash`);
+            showNotification('Оплата принята');
+        }, {reload: staffLoadMoney}));
+    },
     remind: target => staffRun(async () => {
         await apiPost(`/api/admin/payments/${target.dataset.value}/remind`);
         staff.reminded[target.dataset.value] = true;
@@ -958,9 +1049,13 @@ document.addEventListener('input', event => {
         document.getElementById('st-student-list').innerHTML = staffStudentRows();
     } else if (target.dataset.stInput === 'reason') {
         staff.reason = target.value;
+    } else if (target.dataset.review) {
+        staff.review[target.dataset.review] = target.value;
     } else if (target.dataset.stForm) {
         staff.form[target.dataset.stForm] = target.value;
+        staff.formDirty = true;
     } else if (target.dataset.stRow !== undefined) {
+        staff.formDirty = true;
         const row = staff.form.schedule[Number(target.dataset.stRow)];
         row[target.dataset.field] = target.dataset.field === 'time' ? target.value : (target.value === '' ? null : Number(target.value));
     }

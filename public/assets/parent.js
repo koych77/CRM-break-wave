@@ -3,12 +3,16 @@
 const PARENT_MONTHS = ['января', 'февраля', 'марта', 'апреля', 'мая', 'июня', 'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря'];
 const PARENT_MONTHS_NOMINATIVE = ['Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь', 'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь'];
 const PARENT_WEEKDAYS = ['Понедельник', 'Вторник', 'Среда', 'Четверг', 'Пятница', 'Суббота', 'Воскресенье'];
-const PARENT_BACK_ICON = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 4.5L7.5 12l7.5 7.5"></path></svg>';
-const REMOVE_ICON = '<svg width="22" height="22" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="currentColor"></circle><path d="M8.5 8.5l7 7M15.5 8.5l-7 7" fill="none" stroke="#07111f" stroke-width="2" stroke-linecap="round"></path></svg>';
+const PARENT_WEEKDAYS_SHORT = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
+// Below this number of lessons the parent is warned; nothing else depends on it.
+const LOW_LESSONS = 2;
 
 const parentUi = {
     studentId: null,
+    tab: 'home',
+    lessonsTab: 'schedule',
     view: 'home',
+    payFrom: 'home',
     tariff: null,
     method: 'online',
     slot: null,
@@ -67,6 +71,15 @@ function parentPlace(item) {
     return [item.group ? `${item.group} группа` : null, item.location].filter(Boolean).join(', ');
 }
 
+function parentLessonsWord(count) {
+    const tens = count % 100;
+    const ones = count % 10;
+    if (tens >= 11 && tens <= 14) return `${count} занятий`;
+    if (ones === 1) return `${count} занятие`;
+    if (ones >= 2 && ones <= 4) return `${count} занятия`;
+    return `${count} занятий`;
+}
+
 function parentStudent() {
     const list = parentData?.students || [];
     return list.find(item => item.id === parentUi.studentId) || list[0] || null;
@@ -100,33 +113,53 @@ function renderParentContext() {
     if (!container || !parentData) return;
     const student = parentStudent();
     if (student) parentUi.studentId = student.id;
-    const views = {
-        home: renderParentHome,
-        pay: renderParentPay,
-        payDone: renderParentPayDone,
-        makeup: renderParentMakeup,
-        schedule: renderParentSchedule,
+    const screens = {
+        subscription: [renderParentSubscription, 1],
+        pay: [renderParentPay, 2],
+        payDone: [renderParentPayDone, 1],
+        makeup: [renderParentMakeup, 1],
+        schedule: [renderParentSchedule, 1],
     };
+    const tabs = {home: renderParentHome, lessons: renderParentLessons, profile: renderParentProfile};
+    const [screen, depth] = screens[parentUi.view] || [tabs[parentUi.tab], 0];
+    const atRoot = depth === 0;
+    const key = atRoot ? `tab:${parentUi.tab}:${parentUi.studentId}` : parentUi.view;
+    const html = `<div class="pa">${student ? screen(student) : renderParentEmpty()}${student && atRoot ? parentNav() : ''}</div>`;
+    const stays = currentScreen?.key === key;
     const scrollTop = window.scrollY;
-    const html = `<div class="pa">${(student ? views[parentUi.view] : renderParentEmpty)(student)}</div>`;
-    const atHome = parentUi.view === 'home';
-    paintScreen(container, html, atHome ? `home:${parentUi.studentId}` : parentUi.view, atHome ? 0 : 1);
-    const nextScroll = atHome ? scrollTop : 0;
+    paintScreen(container, html, key, depth);
+    const nextScroll = stays ? scrollTop : 0;
     if (window.scrollY !== nextScroll) window.scrollTo(0, nextScroll);
+}
+
+function parentNav() {
+    const items = [['home', 'home', 'Главная'], ['lessons', 'calendar', 'Занятия'], ['profile', 'user', 'Профиль']];
+    return `
+        <nav class="pa-nav" aria-label="Разделы">
+            ${items.map(([id, icon, label]) => `
+                <button type="button" data-pa="tab" data-value="${id}" ${parentUi.tab === id ? 'aria-current="page"' : ''}>
+                    ${bwIcon(icon)}
+                    <span>${label}</span>
+                </button>`).join('')}
+        </nav>`;
+}
+
+function parentHeading(title) {
+    return `
+        <div class="pa-head">
+            <div class="pa-brand">Break Wave</div>
+            <h1>${escapeHtml(title)}</h1>
+        </div>`;
 }
 
 function parentRegistrationCards() {
     return (parentData.registration_requests || [])
         .filter(item => item.status !== 'approved')
         .map(item => `
-            <section class="pa-card">
-                <div>
-                    <div class="pa-mid">${escapeHtml(item.child_name)}</div>
-                    ${item.status === 'pending'
-                        ? '<div class="pa-warn">Анкета ждёт подтверждения тренера</div>'
-                        : '<div class="pa-danger">Анкета отклонена</div>'}
-                    ${item.rejection_reason ? `<div class="pa-muted">Причина: ${escapeHtml(item.rejection_reason)}</div>` : ''}
-                </div>
+            <section class="pa-panel ${item.status === 'pending' ? 'is-calm' : 'is-danger'}">
+                <div class="pa-panel-title">${escapeHtml(item.child_name)}</div>
+                <div>${item.status === 'pending' ? 'Анкета ждёт подтверждения тренера' : 'Анкета отклонена'}</div>
+                ${item.rejection_reason ? `<div>Причина: ${escapeHtml(item.rejection_reason)}</div>` : ''}
             </section>
         `).join('');
 }
@@ -134,119 +167,140 @@ function parentRegistrationCards() {
 function renderParentEmpty() {
     const cards = parentRegistrationCards();
     return `
-        <div class="pa-head"><h1>Break Wave</h1></div>
+        ${parentHeading('Семья')}
         <div class="pa-body">
-            ${cards || `
-                <section class="pa-card">
-                    <div class="pa-mid">Детей пока нет</div>
-                </section>`}
-            <button type="button" class="pa-btn" data-pa="add-child">Добавить ребёнка</button>
+            ${cards || `<div class="st-empty">${bwIcon('users', 32)}<span>Детей пока нет</span></div>`}
+            <button type="button" class="pa-btn ${cards ? '' : 'is-primary'}" data-pa="add-child">${bwIcon('plus', 20)}Добавить ребёнка</button>
         </div>`;
 }
+
+/* --- Home --- */
 
 function parentTrainingCard(student) {
     const training = student.next_training;
     if (!training) {
         return `
-            <section class="pa-card">
-                <div class="pa-label">Следующая тренировка</div>
-                <div>Расписание назначит тренер</div>
+            <section class="pa-hero">
+                <div class="pa-eyebrow">Следующая тренировка</div>
+                <div class="pa-mid">Расписание назначит тренер</div>
             </section>`;
     }
-    let answer = `
-        <div class="pa-two">
-            <button type="button" class="pa-btn is-primary" data-pa="rsvp" data-value="attending">Придёт</button>
-            <button type="button" class="pa-btn" data-pa="rsvp" data-value="absent">Не придёт</button>
-        </div>`;
-    if (training.response === 'attending') {
-        answer = `
-            <div class="pa-row">
-                <div class="pa-ok">Ждём на тренировке</div>
-                <button type="button" class="pa-link" data-pa="rsvp" data-value="">Изменить</button>
-            </div>`;
-    } else if (training.response === 'absent') {
-        answer = `
-            <div class="pa-stack">
-                <div class="pa-warn">Тренер предупреждён</div>
-                <div class="pa-muted pa-small">Занятие спишется. В оплаченном месяце вместо него появится отработка на 2 месяца.</div>
-                <button type="button" class="pa-link" data-pa="rsvp" data-value="">Изменить</button>
-            </div>`;
-    }
+    const answers = [['attending', 'Придёт', 'check'], ['absent', 'Не придёт', 'x']];
+    const notes = {
+        attending: 'Ждём на тренировке. Нажмите другой вариант, чтобы изменить ответ.',
+        absent: 'Тренер предупреждён. Занятие спишется. В оплаченном месяце вместо него появится отработка на 2 месяца.',
+    };
     return `
-        <section class="pa-card">
+        <section class="pa-hero">
+            <div class="pa-eyebrow">Следующая тренировка</div>
             <div>
-                <div class="pa-label">Следующая тренировка</div>
-                <div class="pa-big">${escapeHtml(parentNearDate(training.date))}, ${escapeHtml(training.time)}</div>
+                <div class="pa-hero-time">${escapeHtml(training.time)}</div>
+                <div class="pa-mid">${escapeHtml(parentNearDate(training.date))}</div>
                 <div class="pa-muted">${escapeHtml(parentPlace(training))}</div>
             </div>
-            ${answer}
+            <div class="pa-two">
+                ${answers.map(([value, label, icon]) => `
+                    <button type="button" class="pa-btn pa-answer" data-pa="rsvp" data-value="${training.response === value ? '' : value}" aria-pressed="${training.response === value}">${bwIcon(icon, 20)}${label}</button>`).join('')}
+            </div>
+            <div class="pa-muted pa-small">${notes[training.response] || 'Вы ещё не ответили'}</div>
         </section>`;
 }
 
-function parentExtrasBlock(student) {
-    const open = student.open_extras.map(item => `
-        <button type="button" class="pa-btn" data-pa="open-extra" data-id="${item.id}" ${item.stored_status === 'reported' ? 'disabled' : ''}>${escapeHtml(item.label)}: ${item.amount} Br${item.stored_status === 'reported' ? ', на проверке' : ''}</button>`).join('');
-    const offer = student.upgrade_offer;
-    const hasOpenUpgrade = student.open_extras.some(item => item.kind === 'upgrade');
-    return `
-        ${student.lessons_over ? `<div class="pa-warn">Занятий в этом месяце больше, чем в абонементе: на ${student.lessons_over}</div>` : ''}
-        ${offer && !hasOpenUpgrade ? `
-            <div class="pa-muted pa-small">До конца месяца тренировок: ${student.trainings_left}, занятий осталось: ${student.lessons_remaining}.</div>
-            <button type="button" class="pa-btn is-primary" data-pa="buy-upgrade">Перейти на ${offer.lessons} занятий, доплата ${offer.amount} Br</button>` : ''}
-        ${open}
-        ${student.open_extras.some(item => item.kind === 'single') ? '' : '<button type="button" class="pa-link" data-pa="buy-single">Купить разовое занятие за 40 Br</button>'}`;
-}
-
-function parentPaymentBlock(student) {
-    if (!student.invoice) {
-        return student.starts_on
-            ? `<div class="pa-muted">Занятия начнутся ${escapeHtml(parentShortDate(student.starts_on))}, тогда же появится счёт.</div>`
-            : '<div class="pa-muted">В этом месяце тренировок нет.</div>';
-    }
-    const invoice = (student.invoices || []).find(item => item.id === student.oldest_open_invoice_id) || null;
-    if (!invoice) {
-        return `<div class="pa-ok">${escapeHtml(parentMonth(student.invoice))} оплачен</div>`;
-    }
-    const month = escapeHtml(parentMonth(invoice));
-    if (invoice.stored_status === 'reported') {
-        return `<div class="pa-warn">${month}: ${invoice.amount} Br на проверке</div>`;
-    }
-    if (invoice.stored_status === 'awaiting_receipt') {
-        return `
-            <div class="pa-warn">${month}: ${invoice.amount} Br, нужен чек</div>
-            <button type="button" class="pa-btn is-primary" data-pa="go-pay">Прикрепить чек</button>`;
-    }
-    const rejected = invoice.stored_status === 'rejected'
-        ? `<div class="pa-danger">Оплата отклонена${invoice.rejection_reason ? `: ${escapeHtml(invoice.rejection_reason)}` : ''}</div>`
-        : '';
-    const isLate = parentDate(invoice.due_date) < parentDate(parentToday());
-    let summary = `<div><span class="pa-strong">${month}: ${invoice.amount} Br.</span> Оплатить до ${escapeHtml(parentShortDate(invoice.due_date))}.</div>`;
-    if (invoice.status === 'overdue') {
-        summary = `<div class="pa-danger">Долг за ${month.toLowerCase()}: ${invoice.amount} Br</div>`;
-    } else if (isLate) {
-        summary = `<div><span class="pa-strong">${month}: ${invoice.amount} Br.</span> Если ребёнка в этом месяце не будет, можно не оплачивать.</div>`;
-    }
-    return `
-        ${rejected}
-        ${summary}
-        <button type="button" class="pa-btn is-primary" data-pa="go-pay">Оплатить</button>`;
-}
-
-function parentBalanceCard(student) {
+// What the current month looks like. Lessons count as remaining only once the month is paid.
+function parentMonthStatus(student) {
+    const invoice = student.invoice;
     const total = student.lessons_count || 0;
     const left = student.lessons_remaining || 0;
-    const percent = total ? Math.min(100, Math.round((left / total) * 100)) : 0;
-    if (!student.invoice) return `<section class="pa-card">${parentPaymentBlock(student)}</section>`;
+    if (['paid', 'written_off'].includes(invoice.status)) {
+        if (left <= 0) return {paid: true, text: 'Занятия закончились', css: 'pa-danger'};
+        return {
+            paid: true,
+            text: `Осталось ${left} из ${total}`,
+            note: left <= LOW_LESSONS ? 'Занятия заканчиваются' : '',
+            css: left <= LOW_LESSONS ? 'pa-warn' : 'pa-muted',
+        };
+    }
+    const labels = {
+        reported: ['Оплата проверяется', 'pa-warn'],
+        awaiting_receipt: ['Нужен чек', 'pa-warn'],
+        rejected: ['Оплата отклонена', 'pa-danger'],
+        overdue: ['Есть задолженность', 'pa-danger'],
+        skipped: ['Занятий в этом месяце не было', 'pa-muted'],
+    };
+    const [text, css] = labels[invoice.status] || ['Не оплачен', 'pa-warn'];
+    return {paid: false, text, css, note: left < total ? `По учёту: ${left} из ${total}` : ''};
+}
+
+function parentProgress(student) {
+    const total = student.lessons_count || 0;
+    const left = student.lessons_remaining || 0;
+    const percent = total ? Math.max(0, Math.min(100, Math.round((left / total) * 100))) : 0;
+    return `<div class="pa-progress ${left <= LOW_LESSONS ? 'is-low' : ''}"><span style="width: ${percent}%"></span></div>`;
+}
+
+function parentSubscriptionRow(student) {
+    if (!student.invoice) {
+        return `
+            <section class="pa-panel is-calm">
+                <div>${student.starts_on
+                    ? `Занятия начнутся ${escapeHtml(parentShortDate(student.starts_on))}, тогда же появится счёт.`
+                    : 'В этом месяце тренировок нет.'}</div>
+            </section>`;
+    }
+    const status = parentMonthStatus(student);
     return `
-        <section class="pa-card">
-            <div class="pa-row">
-                <div class="pa-label">Осталось занятий</div>
-                <div class="pa-big">${left} из ${total}</div>
-            </div>
-            <div class="pa-progress"><span style="width: ${percent}%"></span></div>
-            ${parentPaymentBlock(student)}
-            ${parentExtrasBlock(student)}
-            ${parentHistory(student)}
+        <button type="button" class="pa-rowlink pa-subscription" data-pa="go-subscription">
+            <span class="pa-rowlink-main">
+                ${bwIcon('credit-card')}
+                <span class="pa-stack">
+                    <span class="pa-strong">Абонемент · ${parentLessonsWord(student.lessons_count)}</span>
+                    <span class="${status.css} pa-small">${status.text}${status.note ? ` · ${status.note}` : ''}</span>
+                </span>
+                ${bwIcon('chevron-right', 20)}
+            </span>
+            ${status.paid ? parentProgress(student) : ''}
+        </button>`;
+}
+
+// One urgent payment at most: the oldest month that is still open.
+function parentPaymentPanel(student) {
+    const invoice = (student.invoices || []).find(item => item.id === student.oldest_open_invoice_id);
+    if (!invoice) return '';
+    const month = escapeHtml(parentMonth(invoice));
+    if (invoice.stored_status === 'reported') {
+        return `<section class="pa-panel is-calm"><div>${month}: ${invoice.amount} Br на проверке</div></section>`;
+    }
+    const pay = label => `<button type="button" class="pa-btn is-primary" data-pa="go-pay">${label}</button>`;
+    if (invoice.stored_status === 'awaiting_receipt') {
+        return `
+            <section class="pa-panel is-warn">
+                <div class="pa-panel-title">Прикрепите чек</div>
+                <div>${month}: ${invoice.amount} Br</div>
+                ${pay(`${bwIcon('upload', 20)}Прикрепить чек`)}
+            </section>`;
+    }
+    const isLate = parentDate(invoice.due_date) < parentDate(parentToday());
+    let tone = 'is-action';
+    let title = `Оплатить до ${escapeHtml(parentShortDate(invoice.due_date))}`;
+    let text = `${month}: ${invoice.amount} Br`;
+    if (invoice.status === 'overdue') {
+        tone = 'is-danger';
+        title = `Долг за ${month.toLowerCase()}`;
+        text = `${invoice.amount} Br`;
+    } else if (isLate) {
+        title = `${month}: ${invoice.amount} Br`;
+        text = 'Если ребёнка в этом месяце не будет, можно не оплачивать.';
+    }
+    if (invoice.stored_status === 'rejected') {
+        tone = 'is-danger';
+        title = 'Оплата отклонена';
+        text = `${month}: ${invoice.amount} Br${invoice.rejection_reason ? `. ${escapeHtml(invoice.rejection_reason)}` : ''}`;
+    }
+    return `
+        <section class="pa-panel ${tone}">
+            <div class="pa-panel-title">${title}</div>
+            <div>${text}</div>
+            ${pay(`Оплатить ${invoice.amount} Br`)}
         </section>`;
 }
 
@@ -255,55 +309,7 @@ function parentToday() {
     return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
 }
 
-function parentHistory(student) {
-    const paid = (student.invoices || []).filter(item => item.stored_status === 'paid' && item.kind === 'subscription');
-    if (!paid.length) return '';
-    return `
-        <details>
-            <summary>История оплат</summary>
-            <div class="pa-stack">
-                ${paid.map(item => `
-                    <div class="pa-row">
-                        <span>${escapeHtml(parentMonth(item))} ${parentDate(item.period_start).getFullYear()}</span>
-                        <span class="pa-muted">${item.amount} Br</span>
-                    </div>`).join('')}
-            </div>
-        </details>`;
-}
-
-function parentMakeupsCard(student) {
-    const available = student.makeups.filter(item => item.status === 'available');
-    const requested = student.makeups.filter(item => item.status === 'requested');
-    const scheduled = student.makeups.filter(item => item.status === 'scheduled');
-    if (!student.makeups.length) {
-        return `
-            <section class="pa-card">
-                <div>
-                    <div class="pa-label">Отработки</div>
-                    <div>Сейчас отработок нет</div>
-                </div>
-            </section>`;
-    }
-    const rejected = available.find(item => item.rejection_reason);
-    return `
-        <section class="pa-card">
-            <div>
-                <div class="pa-label">Отработки</div>
-                <div class="pa-mid">Доступно: ${available.length}</div>
-                ${available.length ? `<div class="pa-muted">Первая действует до ${escapeHtml(parentShortDate(available[0].expires_at))}</div>` : ''}
-            </div>
-            ${scheduled.map(item => `
-                <div class="pa-ok">Записаны: ${escapeHtml(parentLongDate(item.scheduled_date))}${item.scheduled_time ? `, ${escapeHtml(item.scheduled_time)}` : ''}</div>
-            `).join('')}
-            ${requested.map(item => `
-                <div class="pa-warn">Заявка на ${escapeHtml(parentShortDate(item.requested_date))} ждёт ответа тренера</div>
-            `).join('')}
-            ${rejected ? `<div class="pa-danger">Заявка отклонена: ${escapeHtml(rejected.rejection_reason)}</div>` : ''}
-            ${available.length ? '<button type="button" class="pa-btn" data-pa="go-makeup">Записаться на отработку</button>' : ''}
-        </section>`;
-}
-
-function parentScheduleCard(student) {
+function parentScheduleDays(student) {
     const rows = [];
     student.schedules.forEach(schedule => {
         String(schedule.days || '').split(',').filter(Boolean).forEach(day => {
@@ -311,76 +317,254 @@ function parentScheduleCard(student) {
             rows.push({index, time: schedule.times[String(index)] || '', place: parentPlace(schedule)});
         });
     });
-    rows.sort((left, right) => left.index - right.index);
-    const request = (parentData.schedule_requests || []).find(item => item.student_id === student.id);
+    return rows.sort((left, right) => left.index - right.index);
+}
+
+function parentHomeRows(student) {
+    const days = parentScheduleDays(student);
+    const available = student.makeups.filter(item => item.status === 'available').length;
+    const row = (icon, title, value, tab) => `
+        <button type="button" class="pa-list-row" data-pa="open-lessons" data-value="${tab}">
+            ${bwIcon(icon)}
+            <span class="pa-strong">${title}</span>
+            <span class="pa-list-value">${escapeHtml(value)}</span>
+            ${bwIcon('chevron-right', 20)}
+        </button>`;
     return `
-        <section class="pa-card">
-            <div class="pa-stack">
-                <div class="pa-label">Расписание</div>
-                ${rows.length ? rows.map(row => `
-                    <div class="pa-row">
-                        <span class="pa-strong">${PARENT_WEEKDAYS[row.index]}</span>
-                        <span class="pa-muted">${escapeHtml(row.time)}</span>
-                    </div>`).join('') : '<div>Расписание назначит тренер</div>'}
-            </div>
-            ${request?.status === 'pending' ? '<div class="pa-warn">Новое расписание ждёт ответа тренера</div>' : ''}
-            ${request?.status === 'rejected' ? `<div class="pa-danger">Изменение отклонено${request.rejection_reason ? `: ${escapeHtml(request.rejection_reason)}` : ''}</div>` : ''}
-            <button type="button" class="pa-btn" data-pa="go-schedule">Изменить расписание</button>
-            <button type="button" class="pa-switch" data-pa="toggle-reminder" aria-pressed="${student.training_reminders_enabled ? 'true' : 'false'}">
-                <span>Напоминать накануне в 18:00</span>
-                <span class="pa-switch-track"></span>
-            </button>
-        </section>`;
+        <div class="pa-list">
+            ${row('calendar', 'Расписание', days.map(item => PARENT_WEEKDAYS_SHORT[item.index]).join(' · ') || 'Не назначено', 'schedule')}
+            ${row('clock', 'Отработки', available ? `Доступно: ${available}` : 'Нет', 'makeups')}
+        </div>`;
 }
 
 function renderParentHome(student) {
-    const switcher = parentData.students.length > 1
+    const several = parentData.students.length > 1;
+    const switcher = several
         ? `<div class="pa-segment">
                 ${parentData.students.map(item => `
                     <button type="button" data-pa="pick-student" data-id="${item.id}" aria-pressed="${item.id === student.id}">${escapeHtml(item.name.split(' ')[0])}</button>
                 `).join('')}
            </div>`
-        : `<div class="pa-muted">${escapeHtml(student.name)}</div>`;
+        : '';
     return `
-        <div class="pa-head">
-            <h1>Break Wave</h1>
-            ${switcher}
-        </div>
+        ${parentHeading(several ? 'Семья' : student.name)}
         <div class="pa-body">
+            ${switcher}
             ${parentRegistrationCards()}
             ${parentTrainingCard(student)}
-            ${parentBalanceCard(student)}
-            ${parentMakeupsCard(student)}
-            ${parentScheduleCard(student)}
-            <button type="button" class="pa-btn" data-pa="add-child">Добавить ребёнка</button>
+            ${parentPaymentPanel(student)}
+            ${parentSubscriptionRow(student)}
+            ${parentHomeRows(student)}
         </div>`;
 }
 
-function parentBar(title) {
+/* --- Subscription --- */
+
+function parentExtrasBlock(student) {
+    const open = student.open_extras.map(item => `
+        <button type="button" class="pa-btn" data-pa="open-extra" data-id="${item.id}" ${item.stored_status === 'reported' ? 'disabled' : ''}>${escapeHtml(item.label)}: ${item.amount} Br${item.stored_status === 'reported' ? ', на проверке' : ''}</button>`).join('');
+    const offer = student.upgrade_offer;
+    const hasOpenUpgrade = student.open_extras.some(item => item.kind === 'upgrade');
+    return `
+        ${student.lessons_over ? `<section class="pa-panel is-warn"><div>Занятий в этом месяце больше, чем в абонементе: на ${student.lessons_over}</div></section>` : ''}
+        ${offer && !hasOpenUpgrade ? `
+            <section class="pa-panel is-action">
+                <div class="pa-panel-title">Занятий может не хватить</div>
+                <div>До конца месяца тренировок: ${student.trainings_left}, занятий осталось: ${student.lessons_remaining}.</div>
+                <button type="button" class="pa-btn is-primary" data-pa="buy-upgrade">Перейти на ${offer.lessons} занятий, доплата ${offer.amount} Br</button>
+            </section>` : ''}
+        ${open}
+        ${student.open_extras.some(item => item.kind === 'single') ? '' : `<button type="button" class="pa-btn" data-pa="buy-single">${bwIcon('plus', 20)}Разовое занятие за 40 Br</button>`}`;
+}
+
+function renderParentSubscription(student) {
+    if (!student.invoice) return renderParentHome(student);
+    const status = parentMonthStatus(student);
+    const month = parentMonth(student.invoice);
+    return `
+        ${parentBar('Абонемент', 'go-home', student.name)}
+        <div class="pa-body">
+            <section class="pa-hero">
+                <div class="pa-eyebrow">${escapeHtml(month)}</div>
+                ${status.paid ? `
+                    <div class="pa-hero-count">
+                        <span class="pa-hero-time">${student.lessons_remaining}</span>
+                        <span class="pa-muted">из ${student.lessons_count} занятий осталось</span>
+                    </div>
+                    ${parentProgress(student)}` : `
+                    <div class="pa-hero-title">${parentLessonsWord(student.lessons_count)}</div>`}
+                <div class="${status.css}">${status.paid ? (student.lessons_remaining > 0 ? status.note || student.invoice.label : status.text) : status.text}${!status.paid && status.note ? ` · ${status.note}` : ''}</div>
+            </section>
+            ${parentPaymentPanel(student)}
+            ${parentExtrasBlock(student)}
+            <button type="button" class="pa-list-row pa-list-alone" data-pa="open-lessons" data-value="payments">
+                ${bwIcon('receipt')}
+                <span class="pa-strong">История оплат</span>
+                <span class="pa-list-value"></span>
+                ${bwIcon('chevron-right', 20)}
+            </button>
+        </div>`;
+}
+
+/* --- Lessons tab --- */
+
+function parentLessonsSchedule(student) {
+    const rows = parentScheduleDays(student);
+    const request = (parentData.schedule_requests || []).find(item => item.student_id === student.id);
+    return `
+        ${rows.length ? `<div class="pa-list">
+            ${rows.map(row => `
+                <div class="pa-list-row">
+                    <span class="pa-stack">
+                        <span class="pa-strong">${PARENT_WEEKDAYS[row.index]}</span>
+                        ${row.place ? `<span class="pa-muted pa-small">${escapeHtml(row.place)}</span>` : ''}
+                    </span>
+                    <span class="pa-list-value pa-strong">${escapeHtml(row.time)}</span>
+                </div>`).join('')}
+        </div>` : '<div class="st-empty">Расписание назначит тренер</div>'}
+        ${request?.status === 'pending' ? '<section class="pa-panel is-calm"><div>Новое расписание ждёт ответа тренера. Пока действует прежнее.</div></section>' : ''}
+        ${request?.status === 'rejected' ? `<section class="pa-panel is-danger"><div>Изменение отклонено${request.rejection_reason ? `: ${escapeHtml(request.rejection_reason)}` : ''}</div></section>` : ''}
+        <button type="button" class="pa-btn" data-pa="go-schedule">${bwIcon('edit', 20)}Изменить расписание</button>`;
+}
+
+function parentLessonsMakeups(student) {
+    const available = student.makeups.filter(item => item.status === 'available');
+    const requested = student.makeups.filter(item => item.status === 'requested');
+    const scheduled = student.makeups.filter(item => item.status === 'scheduled');
+    const rejected = available.find(item => item.rejection_reason);
+    if (!student.makeups.length) {
+        return `<div class="st-empty">${bwIcon('clock', 32)}<span>Сейчас отработок нет</span></div>`;
+    }
+    return `
+        <section class="pa-hero">
+            <div class="pa-eyebrow">Доступно</div>
+            <div class="pa-hero-time">${available.length}</div>
+            ${available.length ? `<div class="pa-muted">Первая действует до ${escapeHtml(parentShortDate(available[0].expires_at))}</div>` : ''}
+            ${available.length ? '<button type="button" class="pa-btn is-primary" data-pa="go-makeup">Записаться на отработку</button>' : ''}
+        </section>
+        ${scheduled.map(item => `
+            <section class="pa-panel is-ok"><div>Записаны: ${escapeHtml(parentLongDate(item.scheduled_date))}${item.scheduled_time ? `, ${escapeHtml(item.scheduled_time)}` : ''}</div></section>
+        `).join('')}
+        ${requested.map(item => `
+            <section class="pa-panel is-calm"><div>Заявка на ${escapeHtml(parentShortDate(item.requested_date))} ждёт ответа тренера</div></section>
+        `).join('')}
+        ${rejected ? `<section class="pa-panel is-danger"><div>Заявка отклонена: ${escapeHtml(rejected.rejection_reason)}</div></section>` : ''}`;
+}
+
+function parentLessonsPayments(student) {
+    const paid = (student.invoices || []).filter(item => item.stored_status === 'paid');
+    if (!paid.length) return `<div class="st-empty">${bwIcon('receipt', 32)}<span>Оплат пока нет</span></div>`;
+    return `
+        <div class="pa-list">
+            ${paid.map(item => `
+                <div class="pa-list-row">
+                    <span class="pa-stack">
+                        <span class="pa-strong">${escapeHtml(parentMonth(item))} ${parentDate(item.period_start).getFullYear()}</span>
+                        <span class="pa-muted pa-small">${escapeHtml(item.label)}</span>
+                    </span>
+                    <span class="pa-list-value pa-strong">${item.amount} Br</span>
+                </div>`).join('')}
+        </div>`;
+}
+
+function renderParentLessons(student) {
+    const sections = [['schedule', 'Расписание', parentLessonsSchedule], ['makeups', 'Отработки', parentLessonsMakeups], ['payments', 'Платежи', parentLessonsPayments]];
+    const current = sections.find(([id]) => id === parentUi.lessonsTab);
+    const several = parentData.students.length > 1;
+    return `
+        ${parentHeading('Занятия')}
+        <div class="pa-body">
+            ${several ? `<div class="pa-pills">
+                ${parentData.students.map(item => `
+                    <button type="button" data-pa="pick-student" data-id="${item.id}" aria-pressed="${item.id === student.id}">${escapeHtml(item.name.split(' ')[0])}</button>`).join('')}
+            </div>` : ''}
+            <div class="pa-segment">
+                ${sections.map(([id, label]) => `
+                    <button type="button" data-pa="pick-lessons" data-value="${id}" aria-pressed="${id === parentUi.lessonsTab}">${label}</button>`).join('')}
+            </div>
+            ${current[2](student)}
+        </div>`;
+}
+
+/* --- Profile tab --- */
+
+function renderParentProfile() {
+    const parent = parentData.parent;
+    return `
+        ${parentHeading('Профиль')}
+        <div class="pa-body">
+            <h2 class="pa-section">Родитель</h2>
+            <div class="pa-list">
+                <div class="pa-list-row">
+                    ${bwIcon('user')}
+                    <span class="pa-stack">
+                        <span class="pa-strong">${escapeHtml(parent?.full_name)}</span>
+                        <span class="pa-muted pa-small">${escapeHtml(parent?.phone)}</span>
+                    </span>
+                </div>
+            </div>
+            <h2 class="pa-section">Дети</h2>
+            ${parentRegistrationCards()}
+            <div class="pa-list">
+                ${parentData.students.map(item => `
+                    <button type="button" class="pa-list-row" data-pa="pick-student" data-id="${item.id}" data-tab="home">
+                        <span class="st-avatar">${escapeHtml(bwInitials(item.name))}</span>
+                        <span class="pa-strong">${escapeHtml(item.name)}</span>
+                        <span class="pa-list-value"></span>
+                        ${bwIcon('chevron-right', 20)}
+                    </button>`).join('')}
+                <button type="button" class="pa-list-row pa-list-action" data-pa="add-child">
+                    ${bwIcon('plus')}
+                    <span class="pa-strong">Добавить ребёнка</span>
+                </button>
+            </div>
+            <h2 class="pa-section">Напоминать накануне в 18:00</h2>
+            <div class="pa-list">
+                ${parentData.students.map(item => `
+                    <button type="button" class="pa-switch" data-pa="toggle-reminder" data-id="${item.id}" aria-pressed="${item.training_reminders_enabled ? 'true' : 'false'}">
+                        ${bwIcon('bell')}
+                        <span>${escapeHtml(item.name.split(' ')[0])}</span>
+                        <span class="pa-switch-track"></span>
+                    </button>`).join('')}
+            </div>
+        </div>`;
+}
+
+/* --- Nested screens --- */
+
+function parentBar(title, action = 'go-home', subtitle = '') {
     return `
         <div class="pa-bar">
-            <button type="button" class="pa-back" data-pa="go-home" aria-label="Назад">${PARENT_BACK_ICON}</button>
-            <h1>${escapeHtml(title)}</h1>
+            <button type="button" class="pa-back" data-pa="${action}" data-back aria-label="Назад">${bwIcon('chevron-left', 26)}</button>
+            <div>
+                <h1>${escapeHtml(title)}</h1>
+                ${subtitle ? `<div class="pa-muted pa-small">${escapeHtml(subtitle)}</div>` : ''}
+            </div>
         </div>`;
 }
 
 function renderParentPay(student) {
     const invoice = parentPayableInvoice(student);
     if (!invoice) return renderParentHome(student);
-    const firstName = student.name.split(' ')[0];
     const isExtra = parentIsExtra();
     const canChooseTariff = !isExtra && invoice.id === student.invoice?.id && student.tariff_change_allowed;
     const tariffCode = parentUi.tariff || invoice.tariff_code;
     const amount = canChooseTariff ? parentData.tariffs[tariffCode].price : invoice.amount;
+    const partialNote = invoice.is_partial
+        ? `<div class="pa-label">${parentLessonsWord(invoice.lessons_count)} × 40 Br${invoice.lessons_count * 40 > invoice.amount ? `, но не дороже абонемента: ${invoice.amount} Br` : ` = ${invoice.amount} Br`}</div>`
+        : '';
     const tariffBlock = canChooseTariff
         ? `
-            ${Object.entries(parentData.tariffs).filter(([code, tariff]) => code !== 'single' && (!student.tariff_upgrade_only || tariff.lessons >= invoice.lessons_count)).map(([code, tariff]) => `
-                <button type="button" class="pa-choice" data-pa="pick-tariff" data-value="${escapeHtml(code)}" aria-pressed="${code === tariffCode}">
-                    <span>${escapeHtml(tariff.label)}</span>
-                    <span class="pa-strong">${tariff.price} Br</span>
-                </button>`).join('')}
-            <div class="pa-label">${student.tariff_upgrade_only ? 'После 5 числа абонемент можно только увеличить' : 'Изменить абонемент можно до 5 числа'}</div>`
-        : `<div class="pa-note">${escapeHtml(invoice.label)}: ${amount} Br</div>`;
+            ${Object.entries(parentData.tariffs).filter(([code]) => code !== 'single').map(([code, tariff]) => {
+                const blocked = student.tariff_upgrade_only && tariff.lessons < invoice.lessons_count;
+                return `
+                    <button type="button" class="pa-choice" data-pa="pick-tariff" data-value="${escapeHtml(code)}" aria-pressed="${code === tariffCode}" ${blocked ? 'disabled' : ''}>
+                        <span>${escapeHtml(tariff.label)}</span>
+                        <span class="pa-strong">${tariff.price} Br</span>
+                    </button>`;
+            }).join('')}
+            <div class="pa-label">${student.tariff_upgrade_only ? 'Уменьшить абонемент можно до 5 числа, увеличить можно всегда' : 'Уменьшить абонемент можно до 5 числа'}</div>`
+        : `<div class="pa-note">${escapeHtml(invoice.label)}: ${amount} Br</div>${partialNote}`;
     const online = parentUi.method === 'online';
     const details = parentData.payment_details
         ? `Переведите ${amount} Br по реквизитам:\n${parentData.payment_details}\n\nЗатем прикрепите чек.`
@@ -388,17 +572,18 @@ function renderParentPay(student) {
     const action = online
         ? `
             <input id="pa-receipt" class="pa-file" type="file" accept="image/*,application/pdf" data-pa-file ${parentUi.busy ? 'disabled' : ''}>
-            <label for="pa-receipt" class="pa-btn ${parentUi.busy ? 'is-busy' : 'is-primary'}">${parentUi.busy ? 'Отправляем…' : 'Прикрепить чек и отправить'}</label>`
-        : `<button type="button" class="pa-btn is-primary" data-pa="submit-cash" ${parentUi.busy ? 'disabled' : ''}>${parentUi.busy ? 'Отправляем…' : 'Я передам наличные'}</button>`;
+            <label for="pa-receipt" class="pa-btn ${parentUi.busy ? 'is-busy' : 'is-primary'}">${parentUi.busy ? 'Отправляем…' : `${bwIcon('upload', 20)}Прикрепить чек · ${amount} Br`}</label>`
+        : `<button type="button" class="pa-btn is-primary" data-pa="submit-cash" ${parentUi.busy ? 'disabled' : ''}>${parentUi.busy ? 'Отправляем…' : `Я передам наличные · ${amount} Br`}</button>`;
+    const title = isExtra ? (invoice.kind === 'single' ? 'Разовое занятие' : 'Доплата') : `Оплата за ${parentMonth(invoice).toLowerCase()}`;
     return `
-        ${parentBar(isExtra ? `${invoice.kind === 'single' ? 'Разовое занятие' : 'Доплата'}, ${firstName}` : `Оплата за ${parentMonth(invoice).toLowerCase()}, ${firstName}`)}
+        ${parentBar(title, 'pay-back', student.name)}
         <div class="pa-body">
             <div class="pa-group">
-                <h2>Абонемент</h2>
+                <h2 class="pa-section">Абонемент</h2>
                 ${tariffBlock}
             </div>
             <div class="pa-group">
-                <h2>Как оплатить</h2>
+                <h2 class="pa-section">Как оплатить</h2>
                 <div class="pa-segment">
                     <button type="button" data-pa="pick-method" data-value="online" aria-pressed="${online}">Онлайн</button>
                     <button type="button" data-pa="pick-method" data-value="cash" aria-pressed="${!online}">Наличными</button>
@@ -411,20 +596,21 @@ function renderParentPay(student) {
 
 function renderParentPayDone() {
     return `
-        <div class="pa-stack pa-center" style="gap: 12px">
-            <h1>Оплата на проверке</h1>
-            <p class="pa-muted">Администратор проверит её, и бот сообщит результат в Telegram.</p>
-            <button type="button" class="pa-btn is-primary" data-pa="go-home">На главную</button>
+        <div class="pa-stack pa-center">
+            <div class="pa-result">${bwIcon('clock', 40)}</div>
+            <h1>Платёж отправлен на проверку</h1>
+            <p class="pa-muted">Администратор проверит его, и бот сообщит результат в Telegram.</p>
+            <button type="button" class="pa-btn is-primary" data-pa="go-home" data-back>На главную</button>
         </div>`;
 }
 
 function renderParentMakeup(student) {
     const slots = student.makeup_slots || [];
     return `
-        ${parentBar(`Отработка, ${student.name.split(' ')[0]}`)}
+        ${parentBar('Отработка', 'go-home', student.name)}
         <div class="pa-body">
             <div class="pa-group">
-                <h2>Выберите тренировку</h2>
+                <h2 class="pa-section">Выберите тренировку</h2>
                 ${slots.length ? slots.map((slot, index) => `
                     <button type="button" class="pa-choice pa-choice-column" data-pa="pick-slot" data-value="${index}" aria-pressed="${parentUi.slot === index}">
                         <span class="pa-strong">${escapeHtml(parentLongDate(slot.date))}, ${escapeHtml(slot.time)}</span>
@@ -442,17 +628,17 @@ function renderParentSchedule(student) {
         `<option value="${index}" ${index === Number(selected) ? 'selected' : ''}>${label}</option>`
     ).join('');
     return `
-        ${parentBar(`Расписание, ${student.name.split(' ')[0]}`)}
+        ${parentBar('Изменить расписание', 'go-home', student.name)}
         <div class="pa-body">
             <div class="pa-group">
-                <h2>Какие дни и время удобны</h2>
+                <h2 class="pa-section">Какие дни и время удобны</h2>
                 ${parentUi.scheduleRows.map((row, index) => `
                     <div class="pa-schedule-row">
                         <select class="pa-field" aria-label="День" data-pa-row="${index}" data-field="day">${options(row.day)}</select>
                         <input class="pa-field" type="time" aria-label="Время" value="${escapeHtml(row.time)}" data-pa-row="${index}" data-field="time">
-                        <button type="button" class="pa-remove" data-pa="remove-row" data-value="${index}" aria-label="Убрать">${REMOVE_ICON}</button>
+                        <button type="button" class="pa-remove" data-pa="remove-row" data-value="${index}" aria-label="Убрать">${bwIcon('x', 20)}</button>
                     </div>`).join('')}
-                <button type="button" class="pa-btn" data-pa="add-row">Добавить день</button>
+                <button type="button" class="pa-btn" data-pa="add-row">${bwIcon('plus', 20)}Добавить день</button>
                 <div class="pa-label">Тренер подтвердит новое расписание или предложит другое.</div>
             </div>
         </div>
@@ -517,19 +703,36 @@ async function parentSubmitReceipt(file) {
     });
 }
 
+function parentOpenPay(changes) {
+    parentGo('pay', {payFrom: parentUi.view, tariff: null, extraId: null, ...changes});
+}
+
 const PARENT_ACTIONS = {
+    tab: target => {
+        parentGo('home', {tab: target.dataset.value});
+        // The tab opens at once; fresh data arrives behind the scenes.
+        loadParentContext();
+    },
     'add-child': () => renderRegistration({existingParent: parentData.parent}),
-    'pick-student': target => parentGo('home', {studentId: Number(target.dataset.id), tariff: null}),
+    'pick-student': target => parentGo('home', {
+        studentId: Number(target.dataset.id),
+        tab: target.dataset.tab || parentUi.tab,
+        tariff: null,
+    }),
+    'pick-lessons': target => parentGo('home', {lessonsTab: target.dataset.value}),
+    'open-lessons': target => parentGo('home', {tab: 'lessons', lessonsTab: target.dataset.value}),
     'go-home': () => parentGo('home', {tariff: null, slot: null, extraId: null}),
-    'go-pay': () => parentGo('pay', {tariff: null, extraId: null}),
-    'open-extra': target => parentGo('pay', {tariff: null, extraId: Number(target.dataset.id)}),
+    'go-subscription': () => parentGo('subscription', {extraId: null, tariff: null}),
+    'go-pay': () => parentOpenPay({}),
+    'pay-back': () => parentGo(parentUi.payFrom === 'subscription' ? 'subscription' : 'home', {tariff: null, extraId: null}),
+    'open-extra': target => parentOpenPay({extraId: Number(target.dataset.id)}),
     'buy-upgrade': () => parentRun(async () => {
         const {id} = await apiPost('/api/parent/upgrade', {student_id: parentStudent().id});
-        Object.assign(parentUi, {view: 'pay', tariff: null, extraId: id});
+        Object.assign(parentUi, {view: 'pay', payFrom: 'subscription', tariff: null, extraId: id});
     }),
     'buy-single': () => parentRun(async () => {
         const {id} = await apiPost('/api/parent/single', {student_id: parentStudent().id});
-        Object.assign(parentUi, {view: 'pay', tariff: null, extraId: id});
+        Object.assign(parentUi, {view: 'pay', payFrom: 'subscription', tariff: null, extraId: id});
     }),
     'go-makeup': () => parentGo('makeup', {slot: null}),
     'go-schedule': () => parentGo('schedule', {scheduleRows: parentScheduleRowsFrom(parentStudent())}),
@@ -555,8 +758,8 @@ const PARENT_ACTIONS = {
             response: target.dataset.value || null,
         }));
     },
-    'toggle-reminder': () => {
-        const student = parentStudent();
+    'toggle-reminder': target => {
+        const student = parentData.students.find(item => item.id === Number(target.dataset.id));
         // The switch moves at once; the reload after the request restores it if saving fails.
         student.training_reminders_enabled = !student.training_reminders_enabled;
         return parentRun(() => apiPost('/api/parent/reminders', {
