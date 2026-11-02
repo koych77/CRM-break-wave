@@ -80,7 +80,7 @@ test('family registration creates a student or links an existing one', async () 
   const app = createApp();
   const coachId = await addCoach(app, 20);
   const existing = await addStudent(app, { coachId, name: 'Есть В Списке', left: 5 });
-  const child = (name) => ({ name, birthday: '2018-03-04', schedule: [{ weekday: 1, time: '18:00' }] });
+  const child = (name) => ({ name, nickname: `${name}-ник`, birthday: '2018-03-04', schedule: [{ weekday: 1, time: '18:00' }] });
 
   assert.equal((await app.post('/api/parent/register', 21, { parent: { full_name: '', phone: '' }, children: [child('Лев')] })).status, 400);
   const parent = { full_name: 'Анна Иванова', phone: '+375291112233' };
@@ -112,10 +112,39 @@ test('family registration creates a student or links an existing one', async () 
   assert.equal((await app.post(`/api/staff/registrations/${first.id}/review`, 20, { decision: 'reject', reason: 'x' })).status, 404);
 });
 
+test('the family form requires a nickname and a real birth date', async () => {
+  const app = createApp();
+  const coachId = await addCoach(app, 27);
+  const parent = { full_name: 'Анна Иванова', phone: '+375291112233' };
+  const child = { name: 'Лев Иванов', nickname: 'Лёва', birthday: '2018-03-04', schedule: [{ weekday: 1, time: '18:00' }] };
+  const send = (changes) => app.post('/api/parent/register', 28, { parent, children: [{ ...child, ...changes }] });
+
+  assert.equal((await send({ nickname: '  ' })).data.error, 'child_nickname_required');
+  assert.equal((await send({ birthday: '' })).data.error, 'child_birthday_required');
+  assert.equal((await send({ birthday: '2999-01-01' })).data.error, 'child_birthday_required');
+  assert.equal((await send({})).status, 200);
+
+  const { data } = await app.post('/api/staff/requests', 27);
+  assert.equal(data.registrations[0].child_nickname, 'Лёва');
+  assert.equal(data.registrations[0].child_birthday, '2018-03-04');
+  const approved = await app.post(`/api/staff/registrations/${data.registrations[0].id}/review`, 27, { decision: 'approve', start_date: today() });
+  const student = await app.post(`/api/staff/students/${approved.data.student_id}`, 27);
+  assert.equal(student.data.student.nickname, 'Лёва');
+  assert.equal(student.data.student.birthday, '2018-03-04');
+
+  const existing = await addStudent(app, { coachId, name: 'Старый Ученик' });
+  await app.post('/api/parent/register', 29, { parent, children: [{ ...child, name: 'Старый Ученик', nickname: 'Старик' }] });
+  const second = await app.post('/api/staff/requests', 27);
+  await app.post(`/api/staff/registrations/${second.data.registrations[0].id}/review`, 27, { decision: 'approve', start_date: today(), link_student_id: existing });
+  assert.equal((await app.post(`/api/staff/students/${existing}`, 27)).data.student.nickname, 'Старик');
+  const list = await app.post('/api/staff/students', 27);
+  assert.deepEqual(list.data.students.map((item) => item.nickname).sort(), ['Лёва', 'Старик']);
+});
+
 test('rejecting requires a reason that reaches the parent', async () => {
   const app = createApp();
   await addCoach(app, 25);
-  const child = { name: 'Отказ', birthday: '2018-01-01', schedule: [{ weekday: 0, time: '10:00' }] };
+  const child = { name: 'Отказ', nickname: 'Отказник', birthday: '2018-01-01', schedule: [{ weekday: 0, time: '10:00' }] };
   await app.post('/api/parent/register', 26, { parent: { full_name: 'Мама Отказа', phone: '+375290000001' }, children: [child] });
   const { data } = await app.post('/api/staff/requests', 25);
   const id = data.registrations[0].id;

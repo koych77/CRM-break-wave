@@ -34,6 +34,21 @@ function parentLongDate(value) {
     return `${PARENT_WEEKDAYS[parentDayIndex(parentDate(value))]}, ${parentShortDate(value)}`;
 }
 
+function parentBirthday(value) {
+    const born = parentDate(value);
+    const today = new Date();
+    let age = today.getFullYear() - born.getFullYear();
+    if (today.getMonth() < born.getMonth() || (today.getMonth() === born.getMonth() && today.getDate() < born.getDate())) age -= 1;
+    const tens = age % 100;
+    const ones = age % 10;
+    let word = 'лет';
+    if (tens < 11 || tens > 14) {
+      if (ones === 1) word = 'год';
+      else if (ones >= 2 && ones <= 4) word = 'года';
+    }
+    return `${parentShortDate(value)} ${born.getFullYear()}, ${age} ${word}`;
+}
+
 function parentNearDate(value) {
     const today = new Date();
     today.setHours(0, 0, 0, 0);

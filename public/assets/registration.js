@@ -9,7 +9,7 @@ const registration = {
 };
 
 function newRegistrationChild() {
-    return {name: '', birthday: '', schedule: [{weekday: 1, time: '18:00'}]};
+    return {name: '', nickname: '', birthday: '', schedule: [{weekday: 1, time: '18:00'}]};
 }
 
 function renderRegistration({existingParent = null} = {}) {
@@ -26,6 +26,8 @@ function paintRegistration() {
     const weekdays = selected => PARENT_WEEKDAYS.map((label, index) =>
         `<option value="${index}" ${index === Number(selected) ? 'selected' : ''}>${label}</option>`
     ).join('');
+    const now = new Date();
+    const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
     const children = registration.children.map((child, childIndex) => `
         <section class="pa-card">
             <div class="pa-row">
@@ -37,8 +39,12 @@ function paintRegistration() {
                 <input class="pa-field" autocomplete="off" data-reg-child="${childIndex}" data-field="name" value="${escapeHtml(child.name)}">
             </label>
             <label class="pa-stack">
+                <span class="pa-label">Никнейм</span>
+                <input class="pa-field" autocomplete="off" maxlength="50" data-reg-child="${childIndex}" data-field="nickname" value="${escapeHtml(child.nickname)}">
+            </label>
+            <label class="pa-stack">
                 <span class="pa-label">Дата рождения</span>
-                <input class="pa-field" type="date" data-reg-child="${childIndex}" data-field="birthday" value="${escapeHtml(child.birthday)}">
+                <input class="pa-field ${child.birthday ? '' : 'is-empty'}" type="date" max="${today}" data-reg-child="${childIndex}" data-field="birthday" value="${escapeHtml(child.birthday)}">
             </label>
             <div class="pa-group">
                 <span class="pa-label">Удобные дни и время</span>
@@ -129,6 +135,7 @@ document.addEventListener('input', event => {
         registration[target.dataset.regParent] = target.value;
     } else if (target.dataset.regChild !== undefined) {
         registration.children[Number(target.dataset.regChild)][target.dataset.field] = target.value;
+        if (target.type === 'date') target.classList.toggle('is-empty', !target.value);
     } else if (target.dataset.regRow !== undefined) {
         const row = registration.children[Number(target.dataset.child)].schedule[Number(target.dataset.regRow)];
         row[target.dataset.field] = target.dataset.field === 'weekday' ? Number(target.value) : target.value;

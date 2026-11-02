@@ -63,7 +63,7 @@ async function buildDay(db, coach, date) {
   const scheduled = await all(
     db,
     `SELECT sc.time, sc.location_id, sc.group_id, l.name AS location, g.name AS group_name,
-            s.id AS student_id, s.name, s.lessons_remaining, s.coach_id
+            s.id AS student_id, s.name, s.nickname, s.lessons_remaining, s.coach_id
      FROM schedules sc
      JOIN students s ON s.id = sc.student_id
      LEFT JOIN locations l ON l.id = sc.location_id
@@ -77,7 +77,7 @@ async function buildDay(db, coach, date) {
   const makeups = await all(
     db,
     `SELECT m.id AS makeup_id, m.scheduled_time AS time, m.location_id, m.group_id, l.name AS location,
-            g.name AS group_name, s.id AS student_id, s.name, s.lessons_remaining
+            g.name AS group_name, s.id AS student_id, s.name, s.nickname, s.lessons_remaining
      FROM makeups m
      JOIN students s ON s.id = m.student_id
      LEFT JOIN locations l ON l.id = m.location_id
@@ -124,6 +124,7 @@ async function buildDay(db, coach, date) {
     sessions.get(key).roster.push({
       student_id: row.student_id,
       name: row.name,
+      nickname: row.nickname,
       source,
       makeup_id: makeupId,
       tag,
@@ -238,6 +239,7 @@ export async function students(ctx) {
     students: rows.map((row) => ({
       id: row.id,
       name: row.name,
+      nickname: row.nickname,
       phone: row.phone,
       parent_name: row.parent_name,
       parent_phone: row.parent_account_phone || row.parent_phone,
@@ -271,6 +273,7 @@ export async function studentDetail(ctx) {
     student: {
       id: student.id,
       name: student.name,
+      nickname: student.nickname,
       phone: student.phone,
       birthday: student.birthday,
       notes: student.notes,
@@ -327,6 +330,7 @@ function parseStudentFields(body) {
   }
   return {
     name,
+    nickname: text(fields.nickname, 50) || null,
     phone: text(fields.phone, 50) || null,
     parent_phone: text(fields.parent_phone, 50) || null,
     birthday,
@@ -352,10 +356,11 @@ export async function createStudent(ctx) {
   const coachId = await resolveCoachId(ctx, coach, fields.coach_id);
   const id = await insert(
     ctx.db,
-    `INSERT INTO students (coach_id, name, phone, parent_phone, birthday, notes, training_start_date, lessons_count, lessons_remaining, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO students (coach_id, name, nickname, phone, parent_phone, birthday, notes, training_start_date, lessons_count, lessons_remaining, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     coachId,
     fields.name,
+    fields.nickname,
     fields.phone,
     fields.parent_phone,
     fields.birthday,
@@ -378,10 +383,11 @@ export async function updateStudent(ctx) {
   const coachId = coach.can_admin && fields.coach_id ? await resolveCoachId(ctx, coach, fields.coach_id) : student.coach_id;
   await run(
     ctx.db,
-    `UPDATE students SET coach_id = ?, name = ?, phone = ?, parent_phone = ?, birthday = ?, notes = ?,
+    `UPDATE students SET coach_id = ?, name = ?, nickname = ?, phone = ?, parent_phone = ?, birthday = ?, notes = ?,
        training_start_date = ?, lessons_count = ?, lessons_remaining = ? WHERE id = ?`,
     coachId,
     fields.name,
+    fields.nickname,
     fields.phone,
     fields.parent_phone,
     fields.birthday,
@@ -407,7 +413,7 @@ export async function deleteStudent(ctx) {
   if (!student) throw new ApiError(404, 'student_not_found', 'Ученик не найден');
   await db.batch([
     db.prepare(
-      `UPDATE students SET name = 'Удалённый ученик', phone = NULL, parent_phone = NULL, birthday = NULL, notes = NULL,
+      `UPDATE students SET name = 'Удалённый ученик', nickname = NULL, phone = NULL, parent_phone = NULL, birthday = NULL, notes = NULL,
          parent_id = NULL, is_active = 0, deleted_at = ? WHERE id = ?`,
     ).bind(isoNow(), id),
     db.prepare('DELETE FROM schedules WHERE student_id = ?').bind(id),
@@ -460,6 +466,7 @@ export async function requests(ctx) {
     registrations: registrations.map((item) => ({
       id: item.id,
       child_name: item.child_name,
+      child_nickname: item.child_nickname,
       child_birthday: item.child_birthday,
       parent_name: item.parent_name,
       parent_phone: item.parent_phone,
@@ -532,20 +539,22 @@ export async function reviewRegistration(ctx) {
     if (!existing) throw new ApiError(404, 'student_not_found', 'Ученик не найден');
     await run(
       db,
-      'UPDATE students SET parent_id = ?, parent_phone = ?, birthday = COALESCE(birthday, ?) WHERE id = ?',
+      'UPDATE students SET parent_id = ?, parent_phone = ?, birthday = COALESCE(birthday, ?), nickname = COALESCE(nickname, ?) WHERE id = ?',
       request.parent_id,
       request.parent_phone,
       request.child_birthday,
+      request.child_nickname,
       studentId,
     );
   } else {
     studentId = await insert(
       db,
-      `INSERT INTO students (coach_id, parent_id, name, phone, parent_phone, birthday, training_start_date, lessons_count, lessons_remaining, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 8, 0, ?)`,
+      `INSERT INTO students (coach_id, parent_id, name, nickname, phone, parent_phone, birthday, training_start_date, lessons_count, lessons_remaining, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 8, 0, ?)`,
       coachId,
       request.parent_id,
       request.child_name,
+      request.child_nickname,
       request.child_phone,
       request.parent_phone,
       request.child_birthday,

@@ -255,6 +255,7 @@ function staffAttendanceHtml() {
             <button type="button" class="pa-choice st-mark ${absent ? 'is-absent' : ''}" data-st="toggle-mark" data-value="${item.student_id}" aria-pressed="${absent}" ${future ? 'disabled' : ''}>
                 <span class="pa-stack">
                     <span class="pa-strong">${escapeHtml(item.name)}</span>
+                    ${item.nickname ? `<span class="pa-muted pa-small">${escapeHtml(item.nickname)}</span>` : ''}
                     ${item.tag ? `<span class="pa-muted pa-small">${escapeHtml(item.tag)}</span>` : ''}
                 </span>
                 ${future ? '' : `<span class="${absent ? 'pa-warn' : 'pa-ok'}">${absent ? 'Нет' : 'Есть'}</span>`}
@@ -286,7 +287,7 @@ function staffAttendanceHtml() {
 function staffStudentRows() {
     const query = staff.query.trim().toLowerCase();
     const rows = staff.students.filter(item => !query
-        || [item.name, item.parent_name, item.phone, item.parent_phone].some(value => String(value || '').toLowerCase().includes(query)));
+        || [item.name, item.nickname, item.parent_name, item.phone, item.parent_phone].some(value => String(value || '').toLowerCase().includes(query)));
     if (!rows.length) return '<div class="st-empty">Никого не нашли</div>';
     const flags = {debt: ['Долг', 'pa-danger'], low: ['Мало занятий', 'pa-warn']};
     return rows.map(item => {
@@ -295,6 +296,7 @@ function staffStudentRows() {
             <button type="button" class="pa-choice" data-st="open-student" data-value="${item.id}">
                 <span class="pa-stack">
                     <span class="pa-strong">${escapeHtml(item.name)}</span>
+                    ${item.nickname ? `<span class="pa-muted pa-small">${escapeHtml(item.nickname)}</span>` : ''}
                     <span class="pa-muted pa-small">${item.group ? `${escapeHtml(item.group)}, ` : ''}занятий: ${item.lessons_remaining}</span>
                 </span>
                 ${flag ? `<span class="${flag[1]} pa-small">${flag[0]}</span>` : ''}
@@ -309,7 +311,7 @@ function staffStudentsHtml() {
             <button type="button" class="pa-link" data-st="new-student">Добавить</button>
         </div>
         <label class="pa-stack">
-            <span class="pa-label">Поиск по имени или телефону</span>
+            <span class="pa-label">Поиск по имени, никнейму или телефону</span>
             <input class="pa-field" type="search" data-st-input="query" value="${escapeHtml(staff.query)}">
         </label>
         <div class="pa-group" id="st-student-list">${staffStudentRows()}</div>`;
@@ -337,6 +339,10 @@ function staffStudentHtml() {
     return `
         ${staffBar(item.name)}
         <div class="pa-body">
+            ${item.nickname || item.birthday ? `<section class="pa-card">
+                ${item.nickname ? `<div class="pa-row"><span class="pa-muted">Никнейм</span><span>${escapeHtml(item.nickname)}</span></div>` : ''}
+                ${item.birthday ? `<div class="pa-row"><span class="pa-muted">Дата рождения</span><span>${escapeHtml(parentBirthday(item.birthday))}</span></div>` : ''}
+            </section>` : ''}
             <section class="pa-card">
                 <div class="pa-row"><span class="pa-muted">Осталось занятий</span><span class="pa-strong">${item.lessons_remaining} из ${item.lessons_count}</span></div>
                 <div class="pa-row"><span class="pa-muted">Отработки</span><span>${item.makeups}</span></div>
@@ -394,6 +400,7 @@ function staffFormHtml() {
         <div class="pa-body">
             <section class="pa-card">
                 ${field('Имя и фамилия', 'name')}
+                ${field('Никнейм', 'nickname')}
                 ${field('Дата рождения', 'birthday', 'date')}
                 ${field('Телефон ученика', 'phone', 'tel')}
                 ${form.parent_linked ? '' : field('Телефон родителя', 'parent_phone', 'tel')}
@@ -465,6 +472,8 @@ function staffRequestsHtml() {
             <div>
                 <div class="pa-label">Новая семья</div>
                 <div class="pa-mid">${escapeHtml(item.child_name)}</div>
+                ${item.child_nickname ? `<div class="pa-muted">Никнейм: ${escapeHtml(item.child_nickname)}</div>` : ''}
+                <div class="pa-muted">Дата рождения: ${escapeHtml(parentBirthday(item.child_birthday))}</div>
                 <div class="pa-muted">Родитель: ${escapeHtml(item.parent_name)}, ${escapeHtml(item.parent_phone)}</div>
                 <div class="pa-muted">Удобно: ${escapeHtml(staffScheduleText(item.proposed_schedule))}</div>
             </div>
@@ -681,6 +690,7 @@ function staffStartForm(student) {
         ? {
             id: student.id,
             name: student.name,
+            nickname: student.nickname,
             birthday: student.birthday,
             phone: student.phone,
             parent_phone: student.parent_phone,
@@ -695,6 +705,7 @@ function staffStartForm(student) {
         : {
             id: null,
             name: '',
+            nickname: '',
             birthday: '',
             phone: '',
             parent_phone: '',

@@ -563,6 +563,12 @@ select.pa-field {
         margin: 0;
         text-align: left;
     }
+
+    /* An empty date field shows nothing on iPhone. */
+    .pa-field[type="date"].is-empty::before {
+        content: "Выберите дату";
+        color: var(--pa-muted);
+    }
 }
 
 a.pa-btn {

@@ -235,8 +235,12 @@ export async function register(ctx) {
   const parsed = children.map((child) => {
     const name = text(child.name);
     if (name.length < 2) throw new ApiError(400, 'child_name_required', 'Укажите имя ребёнка');
-    if (!validDate(child.birthday)) throw new ApiError(400, 'child_birthday_required', 'Укажите дату рождения ребёнка');
-    return { name, birthday: child.birthday, phone: text(child.phone, 50) || null, schedule: parseScheduleRows(child.schedule) };
+    const nickname = text(child.nickname, 50);
+    if (!nickname) throw new ApiError(400, 'child_nickname_required', 'Укажите никнейм ребёнка');
+    if (!validDate(child.birthday) || child.birthday > minskNow().date) {
+      throw new ApiError(400, 'child_birthday_required', 'Укажите дату рождения ребёнка');
+    }
+    return { name, nickname, birthday: child.birthday, phone: text(child.phone, 50) || null, schedule: parseScheduleRows(child.schedule) };
   });
 
   const parent = await first(
@@ -261,10 +265,11 @@ export async function register(ctx) {
   for (const child of parsed) {
     await insert(
       db,
-      `INSERT INTO registration_requests (parent_id, child_name, child_birthday, child_phone, proposed_schedule, created_at)
-       VALUES (?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO registration_requests (parent_id, child_name, child_nickname, child_birthday, child_phone, proposed_schedule, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
       parent.id,
       child.name,
+      child.nickname,
       child.birthday,
       child.phone,
       JSON.stringify(child.schedule),
