@@ -277,8 +277,8 @@ async function boot() {
     try {
         tg?.ready();
         tg?.expand();
-        tg?.setHeaderColor?.('#0B0D10');
-        tg?.setBackgroundColor?.('#0B0D10');
+        tg?.setHeaderColor?.('#000000');
+        tg?.setBackgroundColor?.('#000000');
         if (tg?.isVersionAtLeast?.('7.7')) tg.disableVerticalSwipes?.();
         if (telegramBackSupported()) {
             document.documentElement.classList.add('tg-back');

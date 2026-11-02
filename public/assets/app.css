@@ -1,24 +1,25 @@
-/* === Break Wave design system: graphite base, one lime accent === */
+/* === Break Wave design system: black base, blue surfaces, turquoise accent === */
+/* Only black, white, blue, turquoise and light blue. Statuses differ by text and by shade. */
 
 :root {
     color-scheme: dark;
-    --bg-base: #0B0D10;
-    --bg-surface: #171B20;
-    --bg-raised: #242A31;
-    --text-primary: #F4F5F7;
-    --text-secondary: #AEB5BF;
-    --text-muted: #8994A3;
-    --accent: #CBF266;
-    --accent-text: #0B0D10;
-    --border: #363D46;
-    --danger-bg: #48222A;
-    --danger-text: #F5B3BA;
-    --warning-bg: #3C3016;
-    --warning-text: #E0BD73;
-    --success-bg: #17372D;
-    --success-text: #B4E7D0;
-    --info-bg: #1D3040;
-    --info-text: #B9DFF7;
+    --bg-base: #000000;
+    --bg-surface: #0D1826;
+    --bg-raised: #17283F;
+    --text-primary: #FFFFFF;
+    --text-secondary: #AFC4DC;
+    --text-muted: #86A0BD;
+    --accent: #22D3EE;
+    --accent-text: #000000;
+    --border: #2A4060;
+    --danger-bg: #1D4ED8;
+    --danger-text: #FFFFFF;
+    --warning-bg: #0C2F52;
+    --warning-text: #7DD3FC;
+    --success-bg: #06343F;
+    --success-text: #22D3EE;
+    --info-bg: #0C2F52;
+    --info-text: #BAE6FD;
     --gutter: 16px;
     --radius-sm: 8px;
     --radius-md: 12px;
@@ -875,7 +876,7 @@ main {
     height: 28px;
     padding: 3px;
     border-radius: 14px;
-    background: #48515B;
+    background: #2A4060;
 }
 
 .pa-switch-track::after {
@@ -883,7 +884,7 @@ main {
     width: 22px;
     height: 22px;
     border-radius: 11px;
-    background: #F4F5F7;
+    background: #FFFFFF;
 }
 
 .pa-switch[aria-pressed="true"] .pa-switch-track {
@@ -990,7 +991,7 @@ select.pa-field {
     appearance: none;
     padding-right: 30px;
     overflow: hidden;
-    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%23AEB5BF' stroke-width='2.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M7 9.5l5-5 5 5M7 14.5l5 5 5-5'/%3E%3C/svg%3E");
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%23AFC4DC' stroke-width='2.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M7 9.5l5-5 5 5M7 14.5l5 5 5-5'/%3E%3C/svg%3E");
     background-position: right 10px center;
     background-repeat: no-repeat;
     text-overflow: ellipsis;
@@ -1123,8 +1124,8 @@ a.st-icon-btn {
     margin: 0 auto;
     padding: 12px 16px;
     border-radius: var(--radius-md);
-    background: #F4F5F7;
-    color: #0B0D10;
+    background: #FFFFFF;
+    color: #000000;
     font-size: 15px;
     font-weight: 500;
     line-height: 20px;
