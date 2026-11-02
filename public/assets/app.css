@@ -36,10 +36,11 @@ main {
     --pa-line: rgba(143, 177, 211, 0.26);
     display: flex;
     flex-direction: column;
-    min-height: 100vh;
+    min-height: var(--tg-viewport-stable-height, 100vh);
     color: var(--pa-text);
     font-size: 15px;
     line-height: 1.4;
+    overflow-wrap: break-word;
 }
 
 .pa h1,
@@ -70,6 +71,10 @@ main {
 .pa-bar h1 {
     font-size: 18px;
     font-weight: 700;
+}
+
+.pa-bar > div {
+    min-width: 0;
 }
 
 .pa-back {
@@ -152,16 +157,33 @@ main {
     gap: 12px;
 }
 
+/* The left side wraps first, so a short value such as "150 Br" stays on one line. */
+.pa-row > :first-child:not(:last-child) {
+    flex: 1 1 0;
+    min-width: 0;
+}
+
+.pa-row > :last-child:not(:first-child) {
+    flex: 0 0 auto;
+    max-width: 60%;
+}
+
 .pa-stack {
     display: flex;
     flex-direction: column;
     gap: 4px;
+    min-width: 0;
 }
 
 .pa-two {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 8px;
+}
+
+/* Keeps two fields level when only one label wraps. */
+.pa-two > .pa-stack {
+    justify-content: flex-end;
 }
 
 .pa-segment {
@@ -267,6 +289,10 @@ main {
     text-align: left;
 }
 
+.pa-choice > :last-child:not(:first-child) {
+    flex: none;
+}
+
 .pa-choice[aria-pressed="true"] {
     border-color: var(--pa-accent);
     background: var(--pa-raised);
@@ -290,8 +316,9 @@ main {
 
 .pa-foot {
     position: sticky;
+    z-index: 5;
     bottom: 0;
-    padding: 12px 16px 20px;
+    padding: 12px 16px calc(env(safe-area-inset-bottom, 0px) + 20px);
     background: var(--pa-sunken);
 }
 
@@ -366,12 +393,23 @@ main {
 
 .pa-schedule-row {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) 112px 44px;
+    grid-template-columns: minmax(0, 1fr) 96px 44px;
     align-items: center;
-    gap: 8px;
+    gap: 6px;
+}
+
+@media (max-width: 359px) {
+    .pa-schedule-row {
+        grid-template-columns: minmax(0, 1fr) 44px;
+    }
+
+    .pa-schedule-row > select {
+        grid-column: 1 / -1;
+    }
 }
 
 .pa-remove {
+    flex: none;
     width: 44px;
     height: 44px;
     border: 0;
@@ -422,6 +460,38 @@ main {
     min-width: 0;
 }
 
+/* Native lists ignore the field height on iPhone, so the arrow is drawn here. */
+select.pa-field {
+    -webkit-appearance: none;
+    appearance: none;
+    padding-right: 30px;
+    overflow: hidden;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%23a8b7c9' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+    background-position: right 10px center;
+    background-repeat: no-repeat;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* iPhone: native date and time fields otherwise ignore the width and the height, and collapse when empty. */
+@supports (-webkit-touch-callout: none) {
+    .pa-field[type="date"],
+    .pa-field[type="time"] {
+        -webkit-appearance: none;
+        appearance: none;
+        display: block;
+        max-width: 100%;
+        height: 48px;
+        line-height: 46px;
+        text-align: left;
+    }
+
+    .pa-field::-webkit-date-and-time-value {
+        margin: 0;
+        text-align: left;
+    }
+}
+
 a.pa-btn {
     text-decoration: none;
 }
@@ -462,6 +532,10 @@ a.pa-btn {
     align-items: center;
     justify-content: space-between;
     gap: 12px;
+}
+
+.st-title > div:first-child {
+    min-width: 0;
 }
 
 .st-title h1 {
@@ -508,6 +582,16 @@ a.pa-btn {
     color: var(--pa-muted);
     font-size: 12px;
     font-weight: 600;
+}
+
+.st-nav span {
+    white-space: nowrap;
+}
+
+@media (max-width: 359px) {
+    .st-nav button {
+        font-size: 11px;
+    }
 }
 
 .st-nav button[aria-current="page"] {

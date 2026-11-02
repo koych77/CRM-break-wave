@@ -20,7 +20,8 @@
     "crons": ["*/5 * * * *"]
   },
   "vars": {
-    "WEBAPP_URL": "https://crm-break-wave.koych77.workers.dev"
+    "WEBAPP_URL": "https://crm-break-wave.koych77.workers.dev",
+    "ADMIN_USERNAMES": "Yury_Kojpish,Bboy_K_Maks"
   }
   // Secrets, set with `wrangler secret put`:
   // BOT_TOKEN, ADMIN_IDS, ADMIN_SECRET, TELEGRAM_WEBHOOK_SECRET, PAYMENT_DETAILS

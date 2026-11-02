@@ -471,6 +471,19 @@ test('scheduled jobs run once a day and survive repeated ticks', async () => {
   assert.equal(app.telegram.filter((call) => call.payload?.text?.startsWith('Не отмечена')).length, 1);
 });
 
+test('a listed username becomes an administrator on first contact', async () => {
+  const app = createApp();
+  app.env.ADMIN_USERNAMES = 'Some_Admin, Other_Admin';
+  const start = (id, username) => app.webhook({
+    message: { text: '/start', chat: { id, type: 'private' }, from: { id, first_name: 'Тест', username } },
+  });
+  await start(501, 'other_admin');
+  await start(502, 'stranger');
+  await start(503, undefined);
+  const rows = (await app.db.prepare('SELECT telegram_id, is_admin, is_manager FROM coaches').all()).results;
+  assert.deepEqual(rows.map((row) => ({ ...row })), [{ telegram_id: 501, is_admin: 1, is_manager: 1 }]);
+});
+
 test('scheduled tick connects the webhook only when it is missing', async () => {
   const app = createApp();
   const tick = new Date('2026-11-03T07:30:00Z');

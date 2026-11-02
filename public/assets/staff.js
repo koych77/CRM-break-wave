@@ -477,7 +477,7 @@ function staffRequestsHtml() {
             <section class="pa-card" data-pay-card="${item.id}">
                 <div>
                     <div class="pa-label">${item.method === 'cash' ? 'Наличные' : 'Чек на проверку'}</div>
-                    <div class="pa-mid">${escapeHtml(item.student_name)}, ${item.amount} Br</div>
+                    <div class="pa-mid">${escapeHtml(item.student_name)}, ${item.amount}&nbsp;Br</div>
                     <div class="pa-muted">${escapeHtml(PARENT_MONTHS_NOMINATIVE[parentDate(item.period_start).getMonth()])}</div>
                 </div>
                 ${preview}

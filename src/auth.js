@@ -53,12 +53,20 @@ export function superAdminIds(env) {
     .filter((value) => Number.isInteger(value) && value > 0);
 }
 
-// The account in ADMIN_IDS becomes an administrator and a coach on first contact.
+function isListedUsername(env, username) {
+  if (!username) return false;
+  return String(env.ADMIN_USERNAMES || '')
+    .split(',')
+    .some((value) => value.trim().toLowerCase() === username.toLowerCase());
+}
+
+// An account in ADMIN_IDS or ADMIN_USERNAMES becomes an administrator and a coach on first contact.
+// After that the row is bound to the Telegram ID, so the role can be changed in the team screen.
 export async function loadCoach(env, telegramUser) {
   const { id, first_name: firstName, username } = telegramUser;
   const isSuper = superAdminIds(env).includes(id);
   let coach = await first(env.DB, 'SELECT * FROM coaches WHERE telegram_id = ?', id);
-  if (!coach && isSuper) {
+  if (!coach && (isSuper || isListedUsername(env, username))) {
     await run(
       env.DB,
       'INSERT OR IGNORE INTO coaches (telegram_id, first_name, username, is_admin, is_manager, created_at) VALUES (?, ?, ?, 1, 1, ?)',
