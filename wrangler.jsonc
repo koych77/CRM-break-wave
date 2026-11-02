@@ -12,7 +12,7 @@
     {
       "binding": "DB",
       "database_name": "crm-break-wave-db",
-      "database_id": "00000000-0000-0000-0000-000000000000",
+      "database_id": "36cbcb9a-eed4-4562-b57e-6542096e0e0d",
       "migrations_dir": "migrations"
     }
   ],

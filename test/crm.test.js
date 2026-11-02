@@ -471,6 +471,35 @@ test('scheduled jobs run once a day and survive repeated ticks', async () => {
   assert.equal(app.telegram.filter((call) => call.payload?.text?.startsWith('Не отмечена')).length, 1);
 });
 
+test('scheduled tick connects the webhook only when it is missing', async () => {
+  const app = createApp();
+  const tick = new Date('2026-11-03T07:30:00Z');
+  await runTick(app.env, tick);
+  const setup = app.telegram.filter((call) => call.method === 'setWebhook');
+  assert.equal(setup.length, 1);
+  assert.equal(setup[0].payload.url, 'https://crm.example.dev/telegram/webhook');
+  assert.equal(setup[0].payload.secret_token, app.env.TELEGRAM_WEBHOOK_SECRET);
+
+  const mocked = globalThis.fetch;
+  globalThis.fetch = async (url, options) => (String(url).endsWith('/getWebhookInfo')
+    ? new Response(JSON.stringify({ ok: true, result: { url: setup[0].payload.url } }))
+    : mocked(url, options));
+  await runTick(app.env, tick);
+  assert.equal(app.telegram.filter((call) => call.method === 'setWebhook').length, 1);
+  globalThis.fetch = mocked;
+});
+
+test('a webhook failure does not stop the scheduled jobs', async () => {
+  const app = createApp();
+  const coachId = await addCoach(app, 305);
+  const parentId = await addParent(app, 306);
+  await addStudent(app, { coachId, parentId, schedule: [{ weekday: 1, time: '18:00' }] });
+  app.failures.getWebhookInfo = 401;
+  await runTick(app.env, new Date('2026-11-03T07:30:00Z'));
+  assert.equal(await rowCount(app, 'SELECT COUNT(*) AS count FROM payments'), 1);
+  assert.equal(app.telegram.filter((call) => call.method === 'setWebhook').length, 0);
+});
+
 test('outbox keeps going when a parent has blocked the bot', async () => {
   const app = createApp();
   const coachId = await addCoach(app, 310);

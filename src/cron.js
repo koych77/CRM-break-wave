@@ -12,7 +12,7 @@ import {
   validTime,
   weekdayOf,
 } from './rules.js';
-import { adminChatIds, enqueue, flushOutbox, openButton } from './telegram.js';
+import { adminChatIds, callTelegram, configureBot, enqueue, flushOutbox, openButton } from './telegram.js';
 
 const DAILY_HOUR = 10;
 const TRAINING_REMINDER_HOUR = 18;
@@ -185,9 +185,22 @@ async function unmarkedReminders(env, now) {
   }
 }
 
+// Connects the bot without a manual request. A failure must not stop the reminders.
+async function ensureWebhook(env) {
+  try {
+    const { url } = await callTelegram(env, 'getWebhookInfo');
+    if (url === `${env.WEBAPP_URL}/telegram/webhook`) return;
+    const info = await configureBot(env);
+    console.log('webhook configured', info.url);
+  } catch (error) {
+    console.error('webhook', error.message);
+  }
+}
+
 export async function runTick(env, date = new Date()) {
   const now = minskNow(date);
   const { DB: db } = env;
+  await ensureWebhook(env);
   await unmarkedReminders(env, now);
   if (now.hour >= DAILY_HOUR) {
     await once(db, `daily:${now.date}`, async () => {
