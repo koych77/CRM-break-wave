@@ -33,11 +33,10 @@
     --font: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Onest', system-ui, 'Segoe UI', sans-serif;
     --hairline: rgba(217, 247, 255, 0.16);
     --chevron: rgba(217, 247, 255, 0.4);
-    /* In px from the top, so the page and a sliding screen draw the glows in the same places. */
+    /* The blurred graffiti wall, darkened so white text on glass stays readable. */
     --bg-glows:
-        radial-gradient(300px 260px at 92% 68px, #0A4F68, transparent 72%),
-        radial-gradient(360px 340px at 0% 340px, #163FB0, transparent 72%),
-        radial-gradient(320px 280px at 95% 690px, #0A4F68, transparent 72%);
+        linear-gradient(180deg, rgba(3, 7, 13, 0.5), rgba(3, 7, 13, 0.62) 45%, rgba(3, 7, 13, 0.72)),
+        url('/assets/bg-graffiti.jpg') center top / auto max(100vh, 178vw) no-repeat;
 }
 
 html,
@@ -49,7 +48,7 @@ body {
     -webkit-text-size-adjust: 100%;
 }
 
-/* The glows stay in place while the content scrolls over them. */
+/* The background stays in place while the content scrolls over it. */
 body::before {
     content: "";
     position: fixed;
@@ -62,7 +61,7 @@ body::before {
     pointer-events: none;
 }
 
-/* A screen sliding over another one carries the page background with it. */
+/* A screen sliding over another one carries the page background with it, sized the same way. */
 .is-covering {
     background: var(--bg-glows), var(--bg-base);
     box-shadow: -12px 0 32px rgba(0, 0, 0, 0.45);
