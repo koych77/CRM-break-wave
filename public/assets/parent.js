@@ -148,7 +148,7 @@ function parentHeading(title) {
     return `
         <div class="pa-head">
             <div class="pa-brand">Break Wave</div>
-            <h1>${escapeHtml(title)}</h1>
+            <h1 data-large-title="${escapeHtml(title)}">${escapeHtml(title)}</h1>
         </div>`;
 }
 
@@ -251,7 +251,7 @@ function parentSubscriptionRow(student) {
                 <span class="pa-rowlink-main">
                     <span class="pa-rowlink-title">Осталось занятий</span>
                     <span class="pa-rowlink-count">${Math.max(student.lessons_remaining, 0)} из ${student.lessons_count}</span>
-                    ${bwIcon('chevron-right', 20)}
+                    ${bwChevron()}
                 </span>
                 ${parentProgress(student)}
                 ${note ? `<span class="${status.css} pa-small">${note}</span>` : ''}
@@ -260,12 +260,12 @@ function parentSubscriptionRow(student) {
     return `
         <button type="button" class="pa-rowlink pa-subscription" data-pa="go-subscription">
             <span class="pa-rowlink-main">
-                ${bwIcon('credit-card')}
+                ${bwTile('credit-card')}
                 <span class="pa-stack">
                     <span class="pa-strong">Абонемент · ${parentLessonsWord(student.lessons_count)}</span>
                     <span class="${status.css} pa-small">${status.text}${status.note ? ` · ${status.note}` : ''}</span>
                 </span>
-                ${bwIcon('chevron-right', 20)}
+                ${bwChevron()}
             </span>
         </button>`;
 }
@@ -320,10 +320,10 @@ function parentHomeRows(student) {
     const available = student.makeups.filter(item => item.status === 'available').length;
     const row = (icon, title, value, tab) => `
         <button type="button" class="pa-list-row" data-pa="open-lessons" data-value="${tab}">
-            ${bwIcon(icon)}
+            ${bwTile(icon)}
             <span class="pa-strong">${title}</span>
             <span class="pa-list-value">${escapeHtml(value)}</span>
-            ${bwIcon('chevron-right', 20)}
+            ${bwChevron()}
         </button>`;
     return `
         <div class="pa-list">
@@ -335,7 +335,7 @@ function parentHomeRows(student) {
 function renderParentHome(student) {
     return `
         <div class="pa-head is-row">
-            <div class="pa-logo">Break Wave</div>
+            <div class="pa-logo" data-large-title="Break Wave">Break Wave</div>
             <div class="pa-segment is-capsule">
                 ${parentData.students.map(item => `
                     <button type="button" data-pa="pick-student" data-id="${item.id}" aria-pressed="${item.id === student.id}">${escapeHtml(item.name.split(' ')[0])}</button>
@@ -391,10 +391,10 @@ function renderParentSubscription(student) {
             ${parentPaymentPanel(student)}
             ${parentExtrasBlock(student)}
             <button type="button" class="pa-list-row pa-list-alone" data-pa="open-lessons" data-value="payments">
-                ${bwIcon('receipt')}
+                ${bwTile('receipt')}
                 <span class="pa-strong">История оплат</span>
                 <span class="pa-list-value"></span>
-                ${bwIcon('chevron-right', 20)}
+                ${bwChevron()}
             </button>
         </div>`;
 }
@@ -489,7 +489,7 @@ function renderParentProfile() {
             <h2 class="pa-section">Родитель</h2>
             <div class="pa-list">
                 <div class="pa-list-row">
-                    ${bwIcon('user')}
+                    ${bwTile('user')}
                     <span class="pa-stack">
                         <span class="pa-strong">${escapeHtml(parent?.full_name)}</span>
                         <span class="pa-muted pa-small">${escapeHtml(parent?.phone)}</span>
@@ -504,10 +504,10 @@ function renderParentProfile() {
                         <span class="st-avatar">${escapeHtml(bwInitials(item.name))}</span>
                         <span class="pa-strong">${escapeHtml(item.name)}</span>
                         <span class="pa-list-value"></span>
-                        ${bwIcon('chevron-right', 20)}
+                        ${bwChevron()}
                     </button>`).join('')}
                 <button type="button" class="pa-list-row pa-list-action" data-pa="add-child">
-                    ${bwIcon('plus')}
+                    ${bwTile('plus')}
                     <span class="pa-strong">Добавить ребёнка</span>
                 </button>
             </div>
@@ -515,7 +515,7 @@ function renderParentProfile() {
             <div class="pa-list">
                 ${parentData.students.map(item => `
                     <button type="button" class="pa-switch" data-pa="toggle-reminder" data-id="${item.id}" aria-pressed="${item.training_reminders_enabled ? 'true' : 'false'}">
-                        ${bwIcon('bell')}
+                        ${bwTile('bell')}
                         <span>${escapeHtml(item.name.split(' ')[0])}</span>
                         <span class="pa-switch-track"></span>
                     </button>`).join('')}
@@ -533,6 +533,7 @@ function parentBar(title, action = 'go-home', subtitle = '') {
                 <h1>${escapeHtml(title)}</h1>
                 ${subtitle ? `<div class="pa-muted pa-small">${escapeHtml(subtitle)}</div>` : ''}
             </div>
+            <span class="pa-bar-end"></span>
         </div>`;
 }
 

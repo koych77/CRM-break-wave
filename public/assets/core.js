@@ -59,6 +59,18 @@ function bwIcon(name, size = 22) {
     return `<svg class="bw-icon" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${BW_ICONS[name]}"></path></svg>`;
 }
 
+// Settings-style rounded square behind a row icon.
+const BW_TILE_TONES = {clock: 'teal', receipt: 'teal', bell: 'teal', users: 'teal', plus: 'teal'};
+
+function bwTile(name) {
+    return `<span class="bw-tile is-${BW_TILE_TONES[name] || 'blue'}">${bwIcon(name, 18)}</span>`;
+}
+
+// The small disclosure chevron at the end of a row that opens another screen.
+function bwChevron() {
+    return '<svg class="bw-chevron" width="8" height="14" viewBox="0 0 8 14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1.5 1.5 6.5 7l-5 5.5"></path></svg>';
+}
+
 // One glowing segment for each lesson of the month, lit while the lesson is still left.
 function bwSegments(left, total) {
     const lit = Math.max(0, Math.min(left, total));
@@ -84,10 +96,33 @@ function syncTelegramBack() {
     else tg.BackButton.hide();
 }
 
+/* --- Navigation bar --- */
+
+// A root screen has a large title; once it scrolls under the top edge a compact bar shows the same title.
+function syncTopBar() {
+    const root = document.documentElement;
+    const bar = document.getElementById('bw-topbar');
+    const title = document.querySelector('#parent-content [data-large-title]');
+    root.classList.toggle('is-scrolled', window.scrollY > 4);
+    if (!bar) return;
+    bar.textContent = title?.dataset.largeTitle || '';
+    const inset = parseFloat(getComputedStyle(root).getPropertyValue('--app-top-inset')) || 0;
+    root.classList.toggle('is-title-off', Boolean(title) && title.getBoundingClientRect().bottom < inset + 44);
+}
+
+let topBarFrame = 0;
+window.addEventListener('scroll', () => {
+    if (topBarFrame) return;
+    topBarFrame = requestAnimationFrame(() => {
+        topBarFrame = 0;
+        syncTopBar();
+    });
+}, {passive: true});
+
 /* --- iOS-style motion --- */
 
 const IOS_EASE = 'cubic-bezier(0.32, 0.72, 0, 1)';
-const IOS_PUSH_MS = 320;
+const IOS_PUSH_MS = 380;
 const IOS_SPINNER = `<svg class="pa-spinner" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true">${
     [...Array(8).keys()].map(step => `<path d="M12 3v4.2" opacity="${(step + 1) / 8}" transform="rotate(${step * 45} 12 12)"></path>`).join('')
 }</svg>`;
@@ -147,21 +182,26 @@ function animateControls(container, before) {
     });
 }
 
-// Screens have no background of their own, so the old one fades out while the new one slides in.
+// iOS push: the new screen slides over the old one, which drifts left and dims.
+// Screens are see-through over the page glow, so the one on top gets that glow as its own background while it moves.
 function slideScreens(container, oldScreen, scrollTop, isPush) {
     const ghost = document.createElement('div');
-    ghost.className = `pa-ghost ${isPush ? 'is-under' : 'is-over'}`;
+    ghost.className = `pa-ghost ${isPush ? 'is-under' : 'is-over is-covering'}`;
     ghost.inert = true;
     ghost.append(oldScreen);
     document.body.append(ghost);
     ghost.scrollTop = scrollTop;
+    if (isPush) container.classList.add('is-covering');
     const options = {duration: IOS_PUSH_MS, easing: IOS_EASE};
-    const behind = [{transform: 'translateX(0)', opacity: 1}, {transform: 'translateX(-24%)', opacity: 0}];
-    const front = [{transform: 'translateX(70%)', opacity: 0}, {transform: 'translateX(0)', opacity: 1}];
+    const behind = [{transform: 'translateX(0)', opacity: 1}, {transform: 'translateX(-30%)', opacity: 0.4}];
+    const front = [{transform: 'translateX(100%)'}, {transform: 'translateX(0)'}];
     const moves = isPush
         ? [container.animate(front, options), ghost.animate(behind, options)]
         : [container.animate([...behind].reverse(), options), ghost.animate([...front].reverse(), options)];
-    afterAnimation(moves[1], () => ghost.remove());
+    afterAnimation(moves[1], () => {
+        ghost.remove();
+        container.classList.remove('is-covering');
+    });
 }
 
 // Paints a screen. Depth sets the direction: deeper slides in from the right, shallower goes back.
@@ -177,6 +217,7 @@ function paintScreen(container, html, key, depth) {
     currentScreen = {key, depth};
     markPending(container);
     syncTelegramBack();
+    syncTopBar();
     if (!motionAllowed()) return;
     if (previous?.key === key) {
         animateControls(container, before);
@@ -230,13 +271,14 @@ function haptic(type, style) {
     else feedback.impactOccurred(style);
 }
 
+// A banner that drops in from the top, like an iOS notification.
 function showNotification(message, type = 'info') {
     document.querySelectorAll('.notification').forEach(item => item.remove());
     const toast = document.createElement('div');
     toast.className = `notification ${type}`;
     toast.setAttribute('role', type === 'error' ? 'alert' : 'status');
-    if (document.querySelector('.pa-nav, .pa-foot')) toast.classList.add('is-raised');
-    toast.textContent = message;
+    toast.innerHTML = `<span class="notification-icon">${bwIcon(type === 'error' ? 'x' : 'check', 16)}</span><span></span>`;
+    toast.lastChild.textContent = message;
     document.body.appendChild(toast);
     haptic('notification', type === 'error' ? 'error' : 'success');
     setTimeout(() => {
@@ -244,8 +286,8 @@ function showNotification(message, type = 'info') {
             toast.remove();
             return;
         }
-        const fade = toast.animate([{opacity: 1}, {opacity: 0, transform: 'translateY(8px) scale(0.98)'}], {duration: 200, easing: 'ease-in', fill: 'forwards'});
-        afterAnimation(fade, () => toast.remove());
+        const hide = toast.animate([{opacity: 1}, {opacity: 0, transform: 'translateY(-24px) scale(0.96)'}], {duration: 240, easing: 'ease-in', fill: 'forwards'});
+        afterAnimation(hide, () => toast.remove());
     }, 3000);
 }
 
@@ -264,6 +306,7 @@ function renderScreenState(container, message, {retry, loading} = {}) {
     currentScreen = null;
     currentHtml = null;
     tg?.BackButton?.hide?.();
+    document.documentElement.classList.remove('is-title-off');
     container.innerHTML = `
         <div class="pa">
             <div class="pa-stack pa-center pa-state">

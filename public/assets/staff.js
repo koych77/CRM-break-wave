@@ -163,7 +163,7 @@ function staffBar(title, subtitle = '', extra = '') {
                 <h1>${escapeHtml(title)}</h1>
                 ${subtitle ? `<div class="pa-muted pa-small">${escapeHtml(subtitle)}</div>` : ''}
             </div>
-            ${extra}
+            <span class="pa-bar-end">${extra}</span>
         </div>`;
 }
 
@@ -172,7 +172,7 @@ function staffHeading(title, subtitle = '', extra = '') {
         <div class="st-title">
             <div>
                 <div class="pa-brand">Break Wave</div>
-                <h1>${escapeHtml(title)}</h1>
+                <h1 data-large-title="${escapeHtml(title)}">${escapeHtml(title)}</h1>
                 ${subtitle ? `<div class="pa-muted">${escapeHtml(subtitle)}</div>` : ''}
             </div>
             ${extra}
@@ -219,7 +219,7 @@ function staffTodayHtml() {
             <span class="pa-list-value">${staffSessionBadge(session, isFuture)}</span>`;
         return session.cancelled
             ? `<div class="pa-list-row">${inner}</div>`
-            : `<button type="button" class="pa-list-row" data-st="open-session" data-value="${escapeHtml(session.key)}">${inner}${bwIcon('chevron-right', 20)}</button>`;
+            : `<button type="button" class="pa-list-row" data-st="open-session" data-value="${escapeHtml(session.key)}">${inner}${bwChevron()}</button>`;
     }).join('');
     const arrows = `
         <div class="st-arrows">
@@ -363,7 +363,7 @@ function staffStudentHtml() {
             <h2 class="pa-section">Родитель</h2>
             <div class="pa-list">
                 <div class="pa-list-row">
-                    ${bwIcon('user')}
+                    ${bwTile('user')}
                     <span class="pa-stack">
                         <span class="pa-strong">${escapeHtml(item.parent_name || 'Не привязан')}</span>
                         ${item.parent_phone ? `<span class="pa-muted pa-small">${escapeHtml(item.parent_phone)}</span>` : ''}
@@ -385,7 +385,7 @@ function staffStudentHtml() {
             <div class="pa-list">${history || '<div class="pa-list-row pa-muted">Занятий пока нет</div>'}</div>
             ${staff.me.is_admin ? `
                 <details class="pa-more">
-                    <summary>${bwIcon('sliders', 20)}Дополнительно</summary>
+                    <summary>${bwTile('sliders')}Дополнительно</summary>
                     ${item.invoice ? `
                         <div class="pa-group">
                             <label class="pa-stack">
@@ -504,7 +504,7 @@ function staffRequestRow(kind, item, title, subtitle, label) {
                 <span class="pa-muted pa-small">${escapeHtml(subtitle)}</span>
             </span>
             <span class="pa-list-value"></span>
-            ${bwIcon('chevron-right', 20)}
+            ${bwChevron()}
         </button>`;
 }
 
@@ -665,7 +665,7 @@ function staffMoneyHtml() {
             <div class="pa-hero-time">${data.collected}&nbsp;Br</div>
             <div class="pa-row"><span class="pa-muted">Ещё ждём</span><span class="pa-strong">${data.waiting} Br</span></div>
         </section>
-        ${data.in_review ? `<button type="button" class="pa-list-row pa-list-alone" data-st="tab" data-value="requests">${bwIcon('clock')}<span class="pa-strong">На проверке: ${data.in_review}</span><span class="pa-list-value"></span>${bwIcon('chevron-right', 20)}</button>` : ''}
+        ${data.in_review ? `<button type="button" class="pa-list-row pa-list-alone" data-st="tab" data-value="requests">${bwTile('clock')}<span class="pa-strong">На проверке: ${data.in_review}</span><span class="pa-list-value"></span>${bwChevron()}</button>` : ''}
         <h2 class="pa-section">Не оплатили</h2>
         ${rows || '<div class="st-empty">Все оплатили</div>'}`;
 }
@@ -676,7 +676,7 @@ function staffResourceList(title, items, kind, placeholder) {
         <div class="pa-list">
             ${items.map(item => `
                 <div class="pa-list-row">
-                    ${bwIcon(kind === 'locations' ? 'building' : 'users')}
+                    ${bwTile(kind === 'locations' ? 'building' : 'users')}
                     <span>${escapeHtml(item.name)}</span>
                     <span class="pa-list-value"></span>
                     <button type="button" class="pa-remove" data-st="remove-resource" data-kind="${kind}" data-value="${item.id}" aria-label="Убрать ${escapeHtml(item.name)}">${bwIcon('x', 20)}</button>

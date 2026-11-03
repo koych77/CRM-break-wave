@@ -29,13 +29,22 @@
     --radius-lg: 26px;
     --radius-xl: 34px;
     --ease-out: cubic-bezier(0.32, 0.72, 0, 1);
+    --spring: cubic-bezier(0.3, 1.45, 0.5, 1);
+    --font: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Onest', system-ui, 'Segoe UI', sans-serif;
+    --hairline: rgba(217, 247, 255, 0.16);
+    --chevron: rgba(217, 247, 255, 0.4);
+    /* In px from the top, so the page and a sliding screen draw the glows in the same places. */
+    --bg-glows:
+        radial-gradient(300px 260px at 92% 68px, #0A4F68, transparent 72%),
+        radial-gradient(360px 340px at 0% 340px, #163FB0, transparent 72%),
+        radial-gradient(320px 280px at 95% 690px, #0A4F68, transparent 72%);
 }
 
 html,
 body {
     margin: 0;
     background: var(--bg-base);
-    font-family: 'Onest', system-ui, -apple-system, 'Segoe UI', sans-serif;
+    font-family: var(--font);
     -webkit-font-smoothing: antialiased;
     -webkit-text-size-adjust: 100%;
 }
@@ -49,11 +58,14 @@ body::before {
     right: 0;
     bottom: 0;
     left: 0;
-    background:
-        radial-gradient(300px 260px at 92% 8%, #0A4F68, transparent 72%),
-        radial-gradient(360px 340px at 0% 40%, #163FB0, transparent 72%),
-        radial-gradient(320px 280px at 95% 82%, #0A4F68, transparent 72%);
+    background: var(--bg-glows);
     pointer-events: none;
+}
+
+/* A screen sliding over another one carries the page background with it. */
+.is-covering {
+    background: var(--bg-glows), var(--bg-base);
+    box-shadow: -12px 0 32px rgba(0, 0, 0, 0.45);
 }
 
 /* A sliding screen must not make the page scroll sideways. */
@@ -78,9 +90,29 @@ main {
     flex-direction: column;
     min-height: var(--tg-viewport-stable-height, 100vh);
     color: var(--text-primary);
-    font-size: 15px;
+    font-size: 17px;
     line-height: 22px;
     overflow-wrap: break-word;
+    /* Like a native app: no text selection or callout on a long press, except in fields. */
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-touch-callout: none;
+}
+
+.pa input,
+.pa textarea {
+    -webkit-user-select: text;
+    user-select: text;
+}
+
+/* Numbers keep their width, so times and sums do not jump. */
+.pa-hero-time,
+.pa-pay-sum,
+.pa-rowlink-count,
+.st-session-time,
+.pa-big,
+.pa-list-value {
+    font-variant-numeric: tabular-nums;
 }
 
 .pa h1,
@@ -116,12 +148,47 @@ main {
     letter-spacing: -0.01em;
 }
 
+/* iOS large title. */
 .pa-head h1,
 .st-title h1 {
-    font-size: 28px;
+    font-size: 34px;
     font-weight: 700;
-    letter-spacing: -0.02em;
-    line-height: 34px;
+    line-height: 41px;
+}
+
+/* The compact title that takes over once the large one scrolls away. */
+#bw-topbar {
+    position: fixed;
+    z-index: 8;
+    top: 0;
+    right: 0;
+    left: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-sizing: border-box;
+    max-width: 480px;
+    height: calc(var(--app-top-inset, 0px) + 44px);
+    margin: 0 auto;
+    padding: var(--app-top-inset, 0px) 60px 0;
+    overflow: hidden;
+    border-bottom: 0.5px solid var(--hairline);
+    background: rgba(8, 16, 28, 0.72);
+    color: var(--text-primary);
+    font-family: var(--font);
+    font-size: 17px;
+    font-weight: 600;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    opacity: 0;
+    pointer-events: none;
+    -webkit-backdrop-filter: blur(20px) saturate(180%);
+    backdrop-filter: blur(20px) saturate(180%);
+    transition: opacity 180ms ease-out;
+}
+
+.is-title-off #bw-topbar {
+    opacity: 1;
 }
 
 .pa-brand {
@@ -131,19 +198,62 @@ main {
     line-height: 18px;
 }
 
+/* iOS navigation bar: back on the left, centred title, an action on the right. */
 .pa-bar {
-    display: flex;
+    position: sticky;
+    z-index: 6;
+    top: 0;
+    display: grid;
+    grid-template-columns: 44px minmax(0, 1fr) 44px;
     align-items: center;
     gap: 4px;
-    min-height: 56px;
-    padding: calc(var(--app-top-inset, 0px) + 6px) var(--gutter) 6px 6px;
+    min-height: calc(var(--app-top-inset, 0px) + 52px);
+    box-sizing: border-box;
+    padding: var(--app-top-inset, 0px) 8px 0;
+    border-bottom: 0.5px solid transparent;
+    text-align: center;
+    transition: background-color 180ms ease-out, border-color 180ms ease-out;
 }
 
-.tg-back .pa-bar {
-    padding-left: var(--gutter);
+.is-scrolled .pa-bar {
+    border-bottom-color: var(--hairline);
+    background: rgba(8, 16, 28, 0.72);
+    -webkit-backdrop-filter: blur(20px) saturate(180%);
+    backdrop-filter: blur(20px) saturate(180%);
 }
 
+/* Telegram shows its own back button; the page keeps the space so the title stays centred. */
 .tg-back .pa-bar .pa-back {
+    visibility: hidden;
+}
+
+.pa-bar h1 {
+    overflow: hidden;
+    font-size: 17px;
+    font-weight: 600;
+    line-height: 22px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.pa-bar > div {
+    min-width: 0;
+}
+
+.pa-bar .pa-small {
+    overflow: hidden;
+    font-size: 12px;
+    line-height: 16px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.pa-bar-end {
+    display: flex;
+    justify-content: flex-end;
+}
+
+.pa-back {
     display: none;
 }
 
@@ -222,12 +332,16 @@ main {
     gap: 8px;
 }
 
+/* Grouped list header, lined up with the text inside the rows. */
 .pa-section {
-    margin-top: 12px !important;
+    margin-top: 14px !important;
+    padding: 0 18px;
     color: var(--text-secondary);
     font-size: 13px;
-    font-weight: 600;
+    font-weight: 400;
+    letter-spacing: 0.02em;
     line-height: 18px;
+    text-transform: uppercase;
 }
 
 .pa-group > .pa-section:first-child {
@@ -280,7 +394,7 @@ main {
 
 .pa-eyebrow {
     color: #D9F7FF;
-    font-size: 15px;
+    font-size: 17px;
     font-weight: 600;
     line-height: 20px;
 }
@@ -292,7 +406,7 @@ main {
 }
 
 .pa-mid {
-    font-size: 17px;
+    font-size: 20px;
     font-weight: 600;
     line-height: 24px;
 }
@@ -314,6 +428,12 @@ main {
 .pa-warn { color: var(--warn-text); font-weight: 500; }
 .pa-danger { color: var(--text-primary); font-weight: 700; }
 
+/* Field captions and errors line up with the text inside the field. */
+label.pa-stack > .pa-label,
+label.pa-stack > .pa-error {
+    padding: 0 14px;
+}
+
 .pa-error {
     color: var(--text-primary);
     font-size: 13px;
@@ -334,17 +454,6 @@ main {
     border-radius: var(--radius-xl);
     background: var(--glass);
     box-shadow: var(--glass-depth);
-}
-
-.pa-hero::before {
-    content: "";
-    position: absolute;
-    top: 6px;
-    right: 90px;
-    left: 18px;
-    height: 34px;
-    border-radius: 50%;
-    background: linear-gradient(180deg, rgba(255, 255, 255, 0.12), transparent);
 }
 
 .pa-hero > * {
@@ -476,25 +585,73 @@ main {
 }
 
 .pa-list-row {
+    position: relative;
     display: flex;
     align-items: center;
     gap: 12px;
     box-sizing: border-box;
     width: 100%;
-    min-height: 56px;
-    padding: 8px 12px 8px 18px;
+    min-height: 52px;
+    padding: 8px 16px 8px 18px;
     border: 0;
     background: transparent;
     color: var(--text-primary);
-    font-size: 15px;
+    font-size: 17px;
     line-height: 22px;
     text-align: left;
 }
 
-.pa-list-row + .pa-list-row,
-.pa-list-row + .pa-switch,
-.pa-switch + .pa-switch {
-    border-top: 1px solid var(--glass-line);
+/* Hairline separators start where the text starts, as in iOS lists. */
+.pa-list-row + .pa-list-row::before,
+.pa-list-row + .pa-switch::before,
+.pa-switch + .pa-switch::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    right: 0;
+    left: 18px;
+    border-top: 0.5px solid var(--hairline);
+}
+
+.pa-list-row:has(> .bw-tile) + .pa-list-row::before,
+.pa-list-row + .pa-list-row:has(> .bw-tile)::before,
+.pa-switch + .pa-switch::before,
+.pa-list-row + .pa-switch::before {
+    left: 60px;
+}
+
+.pa-list-row:has(> .st-avatar) + .pa-list-row::before {
+    left: 70px;
+}
+
+.bw-tile {
+    display: flex;
+    flex: none;
+    align-items: center;
+    justify-content: center;
+    width: 30px;
+    height: 30px;
+    border-radius: 8px;
+    color: #FFFFFF;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.3);
+}
+
+.bw-tile .bw-icon {
+    stroke-width: 2;
+}
+
+.bw-tile.is-blue {
+    background: linear-gradient(160deg, #3B82F6, #1D4ED8);
+}
+
+.bw-tile.is-teal {
+    background: linear-gradient(160deg, #22D3EE, #0891B2);
+}
+
+.bw-chevron {
+    flex: none;
+    margin-left: 4px;
+    color: var(--chevron);
 }
 
 .pa-list-alone {
@@ -504,13 +661,6 @@ main {
     box-shadow: var(--glass-shine);
 }
 
-.pa-list-row > .bw-icon:first-child {
-    color: var(--accent-soft);
-}
-
-.pa-list-row > .bw-icon:last-child {
-    color: var(--text-muted);
-}
 
 .pa-list-value {
     flex: 1 0 auto;
@@ -562,7 +712,7 @@ main {
     background: var(--glass);
     box-shadow: var(--glass-shine);
     color: var(--text-primary);
-    font-size: 15px;
+    font-size: 17px;
     line-height: 22px;
     text-align: left;
 }
@@ -590,13 +740,7 @@ main {
     font-weight: 700;
 }
 
-.pa-rowlink-main > .bw-icon:first-child {
-    color: var(--accent-soft);
-}
 
-.pa-rowlink-main > .bw-icon:last-child {
-    color: var(--text-muted);
-}
 
 /* One glowing segment for each lesson left. */
 .pa-seg {
@@ -659,7 +803,7 @@ main {
     border-radius: 22px;
     background: transparent;
     color: var(--text-secondary);
-    font-size: 14px;
+    font-size: 15px;
     font-weight: 600;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -668,6 +812,7 @@ main {
 .pa-segment button[aria-pressed="true"],
 .pa-segment-thumb {
     background: #FFFFFF;
+    box-shadow: 0 3px 8px rgba(0, 0, 0, 0.18), 0 3px 1px rgba(0, 0, 0, 0.04);
 }
 
 .pa-segment button[aria-pressed="true"] {
@@ -739,9 +884,9 @@ main {
     background: var(--glass-raised);
     box-shadow: var(--glass-shine);
     color: var(--text-primary);
-    font-size: 15px;
-    font-weight: 700;
-    line-height: 20px;
+    font-size: 17px;
+    font-weight: 600;
+    line-height: 22px;
     text-align: center;
     cursor: pointer;
 }
@@ -757,6 +902,7 @@ main {
 .pa-answer {
     gap: 6px;
     padding: 0 6px;
+    font-size: 16px;
     white-space: nowrap;
 }
 
@@ -809,32 +955,46 @@ main {
 
 /* --- Choices --- */
 
+/* A selected option gets a checkmark, as in iOS lists. */
 .pa-choice {
+    position: relative;
     display: flex;
     align-items: center;
-    justify-content: space-between;
     gap: 12px;
     box-sizing: border-box;
     width: 100%;
     min-height: 56px;
-    padding: 8px 18px;
+    padding: 8px 52px 8px 18px;
     border: 1px solid var(--glass-edge);
     border-radius: var(--radius-md);
     background: var(--glass);
     box-shadow: var(--glass-shine);
     color: var(--text-primary);
-    font-size: 15px;
+    font-size: 17px;
     text-align: left;
 }
 
 .pa-choice > :last-child:not(:first-child) {
     flex: none;
+    margin-left: auto;
 }
 
 .pa-choice[aria-pressed="true"] {
-    border-color: var(--accent);
-    background: linear-gradient(160deg, rgba(34, 211, 238, 0.3), rgba(34, 211, 238, 0.1));
-    box-shadow: 0 0 20px rgba(34, 211, 238, 0.3);
+    border-color: rgba(34, 211, 238, 0.7);
+    background: linear-gradient(160deg, rgba(34, 211, 238, 0.24), rgba(34, 211, 238, 0.08));
+}
+
+.pa-choice[aria-pressed="true"]::after {
+    content: "";
+    position: absolute;
+    top: 50%;
+    right: 18px;
+    width: 18px;
+    height: 18px;
+    margin-top: -9px;
+    background: var(--accent);
+    -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M5 12.5l4.5 4.5L19 7'/%3E%3C/svg%3E") center / contain no-repeat;
+    mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M5 12.5l4.5 4.5L19 7'/%3E%3C/svg%3E") center / contain no-repeat;
 }
 
 .pa-choice[disabled] {
@@ -919,18 +1079,25 @@ main {
     border-radius: 27px;
     background: transparent;
     color: var(--text-secondary);
-    font-size: 11px;
+    font-size: 10px;
     font-weight: 600;
-    line-height: 14px;
+    line-height: 12px;
+}
+
+.pa-nav .bw-icon {
+    width: 24px;
+    height: 24px;
 }
 
 .pa-nav span {
     white-space: nowrap;
 }
 
+/* The open tab sits in a glass lens, tinted with the accent. */
 .pa-nav button[aria-current="page"] {
-    background: #FFFFFF;
-    color: var(--on-blue);
+    background: rgba(217, 247, 255, 0.16);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.25);
+    color: var(--accent-soft);
 }
 
 .pa-nav .st-badge {
@@ -962,56 +1129,63 @@ main {
     border: 0;
     background: transparent;
     color: var(--text-primary);
-    font-size: 15px;
+    font-size: 17px;
     text-align: left;
 }
 
-.pa-switch > .bw-icon {
-    color: var(--accent-soft);
+.pa-switch {
+    position: relative;
 }
 
-.pa-switch > span:not(.pa-switch-track) {
+.pa-switch > span:not(.pa-switch-track):not(.bw-tile) {
     flex: 1;
     min-width: 0;
 }
 
+/* iOS switch: 51 by 31 with a 27 px knob. */
 .pa-switch-track {
-    display: flex;
+    position: relative;
     flex: none;
-    align-items: center;
     box-sizing: border-box;
-    width: 50px;
-    height: 30px;
-    padding: 3px;
-    border-radius: 15px;
-    background: rgba(217, 247, 255, 0.2);
+    width: 51px;
+    height: 31px;
+    border-radius: 16px;
+    background: rgba(120, 120, 128, 0.32);
+    transition: background-color 250ms ease-out, box-shadow 250ms ease-out;
 }
 
 .pa-switch-track::after {
     content: "";
-    width: 24px;
-    height: 24px;
-    border-radius: 12px;
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 27px;
+    height: 27px;
+    border-radius: 14px;
     background: #FFFFFF;
-    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
+    box-shadow: 0 3px 8px rgba(0, 0, 0, 0.15), 0 3px 1px rgba(0, 0, 0, 0.06);
+    transition: transform 320ms var(--spring);
 }
 
 .pa-switch[aria-pressed="true"] .pa-switch-track {
-    justify-content: flex-end;
-    background: var(--accent-fill);
-    box-shadow: 0 0 14px rgba(34, 211, 238, 0.5);
+    background: var(--accent);
+    box-shadow: 0 0 14px rgba(34, 211, 238, 0.45);
+}
+
+.pa-switch[aria-pressed="true"] .pa-switch-track::after {
+    transform: translateX(20px);
 }
 
 .pa-switch.is-turning-on .pa-switch-track::after {
-    animation: pa-knob-on 180ms var(--ease-out);
+    animation: pa-knob-on 320ms var(--spring);
 }
 
 .pa-switch.is-turning-off .pa-switch-track::after {
-    animation: pa-knob-off 180ms var(--ease-out);
+    animation: pa-knob-off 320ms var(--spring);
 }
 
 @keyframes pa-knob-on {
-    from { transform: translateX(-20px); }
+    from { transform: translateX(0); }
 }
 
 @keyframes pa-knob-off {
@@ -1030,8 +1204,9 @@ main {
     border-radius: var(--radius-md);
     background-color: rgba(217, 247, 255, 0.1);
     color: var(--text-primary);
+    caret-color: var(--accent);
     font-family: inherit;
-    font-size: 16px;
+    font-size: 17px;
 }
 
 .pa-field::placeholder {
@@ -1227,38 +1402,63 @@ a.st-icon-btn {
     text-decoration: none;
 }
 
+/* A banner from the top, like an iOS notification. */
 .notification {
     position: fixed;
     z-index: 20;
+    top: calc(var(--app-top-inset, 0px) + 10px);
     right: var(--gutter);
-    bottom: calc(env(safe-area-inset-bottom, 0px) + 24px);
     left: var(--gutter);
+    display: flex;
+    align-items: center;
+    gap: 10px;
     max-width: 448px;
     margin: 0 auto;
-    padding: 12px 18px;
-    border-radius: 22px;
-    background: #FFFFFF;
-    color: #04143A;
+    padding: 12px 18px 12px 12px;
+    border: 1px solid var(--glass-edge);
+    border-radius: 26px;
+    background: rgba(16, 30, 50, 0.86);
+    color: var(--text-primary);
+    font-family: var(--font);
     font-size: 15px;
     font-weight: 600;
     line-height: 20px;
-    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
-    animation: pa-toast-in 240ms var(--ease-out);
+    box-shadow: var(--glass-shine), 0 14px 40px rgba(0, 0, 0, 0.5);
+    -webkit-backdrop-filter: blur(24px) saturate(180%);
+    backdrop-filter: blur(24px) saturate(180%);
+    animation: pa-toast-in 520ms var(--spring);
 }
 
-.notification.is-raised {
-    bottom: calc(env(safe-area-inset-bottom, 0px) + 92px);
+.notification-icon {
+    display: flex;
+    flex: none;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    background: var(--accent);
+    color: var(--accent-text);
+}
+
+.notification-icon .bw-icon {
+    stroke-width: 2.6;
+}
+
+.notification.error .notification-icon {
+    background: #FFFFFF;
+    color: var(--blue-strong);
 }
 
 .notification.error {
-    background: var(--blue-strong);
-    color: #FFFFFF;
+    border-color: rgba(255, 255, 255, 0.5);
+    background: rgba(29, 78, 216, 0.92);
 }
 
 @keyframes pa-toast-in {
     from {
         opacity: 0;
-        transform: translateY(16px);
+        transform: translateY(-40px) scale(0.94);
     }
 }
 
@@ -1303,16 +1503,17 @@ a.st-icon-btn {
     touch-action: manipulation;
     -webkit-user-select: none;
     user-select: none;
-    transition: opacity 100ms ease-out, transform 100ms ease-out, background-color 100ms ease-out;
+    /* Released controls spring back a little past their size, as in iOS. */
+    transition: opacity 200ms ease-out, transform 420ms var(--spring), background-color 200ms ease-out;
 }
 
 .pa-btn:not([disabled]):active,
 .pa-choice:not([disabled]):active,
 .pa-rowlink:active,
 .st-icon-btn:active {
-    opacity: 0.8;
-    transform: scale(0.98);
-    transition-duration: 0ms;
+    opacity: 0.85;
+    transform: scale(0.96);
+    transition-duration: 90ms;
 }
 
 button.pa-list-row:not([disabled]):active,

@@ -121,11 +121,12 @@ function paintRegistration() {
     paintScreen(document.getElementById('parent-content'), `
         <div class="pa">
             <div class="pa-bar">
-                ${hasBack ? `<button type="button" class="pa-back" data-reg="back" data-back aria-label="Назад">${bwIcon('chevron-left', 26)}</button>` : ''}
+                ${hasBack ? `<button type="button" class="pa-back" data-reg="back" data-back aria-label="Назад">${bwIcon('chevron-left', 26)}</button>` : '<span class="pa-back"></span>'}
                 <div>
                     <h1>${registration.canGoBack ? 'Новый ребёнок' : 'Анкета Break Wave'}</h1>
                     <div class="pa-muted pa-small">Шаг ${registration.step + 1} из ${steps.length}</div>
                 </div>
+                <span class="pa-bar-end"></span>
             </div>
             <div class="pa-steps" aria-hidden="true">
                 ${steps.map((_, index) => `<span class="${index <= registration.step ? 'is-done' : ''}"></span>`).join('')}
