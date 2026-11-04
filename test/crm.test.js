@@ -1005,3 +1005,14 @@ test('the migration turns first months that cost a whole subscription into that 
   assert.equal((await studentRow(app, full)).tariff_code, '12');
   assert.equal((await studentRow(app, short)).tariff_code, null);
 });
+
+test('the month editor knows how many trainings have already passed by the schedule', async () => {
+  const app = createApp();
+  const coachId = await addCoach(app, 734);
+  // A training every day at midnight: every day of the month so far, today included, has passed.
+  const schedule = [0, 1, 2, 3, 4, 5, 6].map((weekday) => ({ weekday, time: '00:00' }));
+  const id = await addStudent(app, { coachId, startDate: monthBounds(today()).start, schedule });
+  const { data } = await app.post(`/api/staff/students/${id}`, 734);
+  assert.equal(data.student.trainings_passed, Number(today().slice(8, 10)));
+  assert.equal(data.student.lessons_used, 0);
+});

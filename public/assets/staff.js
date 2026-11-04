@@ -453,7 +453,11 @@ function staffMonthHtml() {
             </div>
             <div class="pa-group">
                 <h2 class="pa-section">Занятия</h2>
-                ${number('Осталось занятий', 'left', `Занятия считаются с 1 числа. В боте за этот месяц уже отмечено: ${item.lessons_used}. Если ребёнок занимался до бота, уменьшите остаток.`)}
+                ${number('Осталось занятий', 'left', `Занятия считаются с 1 числа. По расписанию с 1 числа уже прошло тренировок: ${item.trainings_passed}, в боте отмечено: ${item.lessons_used}.`)}
+                ${item.trainings_passed > item.lessons_used ? `
+                    <button type="button" class="pa-btn" data-st="month-write-off">
+                        Списать прошедшие с 1 числа (${item.trainings_passed}): останется ${Math.max(0, Number(month.lessons) - item.trainings_passed)}
+                    </button>` : ''}
             </div>
         </div>
         <div class="pa-foot">
@@ -502,6 +506,15 @@ function staffFormHtml() {
             ${field('Телефон ученика', 'phone', 'tel')}
             ${form.parent_linked ? '' : field('Телефон родителя', 'parent_phone', 'tel')}
             <h2 class="pa-section">Занятия</h2>
+            ${staff.me.is_admin && form.id && staff.student?.invoice ? `
+                <button type="button" class="pa-list-row pa-list-alone" data-st="open-month">
+                    ${bwTile('credit-card')}
+                    <span class="pa-stack">
+                        <span class="pa-strong">Остаток и оплата</span>
+                        <span class="pa-muted pa-small">Осталось ${staff.student.lessons_remaining} из ${staff.student.lessons_count}. Изменить остаток, абонемент и оплату</span>
+                    </span>
+                    ${bwChevron()}
+                </button>` : ''}
             ${staff.me.is_admin ? `
                 <label class="pa-stack">
                     <span class="pa-label">Тренер</span>
@@ -902,6 +915,10 @@ const STAFF_ACTIONS = {
         else leave();
     },
     'open-month': () => {
+        if (staff.screen === 'form' && staff.formDirty) {
+            showNotification('Сначала сохраните изменения ученика', 'error');
+            return;
+        }
         const {invoice} = staff.student;
         staff.month = {
             tariff: invoice.is_partial ? 'partial' : String(invoice.tariff_code),
@@ -925,6 +942,11 @@ const STAFF_ACTIONS = {
             amount: code === 'partial' ? lessons * 40 : bwTariffs[code].price,
             left: Math.max(0, lessons - staff.student.lessons_used),
         });
+        staffPaint();
+    },
+    // Takes every training that has passed by the schedule as used, marked in the bot or not.
+    'month-write-off': () => {
+        staff.month.left = Math.max(0, Number(staff.month.lessons) - staff.student.trainings_passed);
         staffPaint();
     },
     'month-paid': target => {

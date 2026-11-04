@@ -16,6 +16,8 @@ import {
 import { ApiError, optionalInt, positiveInt, text } from './http.js';
 import {
   LOW_LESSONS,
+  addDays,
+  countTrainings,
   coveringTariff,
   formatDate,
   invoiceStatus,
@@ -303,6 +305,7 @@ export async function studentDetail(ctx) {
       lessons_count: balance.total,
       lessons_remaining: balance.left,
       lessons_used: balance.marked,
+      trainings_passed: trainingsPassed(schedule, student.training_start_date),
       lessons_over: balance.over,
       tariff_code: student.tariff_code,
       adjustment: invoice?.adjustment ?? 0,
@@ -332,6 +335,17 @@ export async function studentDetail(ctx) {
       history,
     },
   };
+}
+
+// Trainings of this month that have already taken place by the schedule, counted from the 1st like the subscription.
+// Children who trained before the bot have them unmarked, so this tells the admin how many to write off.
+function trainingsPassed(schedule, startDate) {
+  const now = minskNow();
+  const { start: from } = monthBounds(now.date);
+  if (startDate && startDate > now.date) return 0;
+  const before = from < now.date ? countTrainings(schedule, from, addDays(now.date, -1)) : 0;
+  const today = schedule.filter((row) => row.weekday === weekdayOf(now.date) && row.time <= now.time).length;
+  return before + today;
 }
 
 function parseStaffSchedule(rows) {
