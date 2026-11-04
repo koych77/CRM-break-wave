@@ -2,6 +2,7 @@ import { coachOptions, loadActor, safeEqual } from './auth.js';
 import { handleUpdate } from './bot.js';
 import { runTick } from './cron.js';
 import { first } from './db.js';
+import { TARIFFS } from './rules.js';
 import { ApiError, json } from './http.js';
 import * as parent from './parent.js';
 import * as staff from './staff.js';
@@ -28,6 +29,7 @@ const routes = [
   ['/api/staff/students/:id', staff.studentDetail],
   ['/api/staff/students/:id/update', staff.updateStudent],
   ['/api/staff/students/:id/adjust', staff.adjustLessons],
+  ['/api/admin/students/:id/month', staff.editMonth],
   ['/api/staff/students/:id/delete', staff.deleteStudent],
   ['/api/staff/requests', staff.requests],
   ['/api/staff/registrations/:id/review', staff.reviewRegistration],
@@ -46,9 +48,12 @@ const routes = [
   ['/api/admin/groups/:id/delete', staff.groupHandlers.remove],
 ].map(([path, handler]) => [new RegExp(`^${path.replace(':id', '(?<id>\\d+)')}$`), handler]);
 
+const MONTHLY_TARIFFS = Object.fromEntries(['8', '12', '16'].map((code) => [code, TARIFFS[code]]));
+
 async function authenticate(env, body) {
   const actor = await loadActor(env, body.initData);
   const coaches = coachOptions(env).map((item) => ({ name: item.name, username: item.username }));
+  const tariffs = MONTHLY_TARIFFS;
   if (actor.coach) {
     const { coach } = actor;
     return {
@@ -56,13 +61,14 @@ async function authenticate(env, body) {
       coach_id: coach.id,
       first_name: coach.first_name,
       is_admin: coach.can_admin,
+      tariffs,
     };
   }
   if (actor.parent) {
-    return { role: 'parent', parent_id: actor.parent.id, first_name: actor.parent.full_name, coach_options: coaches };
+    return { role: 'parent', parent_id: actor.parent.id, first_name: actor.parent.full_name, coach_options: coaches, tariffs };
   }
   // Anyone new opens the family form, whichever button brought them here.
-  return { role: 'guest', first_name: actor.user.first_name || '', coach_options: coaches };
+  return { role: 'guest', first_name: actor.user.first_name || '', coach_options: coaches, tariffs };
 }
 
 async function handleApi(request, env, ctx, pathname) {

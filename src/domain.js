@@ -11,7 +11,7 @@ import {
   makeupExpiry,
   minskNow,
   monthBounds,
-  partialPrice,
+  firstMonth,
   tariffForSchedule,
 } from './rules.js';
 
@@ -40,17 +40,19 @@ export async function ensureInvoice(db, student, date) {
     start,
   );
   const schedule = await all(db, 'SELECT weekday FROM schedules WHERE student_id = ?', student.id);
-  let code = previous && !previous.is_partial && isMonthlyTariff(previous.tariff_code)
-    ? previous.tariff_code
-    : tariffForSchedule(schedule.length);
+  // The chosen subscription comes first, then last month's, then one that fits the schedule.
+  let code = tariffForSchedule(schedule.length);
+  if (previous && !previous.is_partial && isMonthlyTariff(previous.tariff_code)) code = previous.tariff_code;
+  if (isMonthlyTariff(student.tariff_code)) code = String(student.tariff_code);
   let { price: amount, lessons } = tariffOf(code);
   let isPartial = 0;
   let due = startDate && startDate > dueDate(start) && startDate <= end ? startDate : dueDate(start);
   if (!previous && startDate && startDate > start && schedule.length) {
-    lessons = countTrainings(schedule, startDate, end);
-    if (!lessons) return null;
-    ({ code, amount } = partialPrice(lessons));
-    isPartial = 1;
+    const left = countTrainings(schedule, startDate, end);
+    if (!left) return null;
+    const month = firstMonth(left, code);
+    ({ amount, lessons } = month);
+    isPartial = month.partial ? 1 : 0;
     due = firstTrainingDate(schedule, startDate, end);
   }
   await run(
@@ -122,7 +124,7 @@ export async function refreshAttended(db, studentId, date) {
 // The balance of one calendar month: lessons bought for it minus lessons used in it.
 export async function balancesFor(db, studentIds, date) {
   const result = new Map(studentIds.map((id) => [id, {
-    total: 0, used: 0, left: 0, over: 0, paid: false, hasInvoice: false,
+    total: 0, used: 0, marked: 0, taken: 0, left: 0, over: 0, paid: false, hasInvoice: false,
   }]));
   if (!studentIds.length) return result;
   const { start, end } = monthBounds(date);
@@ -137,7 +139,9 @@ export async function balancesFor(db, studentIds, date) {
     const balance = result.get(payment.student_id);
     if (payment.kind === 'subscription') {
       balance.hasInvoice = true;
-      balance.total += payment.lessons_count + payment.adjustment;
+      // A negative correction is lessons already used (say, before the bot); a positive one adds lessons.
+      balance.total += payment.lessons_count + Math.max(payment.adjustment, 0);
+      balance.taken += Math.max(-payment.adjustment, 0);
     } else if (payment.status === 'paid') {
       balance.total += payment.lessons_count;
     }
@@ -153,8 +157,9 @@ export async function balancesFor(db, studentIds, date) {
     end,
     ...studentIds,
   );
-  for (const row of used) result.get(row.student_id).used = row.count;
+  for (const row of used) result.get(row.student_id).marked = row.count;
   for (const balance of result.values()) {
+    balance.used = balance.marked + balance.taken;
     balance.left = Math.max(balance.total - balance.used, 0);
     balance.over = Math.max(balance.used - balance.total, 0);
   }

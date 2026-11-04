@@ -106,10 +106,18 @@ export function firstTrainingDate(schedule, from, to) {
   return null;
 }
 
-// A child who starts mid-month pays for the trainings left, never more than a subscription that covers them.
-export function partialPrice(lessons) {
-  const code = MONTHLY_TARIFFS.find((item) => TARIFFS[item].lessons >= lessons) ?? MONTHLY_TARIFFS[MONTHLY_TARIFFS.length - 1];
-  return { code, amount: Math.min(lessons * TARIFFS.single.price, TARIFFS[code].price) };
+// A child who starts mid-month pays 40 Br for each training left. When that is not cheaper than the
+// chosen subscription, the month is simply that subscription, with all its lessons counted from the 1st.
+export function firstMonth(lessons, code) {
+  const tariff = TARIFFS[code];
+  const amount = lessons * TARIFFS.single.price;
+  if (amount < tariff.price) return { partial: true, amount, lessons };
+  return { partial: false, amount: tariff.price, lessons: tariff.lessons };
+}
+
+// The smallest subscription that holds this many lessons, used to label a partial month.
+export function coveringTariff(lessons) {
+  return MONTHLY_TARIFFS.find((item) => TARIFFS[item].lessons >= lessons) ?? MONTHLY_TARIFFS[MONTHLY_TARIFFS.length - 1];
 }
 
 // A month without training is not a debt: the invoice simply stays unpaid.

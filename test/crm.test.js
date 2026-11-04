@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { readFileSync } from 'node:fs';
 
 import { runTick } from '../src/cron.js';
 import { balanceOf, closeUnusedMonths, ensureInvoice, markPaid, refreshFirstInvoice, saveAttendance } from '../src/domain.js';
@@ -11,7 +12,7 @@ import {
   makeupExpiry,
   minskNow,
   monthBounds,
-  partialPrice,
+  firstMonth,
   tariffForSchedule,
   weekdayOf,
 } from '../src/rules.js';
@@ -630,20 +631,23 @@ test('a new student gets the subscription that fits the schedule', () => {
   assert.equal(tariffForSchedule(2), '8');
   assert.equal(tariffForSchedule(3), '12');
   assert.equal(tariffForSchedule(5), '16');
-  assert.deepEqual(partialPrice(3), { code: '8', amount: 120 });
-  assert.deepEqual(partialPrice(5), { code: '8', amount: 150 });
-  assert.deepEqual(partialPrice(10), { code: '12', amount: 180 });
+  // Fewer trainings than a subscription is worth are paid one by one; otherwise it is the whole subscription.
+  assert.deepEqual(firstMonth(3, '8'), { partial: true, amount: 120, lessons: 3 });
+  assert.deepEqual(firstMonth(4, '8'), { partial: false, amount: 150, lessons: 8 });
+  assert.deepEqual(firstMonth(11, '12'), { partial: false, amount: 180, lessons: 12 });
+  assert.deepEqual(firstMonth(4, '12'), { partial: true, amount: 160, lessons: 4 });
 });
 
-test('the first month is priced from the start date to the end of the month', async () => {
+test('the first month is the trainings left only when that is cheaper than a subscription', async () => {
   const app = createApp();
   const coachId = await addCoach(app, 710);
   // Mondays and Wednesdays from 18 November 2026: 18, 23, 25, 30.
   const id = await addStudent(app, { coachId, startDate: '2026-11-18', schedule: [{ weekday: 0, time: '18:00' }, { weekday: 2, time: '18:00' }] });
   const student = await studentRow(app, id);
+  // Four trainings at 40 Br would cost more than the 150 Br subscription, so it is the whole subscription.
   const invoice = await ensureInvoice(app.db, student, '2026-11-18');
-  assert.equal(invoice.is_partial, 1);
-  assert.equal(invoice.lessons_count, 4);
+  assert.equal(invoice.is_partial, 0);
+  assert.equal(invoice.lessons_count, 8);
   assert.equal(invoice.amount, 150);
   assert.equal(invoice.due_date, '2026-11-18');
 
@@ -925,4 +929,79 @@ test('outbox keeps going when a parent has blocked the bot', async () => {
   const parent = await app.db.prepare('SELECT bot_blocked_at FROM parents WHERE id = ?').bind(parentId).first();
   assert.ok(parent.bot_blocked_at);
   assert.equal(await rowCount(app, 'SELECT COUNT(*) AS count FROM outbox WHERE sent_at IS NULL'), 0);
+});
+
+test('an admin sets the month: subscription, price, payment and lessons left', async () => {
+  const app = createApp();
+  const coachId = await addCoach(app, 730);
+  // Started yesterday-like: a short first month counted from the start date.
+  const id = await addStudent(app, { coachId, startDate: today(), schedule: [{ weekday: 0, time: '18:00' }] });
+  const edit = (body, user = SUPER_ADMIN) => app.post(`/api/admin/students/${id}/month`, user, body);
+
+  assert.equal((await edit({ tariff_code: '12', amount: 180, paid: true, lessons_left: 9 }, 730)).status, 403);
+  assert.equal((await edit({ tariff_code: '9', amount: 180 })).data.error, 'invalid_tariff');
+  assert.equal((await edit({ tariff_code: '12', amount: -5 })).data.error, 'invalid_amount');
+
+  assert.equal((await edit({ tariff_code: '12', amount: 180, paid: true, lessons_left: 9 })).status, 200);
+  const invoice = await ensureInvoice(app.db, await studentRow(app, id), today());
+  assert.equal(invoice.is_partial, 0);
+  assert.equal(invoice.lessons_count, 12);
+  assert.equal(invoice.amount, 180);
+  assert.equal(invoice.status, 'paid');
+  assert.equal((await balanceOf(app.db, id, today())).left, 9);
+  // Lessons used before the bot count as used: the subscription still shows all 12.
+  assert.equal((await balanceOf(app.db, id, today())).total, 12);
+  assert.equal((await studentRow(app, id)).tariff_code, '12');
+
+  // A partial month with its own lesson count, and taking a payment back.
+  assert.equal((await edit({ tariff_code: 'partial', lessons: 3, amount: 120, paid: false, lessons_left: 3 })).status, 200);
+  const partial = await ensureInvoice(app.db, await studentRow(app, id), today());
+  assert.equal(partial.is_partial, 1);
+  assert.equal(partial.lessons_count, 3);
+  assert.equal(partial.status, 'pending');
+  assert.equal((await balanceOf(app.db, id, today())).left, 3);
+  // The chosen full subscription stays for the next months.
+  assert.equal((await studentRow(app, id)).tariff_code, '12');
+});
+
+test('parents choose a subscription in the form and it becomes the child subscription', async () => {
+  const app = createApp();
+  await addCoach(app, 731);
+  const parent = { full_name: 'Анна Иванова', phone: '+375291112233' };
+  const child = { name: 'Лев Иванов', nickname: 'Лёва', birthday: '2018-03-04', schedule: [{ weekday: 1, time: '18:00' }] };
+  assert.equal((await app.post('/api/parent/register', 732, { parent, children: [{ ...child, tariff: '9' }] })).data.error, 'invalid_tariff');
+  assert.equal((await app.post('/api/parent/register', 732, { parent, children: [{ ...child, tariff: '16' }] })).status, 200);
+  const { data } = await app.post('/api/staff/requests', 731);
+  assert.equal(data.registrations[0].preferred_tariff, '16');
+  const approved = await app.post(`/api/staff/registrations/${data.registrations[0].id}/review`, 731, {
+    decision: 'approve',
+    start_date: monthBounds(today()).start,
+  });
+  const student = await studentRow(app, approved.data.student_id);
+  assert.equal(student.tariff_code, '16');
+  const invoice = await ensureInvoice(app.db, student, today());
+  assert.equal(invoice.tariff_code, '16');
+  assert.equal(invoice.lessons_count, 16);
+  assert.equal(invoice.amount, 200);
+});
+
+test('the migration turns first months that cost a whole subscription into that subscription', async () => {
+  const app = createApp();
+  const coachId = await addCoach(app, 733);
+  const full = await addStudent(app, { coachId });
+  const short = await addStudent(app, { coachId });
+  const insertPayment = (studentId, amount, lessons, code) => app.db.prepare(
+    `INSERT INTO payments (student_id, coach_id, kind, amount, lessons_count, tariff_code, is_partial, status, period_start, period_end, due_date, created_at)
+     VALUES (?, ?, 'subscription', ?, ?, ?, 1, 'paid', '2026-11-01', '2026-11-30', '2026-11-05', '2026-11-03')`,
+  ).bind(studentId, coachId, amount, lessons, code).run();
+  await insertPayment(full, 180, 11, '12');
+  await insertPayment(short, 80, 2, '8');
+  const sql = readFileSync(new URL('../migrations/0005_tariff_choice.sql', import.meta.url), 'utf8').replace(/^--.*$/gm, '');
+  for (const statement of sql.split(';').map((part) => part.trim()).filter((part) => part.startsWith('UPDATE'))) {
+    await app.db.prepare(statement).run();
+  }
+  const rows = await app.db.prepare('SELECT student_id, is_partial, lessons_count, amount, status FROM payments ORDER BY student_id').all();
+  assert.deepEqual(rows.results.map((row) => [row.is_partial, row.lessons_count, row.amount, row.status]), [[0, 12, 180, 'paid'], [1, 2, 80, 'paid']]);
+  assert.equal((await studentRow(app, full)).tariff_code, '12');
+  assert.equal((await studentRow(app, short)).tariff_code, null);
 });

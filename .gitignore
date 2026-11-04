@@ -118,3 +118,6 @@ node_modules/
 .wrangler/
 .dev.vars
 .claude/launch.json
+
+# Database backups hold personal data and stay on this computer
+backups/

@@ -295,7 +295,16 @@ export async function register(ctx) {
     if (options.length && !options.some((item) => item.username === child.coach)) {
       throw new ApiError(400, 'child_coach_required', 'Выберите тренера');
     }
-    return { name, nickname, coach: options.length ? child.coach : null, birthday: child.birthday, phone: text(child.phone, 50) || null, schedule: parseScheduleRows(child.schedule) };
+    if (child.tariff && !isMonthlyTariff(child.tariff)) throw new ApiError(400, 'invalid_tariff', 'Выберите абонемент');
+    return {
+      name,
+      nickname,
+      coach: options.length ? child.coach : null,
+      tariff: child.tariff ? String(child.tariff) : null,
+      birthday: child.birthday,
+      phone: text(child.phone, 50) || null,
+      schedule: parseScheduleRows(child.schedule),
+    };
   });
 
   const parent = await first(
@@ -320,12 +329,14 @@ export async function register(ctx) {
   for (const child of parsed) {
     await insert(
       db,
-      `INSERT INTO registration_requests (parent_id, child_name, child_nickname, preferred_coach, child_birthday, child_phone, proposed_schedule, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO registration_requests
+         (parent_id, child_name, child_nickname, preferred_coach, preferred_tariff, child_birthday, child_phone, proposed_schedule, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       parent.id,
       child.name,
       child.nickname,
       child.coach,
+      child.tariff,
       child.birthday,
       child.phone,
       JSON.stringify(child.schedule),
@@ -409,6 +420,7 @@ export async function chooseTariff(ctx) {
     tariff.lessons,
     invoice.id,
   );
+  await run(db, 'UPDATE students SET tariff_code = ? WHERE id = ?', String(body.tariff_code), student.id);
   return { success: true };
 }
 

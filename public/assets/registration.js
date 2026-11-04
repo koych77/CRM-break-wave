@@ -12,7 +12,7 @@ const registration = {
 };
 
 function newRegistrationChild() {
-    return {name: '', nickname: '', coach: '', birthday: '', schedule: [{weekday: 1, time: '18:00'}]};
+    return {name: '', nickname: '', coach: '', tariff: '', birthday: '', birthdayText: '', schedule: [{weekday: 1, time: '18:00'}]};
 }
 
 function renderRegistration({existingParent = null} = {}) {
@@ -62,7 +62,7 @@ function registrationChildStep() {
         <h2 class="pa-step-title">Расскажите о ребёнке</h2>
         ${registrationField('Имя и фамилия', 'name', `<input class="pa-field" autocomplete="off" data-reg-child="${index}" data-field="name" value="${escapeHtml(child.name)}">`)}
         ${registrationField('Никнейм', 'nickname', `<input class="pa-field" autocomplete="off" maxlength="50" data-reg-child="${index}" data-field="nickname" value="${escapeHtml(child.nickname)}">`)}
-        ${registrationField('Дата рождения', 'birthday', `<input class="pa-field ${child.birthday ? '' : 'is-empty'}" type="date" max="${registrationToday()}" data-reg-child="${index}" data-field="birthday" value="${escapeHtml(child.birthday)}">`)}`;
+        ${registrationField('Дата рождения', 'birthday', bwDateField(`data-reg-child="${index}" data-field="birthday"`, child.birthday, child.birthdayText))}`;
 }
 
 function registrationPlanStep() {
@@ -78,6 +78,18 @@ function registrationPlanStep() {
                 ${coachOptions.map(option => `<option value="${escapeHtml(option.username)}" ${option.username === child.coach ? 'selected' : ''}>${escapeHtml(option.name)}</option>`).join('')}
             </select>`)
         : '';
+    // The subscription that fits the chosen days is offered until the parent picks one.
+    const tariff = child.tariff || bwSuggestTariff(child.schedule.length);
+    const tariffs = Object.keys(bwTariffs).length ? `
+        <div class="pa-group">
+            <span class="pa-label">Абонемент на месяц</span>
+            ${Object.entries(bwTariffs).map(([code, item]) => `
+                <button type="button" class="pa-choice" data-reg="pick-tariff" data-child="${index}" data-value="${code}" aria-pressed="${code === tariff}">
+                    <span>${escapeHtml(item.label)}</span>
+                    <span class="pa-strong">${item.price} Br</span>
+                </button>`).join('')}
+            <span class="pa-label">Занятия считаются с 1 числа месяца. Если ребёнок начнёт позже, первый месяц посчитают по 40 Br за занятие, но не дороже абонемента.</span>
+        </div>` : '';
     const added = registration.children.length > 1
         ? `
             <h2 class="pa-section">Дети в анкете</h2>
@@ -106,6 +118,7 @@ function registrationPlanStep() {
             <button type="button" class="pa-btn" data-reg="add-row" data-child="${index}">${bwIcon('plus', 20)}Добавить день</button>
             ${registration.errors.schedule ? `<span class="pa-error">${escapeHtml(registration.errors.schedule)}</span>` : ''}
         </div>
+        ${tariffs}
         ${added}
         <button type="button" class="pa-btn" data-reg="add-child">${bwIcon('users', 20)}Добавить ещё ребёнка</button>`;
 }
@@ -152,7 +165,9 @@ function registrationStepErrors(kind) {
     if (kind === 'child') {
         if (child.name.trim().length < 2) errors.name = 'Укажите имя ребёнка';
         if (!child.nickname.trim()) errors.nickname = 'Укажите никнейм ребёнка';
-        if (!child.birthday || child.birthday > registrationToday()) errors.birthday = 'Укажите дату рождения';
+        if (!child.birthday || child.birthday > registrationToday() || child.birthday < '1990-01-01') {
+            errors.birthday = 'Укажите дату рождения полностью, например 15.04.2016';
+        }
     }
     if (kind === 'plan') {
         if (coachOptions.length && !child.coach) errors.coach = 'Выберите тренера';
@@ -203,6 +218,9 @@ const REGISTRATION_ACTIONS = {
         registration.children.splice(Number(target.dataset.child), 1);
         registration.current = registration.children.length - 1;
     },
+    'pick-tariff': target => {
+        registration.children[Number(target.dataset.child)].tariff = target.dataset.value;
+    },
     'add-row': target => registration.children[Number(target.dataset.child)].schedule.push({weekday: 1, time: '18:00'}),
     'remove-row': target => {
         const rows = registration.children[Number(target.dataset.child)].schedule;
@@ -221,7 +239,10 @@ async function submitRegistration() {
     try {
         await apiPost('/api/parent/register', {
             parent: {full_name: registration.parentName, phone: registration.parentPhone},
-            children: registration.children,
+            children: registration.children.map(({birthdayText: _text, ...child}) => ({
+                ...child,
+                tariff: child.tariff || bwSuggestTariff(child.schedule.length),
+            })),
         });
         registration.children = [];
         registration.canGoBack = false;
@@ -251,8 +272,13 @@ document.addEventListener('input', event => {
     if (target.dataset.regParent) {
         registration[target.dataset.regParent] = target.value;
     } else if (target.dataset.regChild !== undefined) {
-        registration.children[Number(target.dataset.regChild)][target.dataset.field] = target.value;
-        if (target.type === 'date') target.classList.toggle('is-empty', !target.value);
+        const child = registration.children[Number(target.dataset.regChild)];
+        if (target.dataset.dateMask !== undefined) {
+            child.birthdayText = target.value;
+            child.birthday = bwParseDate(target.value);
+        } else {
+            child[target.dataset.field] = target.value;
+        }
     } else if (target.dataset.regRow !== undefined) {
         const row = registration.children[Number(target.dataset.child)].schedule[Number(target.dataset.regRow)];
         row[target.dataset.field] = target.dataset.field === 'weekday' ? Number(target.value) : target.value;

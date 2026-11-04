@@ -16,6 +16,7 @@ import {
 import { ApiError, optionalInt, positiveInt, text } from './http.js';
 import {
   LOW_LESSONS,
+  coveringTariff,
   formatDate,
   invoiceStatus,
   isMonthlyTariff,
@@ -301,7 +302,9 @@ export async function studentDetail(ctx) {
       coach_id: student.coach_id,
       lessons_count: balance.total,
       lessons_remaining: balance.left,
+      lessons_used: balance.marked,
       lessons_over: balance.over,
+      tariff_code: student.tariff_code,
       adjustment: invoice?.adjustment ?? 0,
       training_start_date: student.training_start_date,
       parent_name: parent?.full_name ?? null,
@@ -313,6 +316,9 @@ export async function studentDetail(ctx) {
         status: invoiceStatus(invoice, today),
         tariff_code: invoice.tariff_code,
         is_partial: Boolean(invoice.is_partial),
+        lessons_count: invoice.lessons_count,
+        stored_status: invoice.status,
+        period_start: invoice.period_start,
         due_date: invoice.due_date,
       } : null,
       schedule: schedule.map((row) => ({
@@ -369,9 +375,10 @@ async function resolveCoachId(ctx, coach, requested) {
   return target.id;
 }
 
-// Staff choose the month's subscription only while it is unpaid and not a partial first month.
+// The chosen subscription is kept for the next months; the current month follows it only while unpaid.
 async function applyTariff(db, student, code) {
   if (!code) return;
+  await run(db, 'UPDATE students SET tariff_code = ? WHERE id = ?', code, student.id);
   const today = minskNow().date;
   const invoice = await ensureInvoice(db, student, today);
   if (!invoice || invoice.is_partial || !['pending', 'rejected'].includes(invoice.status)) return;
@@ -433,6 +440,55 @@ export async function updateStudent(ctx) {
   }
   await applyTariff(ctx.db, updated, fields.tariff_code);
   await audit(ctx.db, ctx.actor.user.id, 'student_updated', 'student', student.id);
+  return { success: true };
+}
+
+// The admin's direct edit of the current month: subscription, price, payment and lessons left.
+// It is for setting up children who trained before the bot and for correcting mistakes.
+export async function editMonth(ctx) {
+  const coach = requireAdmin(ctx.actor);
+  const { db, body } = ctx;
+  const student = await first(db, 'SELECT * FROM students WHERE id = ? AND deleted_at IS NULL', positiveInt(ctx.params.id));
+  if (!student) throw new ApiError(404, 'student_not_found', 'Ученик не найден');
+  const today = minskNow().date;
+  const invoice = await ensureInvoice(db, student, today);
+  if (!invoice) throw new ApiError(409, 'no_invoice', 'В этом месяце занятий нет');
+  const isPartial = body.tariff_code === 'partial';
+  if (!isPartial && !isMonthlyTariff(body.tariff_code)) throw new ApiError(400, 'invalid_tariff', 'Выберите абонемент');
+  const lessons = isPartial ? Number(body.lessons) : tariffOf(body.tariff_code).lessons;
+  if (!Number.isInteger(lessons) || lessons < 1 || lessons > 31) throw new ApiError(400, 'invalid_lessons', 'Укажите число занятий от 1 до 31');
+  const amount = Number(body.amount);
+  if (!Number.isInteger(amount) || amount < 0 || amount > 2000) throw new ApiError(400, 'invalid_amount', 'Укажите сумму в рублях');
+  const left = body.lessons_left === '' || body.lessons_left == null ? null : Number(body.lessons_left);
+  if (left !== null && (!Number.isInteger(left) || left < 0 || left > 31)) throw new ApiError(400, 'invalid_left', 'Укажите, сколько занятий осталось');
+  const code = isPartial ? coveringTariff(lessons) : String(body.tariff_code);
+
+  await run(
+    db,
+    'UPDATE payments SET tariff_code = ?, lessons_count = ?, is_partial = ?, amount = ? WHERE id = ?',
+    code,
+    lessons,
+    isPartial ? 1 : 0,
+    amount,
+    invoice.id,
+  );
+  if (!isPartial) await run(db, 'UPDATE students SET tariff_code = ? WHERE id = ?', code, student.id);
+  if (body.paid === true && !['paid', 'written_off'].includes(invoice.status)) {
+    await run(db, `UPDATE payments SET method = COALESCE(method, 'cash') WHERE id = ?`, invoice.id);
+    await markPaid(db, { ...invoice, amount }, student, coach.id, coach.id);
+  } else if (body.paid === false && invoice.status === 'paid') {
+    await run(db, `UPDATE payments SET status = 'pending', paid_at = NULL WHERE id = ?`, invoice.id);
+  }
+  // Lessons left are stored as a correction on top of what the bot counts from attendance.
+  if (left !== null) {
+    const balance = await balanceOf(db, student.id, today);
+    if (balance.left !== left) await run(db, 'UPDATE payments SET adjustment = adjustment + ? WHERE id = ?', left - balance.left, invoice.id);
+  }
+  await audit(db, ctx.actor.user.id, 'month_edited', 'student', student.id, {
+    month: invoice.period_start,
+    before: { tariff: invoice.tariff_code, lessons: invoice.lessons_count, partial: invoice.is_partial, amount: invoice.amount, status: invoice.status },
+    after: { tariff: code, lessons, partial: isPartial, amount, paid: body.paid, left },
+  });
   return { success: true };
 }
 
@@ -520,6 +576,8 @@ export async function requests(ctx) {
       child_name: item.child_name,
       child_nickname: item.child_nickname,
       child_birthday: item.child_birthday,
+      preferred_tariff: item.preferred_tariff,
+      proposed_days: JSON.parse(item.proposed_schedule).length,
       preferred_coach_name: options.find((option) => sameName(option.username, item.preferred_coach))?.name ?? null,
       preferred_coach_id: accounts.find((account) => sameName(account.username, item.preferred_coach))?.id ?? null,
       parent_name: item.parent_name,
@@ -583,6 +641,8 @@ export async function reviewRegistration(ctx) {
   const proposed = parseScheduleRows(JSON.parse(request.proposed_schedule));
   const schedule = proposed.map((row) => ({ ...row, group_id: groupId, location_id: locationId }));
   const coachId = await resolveCoachId(ctx, coach, optionalInt(body.coach_id));
+  const tariffCode = isMonthlyTariff(body.tariff_code) ? String(body.tariff_code)
+    : isMonthlyTariff(request.preferred_tariff) ? request.preferred_tariff : null;
 
   let studentId = optionalInt(body.link_student_id);
   if (studentId) {
@@ -594,18 +654,20 @@ export async function reviewRegistration(ctx) {
     if (!existing) throw new ApiError(404, 'student_not_found', 'Ученик не найден');
     await run(
       db,
-      'UPDATE students SET parent_id = ?, parent_phone = ?, birthday = COALESCE(birthday, ?), nickname = COALESCE(nickname, ?) WHERE id = ?',
+      `UPDATE students SET parent_id = ?, parent_phone = ?, birthday = COALESCE(birthday, ?), nickname = COALESCE(nickname, ?),
+         tariff_code = COALESCE(?, tariff_code) WHERE id = ?`,
       request.parent_id,
       request.parent_phone,
       request.child_birthday,
       request.child_nickname,
+      tariffCode,
       studentId,
     );
   } else {
     studentId = await insert(
       db,
-      `INSERT INTO students (coach_id, parent_id, name, nickname, phone, parent_phone, birthday, training_start_date, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO students (coach_id, parent_id, name, nickname, phone, parent_phone, birthday, training_start_date, tariff_code, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       coachId,
       request.parent_id,
       request.child_name,
@@ -614,6 +676,7 @@ export async function reviewRegistration(ctx) {
       request.parent_phone,
       request.child_birthday,
       startDate,
+      tariffCode,
       isoNow(),
     );
     await replaceSchedule(db, studentId, schedule);

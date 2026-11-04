@@ -5,6 +5,8 @@ const tg = window.Telegram?.WebApp;
 let initData = tg?.initData || '';
 let parentData = null;
 let coachOptions = [];
+// Monthly subscriptions from the server: {code: {label, lessons, price}}.
+let bwTariffs = {};
 
 function escapeHtml(value) {
     const map = {'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'};
@@ -78,6 +80,53 @@ function bwSegments(left, total) {
         [...Array(total).keys()].map(index => `<i class="${index < lit ? 'on' : ''}"></i>`).join('')
     }</span>`;
 }
+
+// Two trainings a week fit 8 lessons, three fit 12, four and more fit 16: the same rule as on the server.
+function bwSuggestTariff(daysPerWeek) {
+    if (daysPerWeek >= 4) return '16';
+    return daysPerWeek === 3 ? '12' : '8';
+}
+
+function bwLessonsWord(count) {
+    const tens = count % 100;
+    const ones = count % 10;
+    if (tens >= 11 && tens <= 14) return `${count} занятий`;
+    if (ones === 1) return `${count} занятие`;
+    if (ones >= 2 && ones <= 4) return `${count} занятия`;
+    return `${count} занятий`;
+}
+
+/* --- Dates typed as ДД.ММ.ГГГГ --- */
+
+// Typing a date with the number keyboard is quicker than scrolling a picker back through the years.
+function bwDateText(iso) {
+    return iso ? `${iso.slice(8, 10)}.${iso.slice(5, 7)}.${iso.slice(0, 4)}` : '';
+}
+
+function bwParseDate(text) {
+    const match = /^(\d{2})\.(\d{2})\.(\d{4})$/.exec(String(text || ''));
+    if (!match) return '';
+    const iso = `${match[3]}-${match[2]}-${match[1]}`;
+    const date = new Date(`${iso}T00:00:00Z`);
+    return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === iso ? iso : '';
+}
+
+function bwDateField(attributes, iso, text) {
+    return `<input class="pa-field" type="text" inputmode="numeric" autocomplete="off" placeholder="ДД.ММ.ГГГГ" maxlength="10" data-date-mask ${attributes} value="${escapeHtml(text ?? bwDateText(iso))}">`;
+}
+
+// Runs before the screens' own input handlers, so they always read the formatted value.
+document.addEventListener('input', event => {
+    const field = event.target;
+    if (!field.matches?.('[data-date-mask]')) return;
+    if (event.inputType?.startsWith('delete')) {
+        field.value = field.value.replace(/[^\d.]/g, '').replace(/\.$/, '');
+        return;
+    }
+    const digits = field.value.replace(/\D/g, '').slice(0, 8);
+    field.value = [digits.slice(0, 2), digits.slice(2, 4), digits.slice(4, 8)].filter(Boolean).join('.')
+        + (digits.length === 2 || digits.length === 4 ? '.' : '');
+});
 
 function bwInitials(name) {
     return String(name || '').trim().split(/\s+/).slice(0, 2).map(word => word[0] || '').join('').toUpperCase();
@@ -349,6 +398,7 @@ async function boot() {
     try {
         const me = await apiPost('/api/auth');
         coachOptions = me.coach_options || [];
+        bwTariffs = me.tariffs || {};
         if (me.role === 'parent') await loadParentContext();
         else if (me.role === 'guest') renderRegistration();
         else await startStaff(me);

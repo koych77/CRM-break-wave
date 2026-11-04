@@ -15,6 +15,7 @@ const staff = {
     studentFilter: 'all',
     student: null,
     form: null,
+    month: null,
     formDirty: false,
     resources: {locations: [], groups: [], coaches: []},
     requests: null,
@@ -135,6 +136,7 @@ function staffPaint() {
         attendance: staffAttendanceHtml,
         student: staffStudentHtml,
         form: staffFormHtml,
+        month: staffMonthHtml,
         request: staffRequestHtml,
     };
     const tabs = {
@@ -149,7 +151,7 @@ function staffPaint() {
     const body = staff.screen === 'root'
         ? `<div class="st-page">${page}</div>${staffNav()}`
         : screens[staff.screen]();
-    const depths = {root: 0, student: 1, attendance: 1, request: 1, form: 2};
+    const depths = {root: 0, student: 1, attendance: 1, request: 1, form: 2, month: 2};
     const key = staff.screen === 'root' ? `tab:${staff.tab}` : staff.screen;
     paintScreen(staffRoot(), `<div class="pa">${body}</div>`, key, depths[staff.screen]);
     if (window.scrollY !== scrollTop) window.scrollTo(0, scrollTop);
@@ -348,7 +350,7 @@ function staffStudentHtml() {
             <section class="pa-hero">
                 ${item.invoice ? `
                     <div class="pa-row">
-                        <span class="pa-eyebrow">${escapeHtml(PARENT_MONTHS_NOMINATIVE[parentDate(item.invoice.due_date).getMonth()])}, ${item.invoice.amount} Br</span>
+                        <span class="pa-eyebrow">${escapeHtml(staffMonthName(item.invoice))} · ${escapeHtml(staffTariffLabel(item.invoice))} · ${item.invoice.amount} Br</span>
                         ${staffBadge(invoice[0], invoice[1])}
                     </div>
                     <div class="pa-hero-count">
@@ -360,6 +362,15 @@ function staffStudentHtml() {
                 <div class="pa-row"><span class="pa-muted">Отработки</span><span class="pa-strong">${item.makeups}</span></div>
                 ${item.lessons_over ? `<div class="pa-warn">Сверх абонемента: ${item.lessons_over}</div>` : ''}
             </section>
+            ${staff.me.is_admin && item.invoice ? `
+                <button type="button" class="pa-list-row pa-list-alone" data-st="open-month">
+                    ${bwTile('credit-card')}
+                    <span class="pa-stack">
+                        <span class="pa-strong">Абонемент и оплата</span>
+                        <span class="pa-muted pa-small">Изменить абонемент, сумму, оплату и остаток</span>
+                    </span>
+                    ${bwChevron()}
+                </button>` : ''}
             <h2 class="pa-section">Родитель</h2>
             <div class="pa-list">
                 <div class="pa-list-row">
@@ -386,20 +397,67 @@ function staffStudentHtml() {
             ${staff.me.is_admin ? `
                 <details class="pa-more">
                     <summary>${bwTile('sliders')}Дополнительно</summary>
-                    ${item.invoice ? `
-                        <div class="pa-group">
-                            <label class="pa-stack">
-                                <span class="pa-label">На сколько изменить остаток: например, 1 или -1${item.adjustment ? `. Сейчас: ${item.adjustment}` : ''}</span>
-                                <input class="pa-field" inputmode="numeric" data-adjust="delta">
-                            </label>
-                            <label class="pa-stack">
-                                <span class="pa-label">Причина</span>
-                                <input class="pa-field" data-adjust="reason">
-                            </label>
-                            <button type="button" class="pa-btn" data-st="adjust-lessons" data-value="${item.id}">Сохранить поправку</button>
-                        </div>` : ''}
                     <button type="button" class="pa-btn st-danger-soft" data-st="delete-student">${bwIcon('trash', 20)}Удалить ученика</button>
                 </details>` : ''}
+        </div>`;
+}
+
+function staffMonthName(invoice) {
+    return PARENT_MONTHS_NOMINATIVE[parentDate(invoice.period_start || invoice.due_date).getMonth()];
+}
+
+function staffTariffLabel(invoice) {
+    return invoice.is_partial ? `неполный, ${bwLessonsWord(invoice.lessons_count)}` : bwTariffs[invoice.tariff_code]?.label || bwLessonsWord(invoice.lessons_count);
+}
+
+function staffTariffOptions(selected, emptyLabel = '') {
+    return (emptyLabel ? `<option value="" ${selected ? '' : 'selected'}>${emptyLabel}</option>` : '')
+        + Object.entries(bwTariffs).map(([code, item]) =>
+            `<option value="${code}" ${String(selected) === code ? 'selected' : ''}>${escapeHtml(item.label)} · ${item.price} Br</option>`).join('');
+}
+
+/* --- Subscription and payment of the month (admins) --- */
+
+function staffMonthHtml() {
+    const item = staff.student;
+    const month = staff.month;
+    const options = [
+        ...Object.entries(bwTariffs).map(([code, tariff]) => [code, tariff.label, `${tariff.price} Br`]),
+        ['partial', 'Неполный месяц', 'по 40 Br'],
+    ];
+    const number = (label, field, hint = '') => `
+        <label class="pa-stack">
+            <span class="pa-label">${label}</span>
+            <input class="pa-field" type="number" inputmode="numeric" min="0" data-month="${field}" value="${escapeHtml(month[field])}">
+            ${hint ? `<span class="pa-label">${hint}</span>` : ''}
+        </label>`;
+    return `
+        ${staffBar('Абонемент и оплата', `${item.name}, ${staffMonthName(item.invoice).toLowerCase()}`)}
+        <div class="pa-body">
+            <div class="pa-group">
+                <h2 class="pa-section">Абонемент</h2>
+                ${options.map(([code, label, price]) => `
+                    <button type="button" class="pa-choice" data-st="month-tariff" data-value="${code}" aria-pressed="${month.tariff === code}">
+                        <span>${label}</span>
+                        <span class="pa-strong">${price}</span>
+                    </button>`).join('')}
+                ${month.tariff === 'partial' ? number('Занятий в этом месяце', 'lessons') : ''}
+            </div>
+            <div class="pa-group">
+                <h2 class="pa-section">Оплата</h2>
+                ${number('Сумма, Br', 'amount')}
+                <div class="pa-segment">
+                    <button type="button" data-st="month-paid" data-value="no" aria-pressed="${!month.paid}">Не оплачен</button>
+                    <button type="button" data-st="month-paid" data-value="yes" aria-pressed="${month.paid}">Оплачен</button>
+                </div>
+            </div>
+            <div class="pa-group">
+                <h2 class="pa-section">Занятия</h2>
+                ${number('Осталось занятий', 'left', `Занятия считаются с 1 числа. В боте за этот месяц уже отмечено: ${item.lessons_used}. Если ребёнок занимался до бота, уменьшите остаток.`)}
+            </div>
+        </div>
+        <div class="pa-foot">
+            <button type="button" class="pa-btn is-primary" data-st="save-month" ${staff.busy ? 'disabled' : ''}>${staff.busy ? 'Сохраняем…' : 'Сохранить'}</button>
         </div>`;
 }
 
@@ -437,7 +495,10 @@ function staffFormHtml() {
             <h2 class="pa-section">Личные данные</h2>
             ${field('Имя и фамилия', 'name')}
             ${field('Никнейм', 'nickname')}
-            ${field('Дата рождения', 'birthday', 'date')}
+            <label class="pa-stack">
+                <span class="pa-label">Дата рождения</span>
+                ${bwDateField('data-st-form="birthday"', form.birthday, form.birthdayText)}
+            </label>
             ${field('Телефон ученика', 'phone', 'tel')}
             ${form.parent_linked ? '' : field('Телефон родителя', 'parent_phone', 'tel')}
             <h2 class="pa-section">Занятия</h2>
@@ -446,14 +507,11 @@ function staffFormHtml() {
                     <span class="pa-label">Тренер</span>
                     <select class="pa-field" data-st-form="coach_id">${staffOptions(staff.resources.coaches, form.coach_id, 'first_name', 'Я')}</select>
                 </label>` : ''}
-            ${form.tariff_locked ? '' : `
-                <label class="pa-stack">
-                    <span class="pa-label">Абонемент на этот месяц</span>
-                    <select class="pa-field" data-st-form="tariff_code">
-                        <option value="" ${form.tariff_code ? '' : 'selected'}>По расписанию</option>
-                        ${['8', '12', '16'].map(code => `<option value="${code}" ${String(form.tariff_code) === code ? 'selected' : ''}>${code} занятий</option>`).join('')}
-                    </select>
-                </label>`}
+            <label class="pa-stack">
+                <span class="pa-label">Абонемент</span>
+                <select class="pa-field" data-st-form="tariff_code">${staffTariffOptions(form.tariff_code, 'По числу дней в расписании')}</select>
+                ${form.tariff_locked ? '<span class="pa-label">Этот месяц уже оплачен или неполный: новый абонемент начнётся со следующего месяца.</span>' : ''}
+            </label>
             ${field('Дата начала занятий', 'training_start_date', 'date')}
             <h2 class="pa-section">Расписание</h2>
             ${rows}
@@ -585,6 +643,10 @@ function staffRegistrationHtml(item) {
                     <select class="pa-field" data-review="location_id">${staffOptions(locations, review.location_id)}</select>
                 </label>
             </div>
+            <label class="pa-stack">
+                <span class="pa-label">Абонемент${item.preferred_tariff ? ', выбрал родитель' : ''}</span>
+                <select class="pa-field" data-review="tariff_code">${staffTariffOptions(review.tariff_code ?? item.preferred_tariff ?? bwSuggestTariff(item.proposed_days))}</select>
+            </label>
             <label class="pa-stack">
                 <span class="pa-label">Начало занятий</span>
                 <input class="pa-field" type="date" data-review="start_date" value="${escapeHtml(review.start_date ?? staff.day?.today ?? '')}">
@@ -775,7 +837,7 @@ function staffStartForm(student) {
             parent_phone: student.parent_phone,
             parent_linked: Boolean(student.parent_name),
             coach_id: student.coach_id,
-            tariff_code: student.invoice?.tariff_code ?? '',
+            tariff_code: student.tariff_code ?? student.invoice?.tariff_code ?? '',
             tariff_locked: Boolean(student.invoice?.is_partial) || !['pending', 'rejected', 'overdue'].includes(student.invoice?.status),
             training_start_date: student.training_start_date,
             notes: student.notes,
@@ -831,8 +893,61 @@ const STAFF_ACTIONS = {
             }
             staffOpenTab(staff.tab);
         };
+        if (staff.screen === 'month') {
+            staff.screen = 'student';
+            staffPaint();
+            return;
+        }
         if (staff.screen === 'form' && staff.formDirty) tgConfirm('Выйти без сохранения? Изменения пропадут.', leave);
         else leave();
+    },
+    'open-month': () => {
+        const {invoice} = staff.student;
+        staff.month = {
+            tariff: invoice.is_partial ? 'partial' : String(invoice.tariff_code),
+            lessons: invoice.lessons_count,
+            amount: invoice.amount,
+            paid: invoice.stored_status === 'paid',
+            left: staff.student.lessons_remaining,
+        };
+        staff.screen = 'month';
+        staffPaint();
+        window.scrollTo(0, 0);
+    },
+    'month-tariff': target => {
+        const code = target.dataset.value;
+        const month = staff.month;
+        const lessons = code === 'partial' ? Number(month.lessons) || 1 : bwTariffs[code].lessons;
+        // A new subscription brings its price and a fresh balance; both stay editable.
+        Object.assign(month, {
+            tariff: code,
+            lessons,
+            amount: code === 'partial' ? lessons * 40 : bwTariffs[code].price,
+            left: Math.max(0, lessons - staff.student.lessons_used),
+        });
+        staffPaint();
+    },
+    'month-paid': target => {
+        staff.month.paid = target.dataset.value === 'yes';
+        staffPaint();
+    },
+    'save-month': () => {
+        const month = staff.month;
+        const id = staff.student.id;
+        return staffRun(async () => {
+            await apiPost(`/api/admin/students/${id}/month`, {
+                tariff_code: month.tariff,
+                lessons: Number(month.lessons),
+                amount: Number(month.amount),
+                paid: month.paid,
+                lessons_left: month.left === '' ? null : Number(month.left),
+            });
+            staff.student = (await apiPost(`/api/staff/students/${id}`)).student;
+            staff.studentCache[id] = staff.student;
+            staff.students = null;
+            staff.screen = 'student';
+            showNotification('Абонемент сохранён');
+        });
     },
     'go-today': () => {
         staff.date = null;
@@ -908,7 +1023,8 @@ const STAFF_ACTIONS = {
         staffPaint();
     },
     'save-student': () => staffRun(async () => {
-        const {id, schedule, parent_linked: _linked, tariff_locked: _locked, ...fields} = staff.form;
+        const {id, schedule, parent_linked: _linked, tariff_locked: _locked, birthdayText, ...fields} = staff.form;
+        if (birthdayText && !fields.birthday) throw new Error('Проверьте дату рождения: ДД.ММ.ГГГГ');
         const path = id ? `/api/staff/students/${id}/update` : '/api/staff/students/create';
         const saved = await apiPost(path, {student: fields, schedule});
         staff.formDirty = false;
@@ -1050,8 +1166,15 @@ document.addEventListener('input', event => {
         staff.reason = target.value;
     } else if (target.dataset.review) {
         staff.review[target.dataset.review] = target.value;
+    } else if (target.dataset.month) {
+        staff.month[target.dataset.month] = target.value;
     } else if (target.dataset.stForm) {
-        staff.form[target.dataset.stForm] = target.value;
+        if (target.dataset.dateMask !== undefined) {
+            staff.form.birthdayText = target.value;
+            staff.form[target.dataset.stForm] = bwParseDate(target.value);
+        } else {
+            staff.form[target.dataset.stForm] = target.value;
+        }
         staff.formDirty = true;
     } else if (target.dataset.stRow !== undefined) {
         staff.formDirty = true;
